@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dotenvy = "0.15"    # Load environment variables from .env file
+ethers = "2" # Ethereum
+serde = { version = "1", features = ["derive"] } # JSON parsing
+reqwest = { version = "0.11", features = ["json"] } # HTTP requests
+tokio = { version = "1", features = ["full"] } # Async runtime
+eyre = "0.6" # East error handling

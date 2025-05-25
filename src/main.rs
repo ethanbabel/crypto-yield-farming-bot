@@ -3,6 +3,8 @@ use ethers::signers::Signer;
 
 use crypto_yield_farming_bot::config;
 use crypto_yield_farming_bot::wallet;
+use crypto_yield_farming_bot::gmx;
+use crypto_yield_farming_bot::abi_fetcher;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -22,6 +24,14 @@ async fn main() -> eyre::Result<()> {
 
     println!("Wallet address: {wallet_address}");
     println!("Chain ID: {chain_id}");
+
+    // Fetch ABIs
+    abi_fetcher::fetch_all_abis(&cfg).await?;
+    println!("✅ All ABIs fetched successfully!");
+
+    // Fetch GMX markets
+    let markets = gmx::get_markets(&cfg).await?;
+    println!("Fetched {} markets from GMX", markets.len());
 
     Ok(())
 }

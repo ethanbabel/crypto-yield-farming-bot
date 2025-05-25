@@ -1,0 +1,25 @@
+[
+  {
+    "inputs": [
+      { "internalType": "address", "name": "dataStore", "type": "address" },
+      { "internalType": "uint256", "name": "start", "type": "uint256" },
+      { "internalType": "uint256", "name": "end", "type": "uint256" }
+    ],
+    "name": "getMarkets",
+    "outputs": [
+      {
+        "components": [
+          { "internalType": "address", "name": "marketToken", "type": "address" },
+          { "internalType": "address", "name": "indexToken", "type": "address" },
+          { "internalType": "address", "name": "longToken", "type": "address" },
+          { "internalType": "address", "name": "shortToken", "type": "address" }
+        ],
+        "internalType": "struct Market.Props[]",
+        "name": "",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

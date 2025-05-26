@@ -56,12 +56,27 @@ async fn main() -> eyre::Result<()> {
     // Fetch token prices from oracles
     token_registry.update_all_oracle_prices(&cfg).await?;
     println!("✅ All oracle prices updated successfully!");
-    // Example: Fetch and print a specific asset token after price update
+    // Example: Fetch and print a specific asset token after price update (single oracle)
     if let Some(weth_token) = token_registry.get_asset_token(&weth_address) {
         println!("Updated WETH Token: {:?}", weth_token);
     } else {
         println!("WETH token not found in registry after price update");
     }
+    // Example: Fetch and print a specific asset token after price update (composite oracle)
+    let wsteth_address: Address = "0x5979D7b546E38E414F7E9822514be443A4800529".parse()?;
+    if let Some(wsteth_token) = token_registry.get_asset_token(&wsteth_address) {
+        println!("Updated WSTETH Token: {:?}", wsteth_token);
+    } else {
+        println!("WSTETH token not found in registry after price update");
+    }
+    // Example: Fetch and print a specific asset token after price update (no oracle)
+    let bonk_address: Address = "0x1FD10E767187A92f0AB2ABDEEF4505e319cA06B2".parse()?;
+    if let Some(bonk_token) = token_registry.get_asset_token(&bonk_address) {
+        println!("Updated BONK token: {:?}", bonk_token);
+    } else {
+        println!("BONK token not found in registry after price update");
+    }
+
 
     Ok(())
 }

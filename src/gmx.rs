@@ -11,6 +11,19 @@ pub struct MarketProps {
     pub short_token: Address,
 }
 
+#[derive(Debug, Clone)]
+pub struct PriceProps { // Prices in GMX are represented as int256s with 30 decimals
+    pub min: U256,
+    pub max: U256,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketPrices {
+    pub index_token_price: PriceProps,
+    pub long_token_price: PriceProps,
+    pub short_token_price: PriceProps,
+}
+
 abigen!(
     Reader,
     "./abis/Reader.json"
@@ -36,5 +49,6 @@ pub async fn get_markets(config: &Config) -> Result<Vec<MarketProps>> {
         })
         .collect();
 
-        Ok(markets)
+    Ok(markets)
 }
+

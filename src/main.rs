@@ -6,7 +6,7 @@ use crypto_yield_farming_bot::config;
 use crypto_yield_farming_bot::wallet;
 use crypto_yield_farming_bot::gmx;
 use crypto_yield_farming_bot::abi_fetcher;
-use crypto_yield_farming_bot::token_registry::TokenRegistry;
+use crypto_yield_farming_bot::token;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -39,7 +39,7 @@ async fn main() -> eyre::Result<()> {
     println!("Fetched {} markets from GMX", markets.len());
 
     // Initialize token registry
-    let mut token_registry = TokenRegistry::new();
+    let mut token_registry = token::TokenRegistry::new();
     // Load tokens from file
     token_registry.load_from_file("tokens/asset_token_data.json")?;
     println!("Loaded {} asset tokens to registry", token_registry.num_asset_tokens());

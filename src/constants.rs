@@ -8,3 +8,7 @@ pub const GMX_READER_ADDRESS_MAINNET: &str = "0x0537C767cDAC0726c76Bb89e92904fe2
 
 pub const GMX_DATASTORE_ADDRESS_SEPOLIA: &str = "0xB558f529F97a405178E2437737F97Bb10eFadAfE";
 pub const GMX_READER_ADDRESS_SEPOLIA: &str = "0xb317837966A69ffB533048208F06e8aa0D98eC47";
+
+//GMX REST API
+pub const GMX_API_PRICES_ENDPOINT: &str = "https://arbitrum-api.gmxinfra.io/prices/tickers";
+pub const GMX_PRICE_DECIMALS: u8 = 30; // GMX prices are returned with 30 decimals

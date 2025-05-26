@@ -510,10 +510,12 @@ dependencies = [
  "dotenvy",
  "ethers",
  "eyre",
+ "futures",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

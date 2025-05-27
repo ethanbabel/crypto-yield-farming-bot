@@ -7,8 +7,9 @@ use futures::future::join_all;
 use crate::oracle::Oracle;
 use crate::constants::{GMX_API_PRICES_ENDPOINT, GMX_PRICE_DECIMALS};
 use crate::config::Config;
+use crate::gmx_structs::PriceProps;
 
-use ethers::types::Address;
+use ethers::types::{Address, U256};
 use eyre::Result;
 use serde_json::Value;
 use reqwest::Client;
@@ -20,16 +21,27 @@ pub struct AssetToken {
     pub decimals: u8,
     pub is_synthetic: bool,
     pub oracle: Option<Oracle>,
-    pub last_min_price: Option<f64>,
-    pub last_max_price: Option<f64>,
+    pub last_min_price: Option<U256>,
+    pub last_max_price: Option<U256>,
+    pub last_min_price_usd: Option<f64>,
+    pub last_max_price_usd: Option<f64>,
+}
+
+impl AssetToken {
+    pub fn price_props(&self) -> Option<PriceProps> {
+        Some(PriceProps {
+            min: self.last_min_price?,
+            max: self.last_max_price?,
+        })
+    }
 }
 
 #[derive(Debug)]
-pub struct TokenRegistry {
+pub struct AssetTokenRegistry {
     asset_tokens: HashMap<Address, AssetToken>,
 }
 
-impl TokenRegistry {
+impl AssetTokenRegistry {
     pub fn new() -> Self {
         Self {
             asset_tokens: HashMap::new(),
@@ -42,6 +54,10 @@ impl TokenRegistry {
 
     pub fn num_asset_tokens(&self) -> usize {
         self.asset_tokens.len()
+    }
+
+    pub fn asset_tokens(&self) -> impl Iterator<Item = &AssetToken> {
+        self.asset_tokens.values()
     }
 
     pub fn load_from_file(&mut self, path: &str) -> Result<()> {
@@ -78,6 +94,8 @@ impl TokenRegistry {
                 oracle,
                 last_min_price: None,
                 last_max_price: None,
+                last_min_price_usd: None,
+                last_max_price_usd: None,
             };
 
             self.asset_tokens.insert(address, asset_token);
@@ -98,13 +116,22 @@ impl TokenRegistry {
                         let min_raw = entry["minPrice"].as_str().unwrap_or("0");
                         let max_raw = entry["maxPrice"].as_str().unwrap_or("0");
 
-                        let min_price: f64 = min_raw.parse::<f64>().unwrap_or(0.0) / 10f64.powi(GMX_PRICE_DECIMALS as i32);
-                        let max_price: f64 = max_raw.parse::<f64>().unwrap_or(0.0) / 10f64.powi(GMX_PRICE_DECIMALS as i32);
+                        // Get raw prices as U256
+                        let min_price: U256 = min_raw.parse::<U256>().unwrap_or(U256::zero());
+                        let max_price: U256 = max_raw.parse::<U256>().unwrap_or(U256::zero());
+
+                        // Store raw prices
+                        token.last_min_price = Some(min_price);
+                        token.last_max_price = Some(max_price);
+                        
+                        // Convert raw prices to f64 and adjust for GMX price decimals
+                        let min_price_usd: f64 = min_raw.parse::<f64>().unwrap_or(0.0) / 10f64.powi(GMX_PRICE_DECIMALS as i32);
+                        let max_price_usd: f64 = max_raw.parse::<f64>().unwrap_or(0.0) / 10f64.powi(GMX_PRICE_DECIMALS as i32);
 
                         // Adjust using token decimals
                         let adjustment = 10f64.powi(token.decimals as i32);
-                        token.last_min_price = Some(min_price * adjustment);
-                        token.last_max_price = Some(max_price * adjustment);
+                        token.last_min_price_usd = Some(min_price_usd * adjustment);
+                        token.last_max_price_usd = Some(max_price_usd * adjustment);
                     }
                 }
             }

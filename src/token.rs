@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
+use std::time::Instant;
 
 use futures::future::join_all;
 
@@ -26,6 +27,7 @@ pub struct AssetToken {
     pub last_max_price: Option<U256>,
     pub last_min_price_usd: Option<f64>,
     pub last_max_price_usd: Option<f64>,
+    pub updated_at: Option<Instant>, // Timestamp of last price update
 }
 
 impl AssetToken {
@@ -122,6 +124,7 @@ impl AssetTokenRegistry {
                 last_max_price: None,
                 last_min_price_usd: None,
                 last_max_price_usd: None,
+                updated_at: None,
             };
 
             self.asset_tokens.insert(address, asset_token);
@@ -164,6 +167,9 @@ impl AssetTokenRegistry {
                         let adjustment = 10f64.powi(token.decimals as i32);
                         token.last_min_price_usd = Some(min_price_usd * adjustment);
                         token.last_max_price_usd = Some(max_price_usd * adjustment);
+
+                        // Update the timestamp of the last price update
+                        token.updated_at = Some(Instant::now());
                     }
                 }
             }

@@ -1,5 +1,7 @@
 use ethers::prelude::*;
 use eyre::Result;
+use std::time::Instant;
+
 use crate::config::Config;
 
 // ABI for Chainlink AggregatorV3Interface
@@ -22,6 +24,7 @@ pub struct OracleFeed {
 pub struct Oracle {
     pub feeds: Vec<OracleFeed>,         // Ordered list of feeds (e.g., [wstETH/ETH, ETH/USD])
     pub price: Option<f64>,             // Final computed USD price
+    pub updated_at: Option<Instant>,    // Timestamp of last price update
 }
 
 impl Oracle {
@@ -29,6 +32,7 @@ impl Oracle {
         Self {
             feeds: vec![OracleFeed { aggregator }],
             price: None,
+            updated_at: None,
         }
     }
 
@@ -36,6 +40,7 @@ impl Oracle {
         Self {
             feeds: feeds.into_iter().map(|a| OracleFeed { aggregator: a }).collect(),
             price: None,
+            updated_at: None,
         }
     }
 
@@ -60,6 +65,7 @@ impl Oracle {
         }
 
         self.price = Some(final_price);
+        self.updated_at = Some(Instant::now());
         Ok(())
     }
 }

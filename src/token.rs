@@ -17,7 +17,8 @@ use reqwest::Client;
 #[derive(Debug, Clone)]
 pub struct AssetToken {
     pub symbol: String,
-    pub address: Address,
+    pub address: Address,   // If mode=prod this is mainnet address, if mode=test this is testnet address
+    pub mainnet_address: Option<Address>, // If mode=prod this is the mainnet address, if mode=test this is None
     pub decimals: u8,
     pub is_synthetic: bool,
     pub oracle: Option<Oracle>,
@@ -39,17 +40,24 @@ impl AssetToken {
 #[derive(Debug)]
 pub struct AssetTokenRegistry {
     asset_tokens: HashMap<Address, AssetToken>,
+    mode: String, // "prod" or "test"
 }
 
 impl AssetTokenRegistry {
-    pub fn new() -> Self {
+    pub fn new(config: &Config) -> Self {
         Self {
             asset_tokens: HashMap::new(),
+            mode: config.mode.clone(),
         }
     }
 
     pub fn get_asset_token(&self, address: &Address) -> Option<&AssetToken> {
         self.asset_tokens.get(address)
+    }
+
+    // Internal helper function for mode=test to get token by mainnet address
+    fn get_asset_token_by_mainnet_address(&mut self, mainnet_address: &Address) -> Option<&mut AssetToken> {
+        self.asset_tokens.values_mut().find(|token| token.mainnet_address.as_ref() == Some(mainnet_address))
     }
 
     pub fn num_asset_tokens(&self) -> usize {
@@ -60,7 +68,13 @@ impl AssetTokenRegistry {
         self.asset_tokens.values()
     }
 
-    pub fn load_from_file(&mut self, path: &str) -> Result<()> {
+    pub fn load_from_file(&mut self) -> Result<()> {
+        // Set token data file path based on mode
+        let path = match self.mode.as_str() {
+            "test" => "tokens/testnet_asset_token_data.json".to_string(),
+            "prod" => "tokens/asset_token_data.json".to_string(),
+            _ => panic!("Invalid MODE"),
+        };
         let file_content = fs::read_to_string(path)?;
         let json_data: Value = serde_json::from_str(&file_content)?;
 
@@ -68,9 +82,20 @@ impl AssetTokenRegistry {
 
         for token in tokens.as_array().unwrap_or(&vec![]) {
             let symbol = token["symbol"].as_str().expect("Token must have a symbol").to_string();
-            let address = Address::from_str(token["address"].as_str().unwrap_or(""))?;
-            let decimals = token["decimals"].as_u64().unwrap_or(18) as u8;
+            let decimals = token["decimals"].as_u64().expect("Token must have decimals") as u8;
             let is_synthetic = token.get("synthetic").map_or(false, |v| v.as_bool().unwrap_or(false));
+            
+            // Handle both mainnet and testnet addresses
+            let address = if self.mode == "prod" {
+                Address::from_str(token["address"].as_str().expect("Token must have an address"))?
+            } else {
+                Address::from_str(token["testnetAddress"].as_str().expect("Token must have a testnet address"))?
+            };
+            let mainnet_address = if self.mode == "test" {
+                Some(Address::from_str(token["mainnetAddress"].as_str().expect("Token must have a mainnet address"))?)
+            } else {
+                None
+            };
 
             let oracle = if let Some(addresses) = token.get("oracleAddresses") {
                 let feed_addresses: Vec<Address> = addresses
@@ -89,6 +114,7 @@ impl AssetTokenRegistry {
             let asset_token = AssetToken {
                 symbol,
                 address,
+                mainnet_address,
                 decimals,
                 is_synthetic,
                 oracle,
@@ -112,7 +138,13 @@ impl AssetTokenRegistry {
         for entry in prices.iter() {
             if let Some(address_str) = entry["tokenAddress"].as_str() {
                 if let Ok(address) = Address::from_str(address_str) {
-                    if let Some(token) = self.asset_tokens.get_mut(&address) {
+                    let asset_token = if self.mode == "prod" { 
+                        self.asset_tokens.get_mut(&address)
+                    } else {
+                        // In test mode, we need to find the token by its mainnet address
+                        self.get_asset_token_by_mainnet_address(&address)
+                    };
+                    if let Some(token) = asset_token {
                         let min_raw = entry["minPrice"].as_str().unwrap_or("0");
                         let max_raw = entry["maxPrice"].as_str().unwrap_or("0");
 

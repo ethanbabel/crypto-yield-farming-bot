@@ -1,0 +1,33 @@
+{
+    "tokens": [
+        {
+            "symbol": "ETH",
+            "testnetAddress": "0x980b62da83eff3d4576c647993b0c1d7faf17c73",
+            "mainnetAddress": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+            "decimals": 18,
+            "oracleAddress": "0xd30e2101a97dcbAeBCBC04F14C3f624E67A35165"
+        },
+        {
+            "symbol": "USDC-1",
+            "testnetAddress": "0x3321fd36aeab0d5cdfd26f4a3a93e2d2aaccb99f",
+            "mainnetAddress": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "decimals": 6,
+            "oracleAddress": "0x0153002d20B96532C639313c2d54c3dA09109309"
+        },
+        {
+            "symbol": "BTC",
+            "testnetAddress": "0xf79ce1cf38a09d572b021b4c5548b75a14082f12",
+            "mainnetAddress": "0x47904963fc8b2340414262125aF798B9655E58Cd",
+            "decimals": 8,
+            "synthetic": true,
+            "oracleAddress": "0x56a43EB56Da12C0dc1D972ACb089c06a5dEF8e69"
+        },
+         {
+            "symbol": "USDC-2",
+            "testnetAddress": "0x3253a335e7bffb4790aa4c25c4250d206e9b9773",
+            "mainnetAddress": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "decimals": 6,
+            "oracleAddress": "0x0153002d20B96532C639313c2d54c3dA09109309"
+        }
+    ]
+}

@@ -13,3 +13,4 @@ reqwest = { version = "0.11", features = ["json", "blocking"] } # HTTP client
 serde_json = "1" # Working with JSON
 futures = "0.3" # Async programming utilities
 tracing = "0.1" # Logging, especially for async code
+tracing-subscriber = "0.3" # Subscriber for tracing

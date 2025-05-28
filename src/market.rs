@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::fmt;
 
-use ethers::types::Address;
+use ethers::types::{Address, H160};
 
 use crate::token::{AssetToken, AssetTokenRegistry};
 use crate::gmx_structs::{MarketPrices, MarketProps};
@@ -11,6 +12,18 @@ pub struct Market {
     pub index_token: AssetToken,
     pub long_token: AssetToken,
     pub short_token: AssetToken,
+}
+
+impl fmt::Display for Market {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}/USD [{} - {}]",
+            self.index_token.symbol,
+            self.long_token.symbol,
+            self.short_token.symbol
+        )
+    }
 }
 
 impl Market {
@@ -32,6 +45,7 @@ impl Market {
             short_token_price: self.short_token.price_props()?,
         })
     }
+
 }
 
 pub struct MarketRegistry {
@@ -65,10 +79,13 @@ impl MarketRegistry {
                 };
                 self.markets.insert(props.market_token, market);
             } else {
-                tracing::warn!(
-                    "Skipping market {:?} due to missing tokens in TokenRegistry",
-                    props.market_token
-                );
+                // Index token address is zero for swap markets, safe to ignore for this bot
+                if props.index_token != H160::zero() {
+                    tracing::warn!(
+                        "Missing tokens for market {:?}: index {:?}, long {:?}, short {:?}",
+                        props.market_token, props.index_token, props.long_token, props.short_token
+                    );
+                }
             }
         }
     }
@@ -83,5 +100,11 @@ impl MarketRegistry {
 
     pub fn all_markets(&self) -> impl Iterator<Item = &Market> {
         self.markets.values()
+    }
+
+    pub fn print_markets(&self) {
+        for market in self.all_markets() {
+            println!("{}", market);
+        }
     }
 }

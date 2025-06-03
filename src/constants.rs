@@ -11,4 +11,7 @@ pub const GMX_READER_ADDRESS_SEPOLIA: &str = "0xb317837966A69ffB533048208F06e8aa
 
 //GMX REST API
 pub const GMX_API_PRICES_ENDPOINT: &str = "https://arbitrum-api.gmxinfra.io/prices/tickers";
-pub const GMX_PRICE_DECIMALS: u8 = 30; // GMX prices are returned with 30 decimals
+pub const GMX_SUPPORTED_TOKENS_ENDPOINT: &str = "https://arbitrum-api.gmxinfra.io/tokens";
+
+// GMX Decimals
+pub const GMX_DECIMALS: u8 = 30; // GMX prices are returned with 30 decimals

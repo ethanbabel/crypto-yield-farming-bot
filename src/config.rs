@@ -6,6 +6,7 @@ use ethers::types::Address;
 
 use crate::constants;
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub alchemy_provider: Arc<Provider<Http>>,
     pub wallet_private_key: String,

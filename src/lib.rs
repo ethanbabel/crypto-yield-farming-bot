@@ -7,3 +7,4 @@ pub mod oracle;
 pub mod token;
 pub mod gmx_structs;
 pub mod market;
+pub mod return_calculation_utils;

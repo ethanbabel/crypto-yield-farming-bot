@@ -35,6 +35,9 @@ async fn main() -> eyre::Result<()> {
     // Load tokens from file
     token_registry.load_from_file()?;
     println!("Loaded {} asset tokens to registry", token_registry.num_asset_tokens());
+
+    // Update token registry and token data file with latest supported tokens
+    token_registry.update_tracked_tokens().await?;
     
     // Fetch token prices from GMX
     token_registry.update_all_gmx_prices().await?;
@@ -44,6 +47,12 @@ async fn main() -> eyre::Result<()> {
     token_registry.update_all_oracle_prices(&cfg).await?;
     println!("✅ All oracle prices updated successfully!");
 
+    // Wait until all token prices are fetched before proceeding
+    while !token_registry.all_prices_fetched() {
+        println!("Waiting for all token prices to be fetched...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
     // Fetch GMX markets
     let market_props_vec = gmx::get_markets(&cfg).await?;
     println!("Fetched {} markets from GMX", market_props_vec.len());
@@ -52,16 +61,13 @@ async fn main() -> eyre::Result<()> {
     let mut market_registry = market::MarketRegistry::new();
     market_registry.populate(&market_props_vec, &token_registry);
     println!("Populated market registry with {} markets", market_registry.num_markets());
-    market_registry.print_markets();
-    
-    // Example: Fetch market info and market token price for the first market
-    // let first_market = market_registry.get_market(&market_props_vec[0].market_token).expect("Market not found in registry");
-    // let market_prices = first_market.market_prices().expect("Failed to get market prices");
-    // let market_info = gmx::get_market_info(&cfg, first_market.market_token, market_prices.clone()).await?;
-    // let market_token_price = gmx::get_market_token_price(&cfg, first_market.market_props(), market_prices.clone(), gmx::PnlFactorType::Deposit, true).await?;
-    // println!("Market: {}", first_market);
-    // println!("Market Info: {:#?}", market_info);
-    // println!("Market Token Price: {:#?}", market_token_price);
+
+    // Update all markets with their data and calculate APRs
+    market_registry.update_all_market_data(&cfg).await?;
+    println!("✅ All market data updated successfully! Total Relevant Markets: {}", market_registry.num_relevant_markets());
+    market_registry.calculate_all_aprs();
+    println!("✅ All APRs calculated successfully!");
+    market_registry.print_markets_by_apr_desc();
 
     Ok(())
 }

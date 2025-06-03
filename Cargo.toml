@@ -14,3 +14,5 @@ serde_json = "1" # Working with JSON
 futures = "0.3" # Async programming utilities
 tracing = "0.1" # Logging, especially for async code
 tracing-subscriber = "0.3" # Subscriber for tracing
+rust_decimal = { version = "1.37.1", features = ["macros", "maths"] } # Decimal arithmetic
+

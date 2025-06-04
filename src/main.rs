@@ -1,12 +1,6 @@
-// use ethers::providers::Middleware;
-// use ethers::signers::Signer;
-// use ethers::types::Address;
 use tracing_subscriber::FmtSubscriber;
 
 use crypto_yield_farming_bot::config;
-// use crypto_yield_farming_bot::wallet;
-use crypto_yield_farming_bot::gmx;
-// use crypto_yield_farming_bot::gmx_structs;
 use crypto_yield_farming_bot::abi_fetcher;
 use crypto_yield_farming_bot::token;
 use crypto_yield_farming_bot::market;
@@ -53,13 +47,9 @@ async fn main() -> eyre::Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    // Fetch GMX markets
-    let market_props_vec = gmx::get_markets(&cfg).await?;
-    println!("Fetched {} markets from GMX", market_props_vec.len());
-    
-    // Initialize and populate market registry
+    // Fetch GMX markets and populate market registry
     let mut market_registry = market::MarketRegistry::new();
-    market_registry.populate(&market_props_vec, &token_registry);
+    market_registry.populate(&cfg, &token_registry).await?;
     println!("Populated market registry with {} markets", market_registry.num_markets());
 
     // Update all markets with their data and calculate APRs

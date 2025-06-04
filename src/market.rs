@@ -127,45 +127,72 @@ impl MarketRegistry {
         }
     }
 
-    /// Populate the registry using MarketProps and a reference to the TokenRegistry
-    pub fn populate(
+    /// Insert a market into the registry if it is valid 
+    fn insert_market_if_possible(
         &mut self,
-        market_props_list: &Vec<MarketProps>,
+        props: &MarketProps,
         asset_token_registry: &AssetTokenRegistry,
+        only_if_absent: bool,   // If true, only insert if the market is not already present
     ) {
-        for props in market_props_list {
-            let index = asset_token_registry.get_asset_token(&props.index_token);
-            let long = asset_token_registry.get_asset_token(&props.long_token);
-            let short = asset_token_registry.get_asset_token(&props.short_token);
-
-            if let (Some(index), Some(long), Some(short)) = (index, long, short) {
-                let market = Market {
-                    market_token: props.market_token,
-                    index_token: index.clone(),
-                    long_token: long.clone(),
-                    short_token: short.clone(),
-                    market_info: None,
-                    pool_info_deposit_min: None,
-                    pool_info_deposit_max: None,
-                    pool_info_withdrawal_min: None,
-                    pool_info_withdrawal_max: None,
-                    has_supply: true, // Default to true, can be updated later if needed
-                    current_apr: None,
-                    gm_token_price_min: None,
-                    gm_token_price_max: None,
-                    updated_at: None,
-                };
-                self.markets.insert(props.market_token, market);
-            } else {
-                // Index token address is zero for swap markets, safe to ignore for this bot
-                if props.index_token != H160::zero() {
-                    tracing::warn!(
-                        "Missing tokens for market {:?}: index {:?}, long {:?}, short {:?}",
-                        props.market_token, props.index_token, props.long_token, props.short_token
-                    );
-                }
+        if only_if_absent && self.markets.contains_key(&props.market_token) {
+            return;
+        }
+        let index = asset_token_registry.get_asset_token(&props.index_token);
+        let long = asset_token_registry.get_asset_token(&props.long_token);
+        let short = asset_token_registry.get_asset_token(&props.short_token);
+        if let (Some(index), Some(long), Some(short)) = (index, long, short) {
+            let market = Market {
+                market_token: props.market_token,
+                index_token: index.clone(),
+                long_token: long.clone(),
+                short_token: short.clone(),
+                market_info: None,
+                pool_info_deposit_min: None,
+                pool_info_deposit_max: None,
+                pool_info_withdrawal_min: None,
+                pool_info_withdrawal_max: None,
+                has_supply: true,
+                current_apr: None,
+                gm_token_price_min: None,
+                gm_token_price_max: None,
+                updated_at: None,
+            };
+            self.markets.insert(props.market_token, market);
+        } else {
+            if props.index_token != H160::zero() {
+                tracing::warn!(
+                    "Missing tokens for market {:?}: index {:?}, long {:?}, short {:?}",
+                    props.market_token, props.index_token, props.long_token, props.short_token
+                );
             }
         }
+    }
+
+    /// Populate the registry with markets from GMX
+    pub async fn populate(
+        &mut self,
+        config: &Config,
+        asset_token_registry: &AssetTokenRegistry,
+    ) -> eyre::Result<()> {
+        let market_props_list = gmx::get_markets(config).await?;
+        for props in &market_props_list {
+            self.insert_market_if_possible(props, asset_token_registry, false);
+        }
+        Ok(())
+    }
+
+    /// Repopulate the registry by updating tracked tokens and adding any new markets
+    pub async fn repopulate(
+        &mut self,
+        config: &Config,
+        asset_token_registry: &mut AssetTokenRegistry,
+    ) -> eyre::Result<()> {
+        asset_token_registry.update_tracked_tokens().await?;
+        let market_props_list = gmx::get_markets(config).await?;
+        for props in &market_props_list {
+            self.insert_market_if_possible(props, asset_token_registry, true);
+        }
+        Ok(())
     }
 
     pub fn get_market(&self, market_token: &Address) -> Option<&Market> {

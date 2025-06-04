@@ -10,7 +10,7 @@ use crate::constants;
 pub struct Config {
     pub alchemy_provider: Arc<Provider<Http>>,
     pub wallet_private_key: String,
-    pub mode: String,
+    pub network_mode: String,
     pub chain_id: u64,
     pub gmx_datastore: Address,
     pub gmx_reader: Address,
@@ -23,41 +23,41 @@ impl Config {
         // Load environment variables from .env file
         dotenv().ok();
 
-        // Load mode env var and validate it
-        let mode = env::var("MODE").expect("Missing MODE environment variable");
-        if mode != "test" && mode != "prod" {
-            panic!("MODE must be either 'test' or 'prod'");
+        // Load network mode env var and validate it
+        let network_mode = env::var("NETWORK_MODE").expect("Missing NETWORK_MODE environment variable");
+        if network_mode != "test" && network_mode != "prod" {
+            panic!("NETWORK_MODE must be either 'test' or 'prod'");
         }
         
-        // Load alchemy RPC URL based on mode, create ethers provider, and HTTP client
-        let alchemy_rpc_url = match mode.as_str() {
+        // Load alchemy RPC URL based on network mode, create ethers provider, and HTTP client
+        let alchemy_rpc_url = match network_mode.as_str() {
             "test" => env::var("ALCHEMY_RPC_URL_TEST").expect("Missing ALCHEMY_RPC_URL_TEST"),
             "prod" => env::var("ALCHEMY_RPC_URL_PROD").expect("Missing ALCHEMY_RPC_URL_PROD"),
-            _ => panic!("Invalid MODE"),
+            _ => panic!("Invalid NETWORK_MODE"),
         };
 
         let provider = Provider::<Http>::try_from(alchemy_rpc_url)
             .expect("Failed to create Alchemy provider");
 
-        // Load wallet private key based on mode
-        let wallet_private_key = match mode.as_str() {
+        // Load wallet private key based on network mode
+        let wallet_private_key = match network_mode.as_str() {
             "test" => env::var("WALLET_PRIVATE_KEY_TEST").expect("Missing WALLET_PRIVATE_KEY_TEST"),
             "prod" => env::var("WALLET_PRIVATE_KEY_PROD").expect("Missing WALLET_PRIVATE_KEY_PROD"),
-            _ => panic!("Invalid MODE"),
+            _ => panic!("Invalid NETWORK_MODE"),
         };
 
-        // Load chain ID based on mode
-        let chain_id = match mode.as_str() {
+        // Load chain ID based on network mode
+        let chain_id = match network_mode.as_str() {
             "test" => constants::ARBITRUM_SEPOLIA_CHAIN_ID,
             "prod" => constants::ARBITRUM_MAINNET_CHAIN_ID,
-            _ => panic!("Invalid MODE"),
+            _ => panic!("Invalid NETWORK_MODE"),
         };
 
-        // Load GMX DataStore and Reader addresses based on mode
-        let (gmx_datastore, gmx_reader) = match mode.as_str() {
+        // Load GMX DataStore and Reader addresses based on network mode
+        let (gmx_datastore, gmx_reader) = match network_mode.as_str() {
             "test" => (constants::GMX_DATASTORE_ADDRESS_SEPOLIA, constants::GMX_READER_ADDRESS_SEPOLIA),
             "prod" => (constants::GMX_DATASTORE_ADDRESS_MAINNET, constants::GMX_READER_ADDRESS_MAINNET),
-            _ => panic!("Invalid MODE"),
+            _ => panic!("Invalid NETWORK_MODE"),
         };
 
         // Load Etherscan API key, refetch ABIs flag
@@ -69,7 +69,7 @@ impl Config {
         Config {
             alchemy_provider: Arc::new(provider),
             wallet_private_key,
-            mode,
+            network_mode,
             chain_id,
             gmx_datastore: gmx_datastore.parse().expect("Invalid GMX DataStore address"),
             gmx_reader: gmx_reader.parse().expect("Invalid GMX Reader address"),

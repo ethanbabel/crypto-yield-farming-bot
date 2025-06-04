@@ -22,8 +22,8 @@ async fn main() -> eyre::Result<()> {
     // Load configuration (including provider)
     let cfg = config::Config::load();
 
-    // Print config mode (test or prod)
-    println!("Running in {} mode", cfg.mode);
+    // Print network mode (test or prod)
+    println!("Running in {} mode", cfg.network_mode);
 
     // Fetch ABIs
     abi_fetcher::fetch_all_abis(&cfg).await?;

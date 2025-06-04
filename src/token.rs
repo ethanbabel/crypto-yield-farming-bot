@@ -19,8 +19,8 @@ use crate::gmx_structs::PriceProps;
 #[derive(Debug, Clone)]
 pub struct AssetToken {
     pub symbol: String,
-    pub address: Address,   // If mode=test this is testnet address, if mode=prod this is mainnet address
-    pub mainnet_address: Option<Address>, // If mode=test this is the mainnet address, if mode=prod this is None
+    pub address: Address,   // If netowrk mode=test this is testnet address, if network mode=prod this is mainnet address
+    pub mainnet_address: Option<Address>, // If network mode=test this is the mainnet address, if network mode=prod this is None
     pub decimals: u8,
     pub is_synthetic: bool,
     pub oracle: Option<Oracle>,
@@ -43,14 +43,14 @@ impl AssetToken {
 #[derive(Debug)]
 pub struct AssetTokenRegistry {
     asset_tokens: HashMap<Address, AssetToken>,
-    mode: String, // "prod" or "test"
+    network_mode: String, // "prod" or "test"
 }
 
 impl AssetTokenRegistry {
     pub fn new(config: &Config) -> Self {
         Self {
             asset_tokens: HashMap::new(),
-            mode: config.mode.clone(),
+            network_mode: config.network_mode.clone(),
         }
     }
 
@@ -67,11 +67,11 @@ impl AssetTokenRegistry {
     }
 
     pub fn load_from_file(&mut self) -> Result<()> {
-        // Set token data file path based on mode
-        let path = match self.mode.as_str() {
+        // Set token data file path based on network mode
+        let path = match self.network_mode.as_str() {
             "test" => "tokens/testnet_asset_token_data.json".to_string(),
             "prod" => "tokens/asset_token_data.json".to_string(),
-            _ => panic!("Invalid MODE"),
+            _ => panic!("Invalid NETWORK_MODE"),
         };
         let file_content = fs::read_to_string(path)?;
         let json_data: Value = serde_json::from_str(&file_content)?;
@@ -84,12 +84,12 @@ impl AssetTokenRegistry {
             let is_synthetic = token.get("synthetic").map_or(false, |v| v.as_bool().unwrap_or(false));
             
             // Handle both mainnet and testnet addresses
-            let address = if self.mode == "prod" {
+            let address = if self.network_mode == "prod" {
                 Address::from_str(token["address"].as_str().expect("Token must have an address"))?
             } else {
                 Address::from_str(token["testnetAddress"].as_str().expect("Token must have a testnet address"))?
             };
-            let mainnet_address = if self.mode == "test" {
+            let mainnet_address = if self.network_mode == "test" {
                 Some(Address::from_str(token["mainnetAddress"].as_str().expect("Token must have a mainnet address"))?)
             } else {
                 None
@@ -129,8 +129,8 @@ impl AssetTokenRegistry {
     }
 
     pub async fn update_tracked_tokens(&mut self) -> Result<()> {
-        // If the mode is test, we don't update tracked tokens
-        if self.mode == "test" {
+        // If the network mode is test, we don't update tracked tokens
+        if self.network_mode == "test" {
             return Ok(());
         }
 
@@ -178,11 +178,7 @@ impl AssetTokenRegistry {
         }
 
         // Write the new tokens to json file
-        let path = match self.mode.as_str() {
-            "test" => "tokens/testnet_asset_token_data.json".to_string(),
-            "prod" => "tokens/asset_token_data.json".to_string(),
-            _ => panic!("Invalid MODE"),
-        };
+        let path = "tokens/asset_token_data.json".to_string();
         let existing_file_content = fs::read_to_string(&path)?;
         let mut existing_json_data: Value = serde_json::from_str(&existing_file_content)?;
         let tokens_arr: &mut Vec<Value> = existing_json_data["tokens"].as_array_mut().ok_or_else(|| eyre!("Error parsing the 'tokens' field from existing JSON data"))?;
@@ -213,7 +209,7 @@ impl AssetTokenRegistry {
         for entry in prices.iter() {
             if let Some(address_str) = entry["tokenAddress"].as_str() {
                 if let Ok(address) = Address::from_str(address_str) {
-                    if self.mode == "prod" {
+                    if self.network_mode == "prod" {
                         if let Some(token) = self.asset_tokens.get_mut(&address) {
                             let min_raw = entry["minPrice"].as_str().unwrap_or("0");
                             let max_raw = entry["maxPrice"].as_str().unwrap_or("0");

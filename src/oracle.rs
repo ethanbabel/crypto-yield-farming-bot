@@ -1,6 +1,7 @@
 use ethers::prelude::*;
 use eyre::Result;
 use std::time::Instant;
+use tracing::{error};
 
 use crate::config::Config;
 
@@ -48,22 +49,20 @@ impl Oracle {
     pub async fn fetch_price(&mut self, config: &Config) -> Result<()> {
         let provider = config.alchemy_provider.clone();
         let mut final_price = 1.0;
-
         for feed in &self.feeds {
             let contract = AggregatorV3Interface::new(feed.aggregator, provider.clone());
             let decimals = contract.decimals().call().await?;
             let round_data = contract.latest_round_data().call().await?;
             let raw_answer = round_data.1;
-
             if raw_answer <= I256::zero() {
-                eyre::bail!("Oracle at {:?} returned invalid price", feed.aggregator);
+                let err = eyre::eyre!("Invalid price data from aggregator {}", feed.aggregator);
+                error!(?err, "Failed to fetch price from aggregator");
+                return Err(err);
             }
-            
             let answer_i128: i128 = raw_answer.as_i128(); 
             let price = answer_i128 as f64 / 10f64.powi(decimals as i32);
             final_price *= price;
         }
-
         self.price = Some(final_price);
         self.updated_at = Some(Instant::now());
         Ok(())

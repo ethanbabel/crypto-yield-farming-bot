@@ -3,3 +3,6 @@
 
 # Ignore .env
 .env
+
+# Ignore log files
+/logs/*

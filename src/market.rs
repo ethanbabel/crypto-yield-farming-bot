@@ -6,6 +6,7 @@ use ethers::types::{Address, H160, I256};
 use eyre::{eyre, Result};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use tracing::{instrument, info, warn, error};
 
 use crate::config::Config;
 use crate::constants::GMX_DECIMALS;
@@ -98,7 +99,9 @@ impl Market {
 
             Ok(())
         } else {
-            Err(eyre!("Fetch market prices before fetching market data for market {}", self))
+            let err = eyre!("Fetch market prices before fetching market data for market {}", self);
+            error!(?err, "Market prices not available for market {}: {:#?}", self, self.market_prices());
+            Err(err)
         }
     }
 
@@ -106,7 +109,7 @@ impl Market {
         if let (Some(market_info), Some(pool_info_deposit_min)) = (&self.market_info, &self.pool_info_deposit_min) {
             self.current_apr = return_calculation_utils::calculate_apr(market_info, pool_info_deposit_min);
         } else {
-            tracing::warn!("Market data not fully available for APR calculation for market {}", self.market_token);
+            tracing::warn!("Market data not fully available for APR calculation for market {}, continuing...", self);
         }
     }
 }
@@ -121,10 +124,9 @@ pub struct MarketRegistry {
 }
 
 impl MarketRegistry {
+    #[instrument]
     pub fn new() -> Self {
-        Self {
-            markets: HashMap::new(),
-        }
+        Self { markets: HashMap::new() }
     }
 
     /// Insert a market into the registry if it is valid 
@@ -169,12 +171,14 @@ impl MarketRegistry {
     }
 
     /// Populate the registry with markets from GMX
+    #[instrument(skip(self, config, asset_token_registry), fields(on_close = true))]
     pub async fn populate(
         &mut self,
         config: &Config,
         asset_token_registry: &AssetTokenRegistry,
     ) -> eyre::Result<()> {
         let market_props_list = gmx::get_markets(config).await?;
+        info!(count = market_props_list.len(), "Fetched market props from GMX");
         for props in &market_props_list {
             self.insert_market_if_possible(props, asset_token_registry, false);
         }
@@ -182,6 +186,7 @@ impl MarketRegistry {
     }
 
     /// Repopulate the registry by updating tracked tokens and adding any new markets
+    #[instrument(skip(self, config, asset_token_registry), fields(on_close = true))]
     pub async fn repopulate(
         &mut self,
         config: &Config,
@@ -222,38 +227,40 @@ impl MarketRegistry {
     // Prints all markets in the registry
     pub fn print_all_markets(&self) {
         for market in self.all_markets() {
-            println!("{}", market);
+            info!(market = %market, "Market info");
         }
     }
 
     // Prints all markets that have supply
     pub fn print_relevant_markets(&self) {
         for market in self.relevant_markets() {
-            println!("{}", market);
+            info!(market = %market, "Relevant market info");
         }
     }
 
+    #[instrument(skip(self, config), fields(on_close = true))]
     pub async fn update_all_market_data(&mut self, config: &Config) -> Result<()> {
-        let config = config.clone();
 
         stream::iter(self.markets.values_mut())
             .for_each_concurrent(1, |market| {  // Limit concurrency to 1 for now, can be adjusted later with a paid alchemy plan
                 let config = config.clone();
                 async move {
-                    if let Err(err) = market.fetch_market_data(&config).await {
-                        tracing::warn!("Failed to fetch market data: {:?}", err);
-                    }
+                    if let Err(e) = market.fetch_market_data(&config).await {
+                        error!(market = %market.market_token, "Failed to fetch market data: {}", e);
+                    } 
                 }
             })
             .await;
-
+        info!("All market data updated");
         Ok(())
     }
 
+    #[instrument(skip(self), fields(on_close = false))]
     pub fn calculate_all_aprs(&mut self) {
         for market in self.markets.values_mut() {
             market.calculate_apr();
         }
+        info!("All APRs calculated");
     }
 
     pub fn print_markets_by_apr_desc(&self) {
@@ -263,11 +270,13 @@ impl MarketRegistry {
             let b_apr = b.current_apr.unwrap_or(Decimal::ZERO);
             b_apr.partial_cmp(&a_apr).unwrap_or(std::cmp::Ordering::Equal)
         });
-        for market in markets {
-           if market.has_supply {
-                println!("{}", market);
-            } 
-        }
+        let output = markets
+            .iter()
+            .filter(|m| m.has_supply)
+            .map(|m| format!("{}", m))
+            .collect::<Vec<_>>()
+            .join("\n");
+        info!("Markets by APR (desc):\n{}", output);
     }
 
     pub fn top_markets_by_apr(&self, count: usize) -> Vec<&Market> {

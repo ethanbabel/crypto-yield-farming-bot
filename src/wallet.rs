@@ -6,7 +6,7 @@ use eyre::Report;
 use crate::config::Config;
 
 /// Returns a Wallet + Provider combo as a `SignerMiddleware`
-pub async fn create_wallet(config: &Config) -> Result<
+pub fn create_wallet(config: &Config) -> Result<
     SignerMiddleware<Arc<Provider<Http>>, Wallet<k256::ecdsa::SigningKey>>,
     Report,
 > {

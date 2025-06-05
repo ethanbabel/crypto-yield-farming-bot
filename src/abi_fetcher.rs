@@ -2,6 +2,7 @@ use eyre::Result;
 use reqwest::Client;
 use serde::Deserialize;
 use std::{fs::File, io::Write, path::Path};
+use tracing::{error, info, instrument};
 
 use crate::config::Config;
 
@@ -27,6 +28,7 @@ pub async fn fetch_abi_v2(
     let response = client.get(&url).send().await?.json::<AbiV2Response>().await?;
 
     if response.status != "1" {
+        error!("Failed to fetch ABI for {}: {}", contract_address, response.message);
         eyre::bail!("Failed to fetch ABI: {}", response.message);
     }
 
@@ -41,6 +43,7 @@ pub async fn fetch_abi_v2(
 }
 
 /// Downloads all ABIs needed for the project if `REFRESH_ABIS=true` in .env
+#[instrument(skip(config))]
 pub async fn fetch_all_abis(config: &Config) -> Result<()> {
     let abis = vec![
         ("Reader", config.gmx_reader),
@@ -50,9 +53,10 @@ pub async fn fetch_all_abis(config: &Config) -> Result<()> {
     if config.refetch_abis {
         for (name, address) in abis {
             let path = Path::new("fetched_abis").join(format!("{}.json", name));
-            println!("Fetching ABI for {} at {}", name, address);
             fetch_abi_v2(config, &format!("{:?}", address), &path).await?;
         }
+    } else {
+        info!("REFETCH_ABIS is false, skipping ABI fetch");
     }
 
     Ok(())

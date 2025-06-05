@@ -1,4 +1,3 @@
-use dotenvy::dotenv;
 use std::env;
 use std::sync::Arc;
 use ethers::providers::{Provider, Http};
@@ -20,9 +19,6 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        // Load environment variables from .env file
-        dotenv().ok();
-
         // Load network mode env var and validate it
         let network_mode = env::var("NETWORK_MODE").expect("Missing NETWORK_MODE environment variable");
         if network_mode != "test" && network_mode != "prod" {

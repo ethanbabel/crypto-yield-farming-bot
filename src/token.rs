@@ -10,6 +10,7 @@ use ethers::utils;
 use eyre::{Result, eyre};
 use serde_json::Value;
 use reqwest::Client;
+use tracing::{instrument, info, warn, error};
 
 use crate::oracle::Oracle;
 use crate::constants::{GMX_API_PRICES_ENDPOINT, GMX_SUPPORTED_TOKENS_ENDPOINT, GMX_DECIMALS};
@@ -66,16 +67,16 @@ impl AssetTokenRegistry {
         self.asset_tokens.values()
     }
 
+    #[instrument(skip(self), fields(on_close = true))]
     pub fn load_from_file(&mut self) -> Result<()> {
-        // Set token data file path based on network mode
         let path = match self.network_mode.as_str() {
             "test" => "tokens/testnet_asset_token_data.json".to_string(),
             "prod" => "tokens/asset_token_data.json".to_string(),
             _ => panic!("Invalid NETWORK_MODE"),
         };
-        let file_content = fs::read_to_string(path)?;
+        info!(file = %path, "Loading asset tokens from file");
+        let file_content = fs::read_to_string(&path)?;
         let json_data: Value = serde_json::from_str(&file_content)?;
-
         let tokens = json_data.get("tokens").ok_or_else(|| eyre!("Tokens not found in JSON data"))?;
 
         for token in tokens.as_array().unwrap_or(&vec![]) {
@@ -124,10 +125,11 @@ impl AssetTokenRegistry {
             };
             self.asset_tokens.insert(address, asset_token);
         }
-
+        info!("Loaded asset tokens from file");
         Ok(())
     }
 
+    #[instrument(skip(self), fields(on_close = true))]
     pub async fn update_tracked_tokens(&mut self) -> Result<()> {
         // If the network mode is test, we don't update tracked tokens
         if self.network_mode == "test" {
@@ -141,7 +143,11 @@ impl AssetTokenRegistry {
             .await?
             .error_for_status()?;
         let res_json: Value = res.json().await?;
-        let tokens_arr = res_json["tokens"].as_array().ok_or_else(|| eyre!("Error parsing the 'tokens' field from API response"))?;
+        let tokens_arr = res_json["tokens"].as_array().ok_or_else(|| {
+            let err = eyre!("Error parsing the 'tokens' field from API response");
+            error!(?err, "Failed to parse tokens from API response");
+            err
+        })?;
 
         let mut new_tokens = Vec::new();
         for token in tokens_arr {
@@ -181,7 +187,11 @@ impl AssetTokenRegistry {
         let path = "tokens/asset_token_data.json".to_string();
         let existing_file_content = fs::read_to_string(&path)?;
         let mut existing_json_data: Value = serde_json::from_str(&existing_file_content)?;
-        let tokens_arr: &mut Vec<Value> = existing_json_data["tokens"].as_array_mut().ok_or_else(|| eyre!("Error parsing the 'tokens' field from existing JSON data"))?;
+        let tokens_arr: &mut Vec<Value> = existing_json_data["tokens"].as_array_mut().ok_or_else(|| {
+            let err = eyre!("Error parsing the 'tokens' field from existing JSON data");
+            error!(?err, "Failed to parse existing tokens from JSON data");
+            err
+        })?;
         for token in &new_tokens {
             let new_token_json = serde_json::json!({
                 "symbol": token.symbol,
@@ -197,6 +207,7 @@ impl AssetTokenRegistry {
         Ok(())
     }                  
 
+    #[instrument(skip(self), fields(on_close = true))]
     pub async fn update_all_gmx_prices(&mut self) -> Result<()> {
         let client = Client::new();
         let res = client

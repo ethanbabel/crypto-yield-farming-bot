@@ -5,4 +5,4 @@
 .env
 
 # Ignore log files
-/logs/*
+/logs/*.log

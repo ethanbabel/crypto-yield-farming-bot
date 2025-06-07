@@ -15,7 +15,7 @@ use tracing::{instrument, info, warn};
 use crate::oracle::Oracle;
 use crate::constants::{GMX_API_PRICES_ENDPOINT, GMX_SUPPORTED_TOKENS_ENDPOINT, GMX_DECIMALS};
 use crate::config::Config;
-use crate::gmx_structs::PriceProps;
+use crate::gmx::gmx_reader_structs::PriceProps;
 
 #[derive(Debug, Clone)]
 pub struct AssetToken {

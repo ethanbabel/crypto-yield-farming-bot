@@ -7,7 +7,7 @@ use tracing_subscriber::{
     layer::{SubscriberExt, Layer, Context}, 
     util::SubscriberInitExt
 };
-use tracing::{Id, Subscriber, span, field::Field, field::Visit, debug};
+use tracing::{Id, Subscriber, span, field::Field, field::Visit, debug, error};
 use std::time::{Instant, Duration};
 use std::sync::OnceLock; // For global file guard
 
@@ -17,14 +17,14 @@ pub fn set_panic_hook() {
     // Set a panic hook to log panics with tracing
     std::panic::set_hook(Box::new(|panic_info| {
         if let Some(location) = panic_info.location() {
-            tracing::error!(
+            error!(
                 "Panic occurred at {}:{}: {}",
                 location.file(),
                 location.line(),
                 panic_info.payload().downcast_ref::<&str>().unwrap_or(&"Unknown panic message")
             );
         } else {
-            tracing::error!("Panic occurred at an unknown location: {}",
+            error!("Panic occurred at an unknown location: {}",
                 panic_info.payload().downcast_ref::<&str>().unwrap_or(&"Unknown panic message")
             );
         }
@@ -41,11 +41,11 @@ pub fn init_logging() {
 
     // Set up EnvFilter for runtime log levels, filter globally to "warn", filter our own crate to the specified levels in .env
     let env_filter_console = EnvFilter::try_new(
-        &format!("warn, crypto_yield_farming_bot={}", console_log_level)
+        &format!("warn,crypto_yield_farming_bot={}", console_log_level)
     ).unwrap_or_else(|_| EnvFilter::new("crypto_yield_farming_bot=info"));
 
     let env_filter_file = EnvFilter::try_new(
-        &format!("warn, crypto_yield_farming_bot={}", file_log_level)
+        &format!("warn,crypto_yield_farming_bot={}", file_log_level)
     ).unwrap_or_else(|_| EnvFilter::new("crypto_yield_farming_bot=info"));
 
     // Console layer: always enabled, pretty human-readable logs

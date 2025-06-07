@@ -11,8 +11,8 @@ use tracing::{instrument, info, warn, error};
 use crate::config::Config;
 use crate::constants::GMX_DECIMALS;
 use crate::token::{AssetToken, AssetTokenRegistry};
-use crate::gmx_structs::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps};
-use crate::gmx;
+use crate::gmx::gmx_reader_structs::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps};
+use crate::gmx::gmx_reader;
 use crate::return_calculation_utils;
 
 #[derive(Debug, Clone)]
@@ -75,12 +75,12 @@ impl Market {
         let market_prices = self.market_prices();
         if let Some(prices) = market_prices {
             // Fetch market info
-            self.market_info = Some(gmx::get_market_info(config, self.market_token, prices.clone()).await?);
+            self.market_info = Some(gmx_reader::get_market_info(config, self.market_token, prices.clone()).await?);
             // Fetch pool info for deposit and withdrawal
-            let deposit_min = gmx::get_market_token_price(config, self.market_props(), prices.clone(), gmx::PnlFactorType::Deposit, false).await?;
-            let deposit_max = gmx::get_market_token_price(config, self.market_props(), prices.clone(), gmx::PnlFactorType::Deposit, true).await?;
-            let withdrawal_min = gmx::get_market_token_price(config, self.market_props(), prices.clone(), gmx::PnlFactorType::Withdrawal, false).await?;
-            let withdrawal_max = gmx::get_market_token_price(config, self.market_props(), prices.clone(), gmx::PnlFactorType::Withdrawal, true).await?;
+            let deposit_min = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Deposit, false).await?;
+            let deposit_max = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Deposit, true).await?;
+            let withdrawal_min = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Withdrawal, false).await?;
+            let withdrawal_max = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Withdrawal, true).await?;
 
             // Update pool info and gm token prices
             self.pool_info_deposit_min = Some(deposit_min.1);
@@ -175,7 +175,7 @@ impl MarketRegistry {
         config: &Config,
         asset_token_registry: &AssetTokenRegistry,
     ) -> eyre::Result<()> {
-        let market_props_list = gmx::get_markets(config).await?;
+        let market_props_list = gmx_reader::get_markets(config).await?;
         info!(count = market_props_list.len(), "Fetched market props from GMX");
         for props in &market_props_list {
             self.insert_market_if_possible(props, asset_token_registry, false);
@@ -191,7 +191,7 @@ impl MarketRegistry {
         asset_token_registry: &mut AssetTokenRegistry,
     ) -> eyre::Result<()> {
         asset_token_registry.update_tracked_tokens().await?;
-        let market_props_list = gmx::get_markets(config).await?;
+        let market_props_list = gmx_reader::get_markets(config).await?;
         for props in &market_props_list {
             self.insert_market_if_possible(props, asset_token_registry, true);
         }

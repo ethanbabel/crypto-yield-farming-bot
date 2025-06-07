@@ -3,7 +3,7 @@ use ethers::utils;
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 
-use crate::gmx_structs::{MarketInfo, MarketPoolValueInfoProps};
+use crate::gmx::gmx_reader_structs::{MarketInfo, MarketPoolValueInfoProps};
 use crate::constants::GMX_DECIMALS;
 
 pub fn calculate_apr(market_info: &MarketInfo, pool_info: &MarketPoolValueInfoProps) -> Option<Decimal> {

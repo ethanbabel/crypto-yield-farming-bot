@@ -13,6 +13,24 @@ use std::sync::OnceLock; // For global file guard
 
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
+pub fn set_panic_hook() {
+    // Set a panic hook to log panics with tracing
+    std::panic::set_hook(Box::new(|panic_info| {
+        if let Some(location) = panic_info.location() {
+            tracing::error!(
+                "Panic occurred at {}:{}: {}",
+                location.file(),
+                location.line(),
+                panic_info.payload().downcast_ref::<&str>().unwrap_or(&"Unknown panic message")
+            );
+        } else {
+            tracing::error!("Panic occurred at an unknown location: {}",
+                panic_info.payload().downcast_ref::<&str>().unwrap_or(&"Unknown panic message")
+            );
+        }
+    }));
+}
+
 pub fn init_logging() {
     // Load log levels for console and file from env
     let console_log_level = env::var("CONSOLE_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());

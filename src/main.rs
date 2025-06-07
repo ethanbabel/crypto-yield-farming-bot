@@ -13,6 +13,8 @@ async fn main() -> eyre::Result<()> {
 
     // Initialize logging (console always, file if enabled, structured JSON)
     logging::init_logging();
+    // Set panic hook to log panics
+    logging::set_panic_hook();
 
     // Load configuration (including provider)
     let cfg = config::Config::load();

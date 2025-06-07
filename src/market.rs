@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::Instant;
 use futures::stream::{self, StreamExt};
 use ethers::types::{Address, H160, I256};
-use eyre::{eyre, Result};
+use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use tracing::{instrument, info, warn, error};
@@ -99,9 +99,7 @@ impl Market {
 
             Ok(())
         } else {
-            let err = eyre!("Fetch market prices before fetching market data for market {}", self);
-            error!(?err, "Market prices not available for market {}: {:#?}", self, self.market_prices());
-            Err(err)
+            eyre::bail!("Fetch market prices before fetching market data for market {}", self);
         }
     }
 

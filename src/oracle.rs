@@ -1,7 +1,6 @@
 use ethers::prelude::*;
 use eyre::Result;
 use std::time::Instant;
-use tracing::{error};
 
 use crate::config::Config;
 
@@ -55,9 +54,7 @@ impl Oracle {
             let round_data = contract.latest_round_data().call().await?;
             let raw_answer = round_data.1;
             if raw_answer <= I256::zero() {
-                let err = eyre::eyre!("Invalid price data from aggregator {}", feed.aggregator);
-                error!(?err, "Failed to fetch price from aggregator");
-                return Err(err);
+                eyre::bail!("Invalid price data from aggregator {}", feed.aggregator);
             }
             let answer_i128: i128 = raw_answer.as_i128(); 
             let price = answer_i128 as f64 / 10f64.powi(decimals as i32);

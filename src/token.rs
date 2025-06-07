@@ -10,7 +10,7 @@ use ethers::utils;
 use eyre::{Result, eyre};
 use serde_json::Value;
 use reqwest::Client;
-use tracing::{instrument, info, warn, error};
+use tracing::{instrument, info, warn};
 
 use crate::oracle::Oracle;
 use crate::constants::{GMX_API_PRICES_ENDPOINT, GMX_SUPPORTED_TOKENS_ENDPOINT, GMX_DECIMALS};
@@ -143,11 +143,9 @@ impl AssetTokenRegistry {
             .await?
             .error_for_status()?;
         let res_json: Value = res.json().await?;
-        let tokens_arr = res_json["tokens"].as_array().ok_or_else(|| {
-            let err = eyre!("Error parsing the 'tokens' field from API response");
-            error!(?err, "Failed to parse tokens from API response");
-            err
-        })?;
+        let tokens_arr = res_json["tokens"].as_array().ok_or_else(|| 
+            eyre!("Error parsing the 'tokens' field from API response")
+        )?;
 
         let mut new_tokens = Vec::new();
         for token in tokens_arr {
@@ -187,11 +185,9 @@ impl AssetTokenRegistry {
         let path = "tokens/asset_token_data.json".to_string();
         let existing_file_content = fs::read_to_string(&path)?;
         let mut existing_json_data: Value = serde_json::from_str(&existing_file_content)?;
-        let tokens_arr: &mut Vec<Value> = existing_json_data["tokens"].as_array_mut().ok_or_else(|| {
-            let err = eyre!("Error parsing the 'tokens' field from existing JSON data");
-            error!(?err, "Failed to parse existing tokens from JSON data");
-            err
-        })?;
+        let tokens_arr: &mut Vec<Value> = existing_json_data["tokens"].as_array_mut().ok_or_else(|| 
+            eyre!("Error parsing the 'tokens' field from existing JSON data")
+        )?;
         for token in &new_tokens {
             let new_token_json = serde_json::json!({
                 "symbol": token.symbol,

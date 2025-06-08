@@ -2,48 +2,59 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 use futures::stream::{self, StreamExt};
-use ethers::types::{Address, H160, I256};
+use ethers::types::{Address, H160, I256, U256};
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use tracing::{instrument, info, warn, error};
 
 use crate::config::Config;
-use crate::constants::GMX_DECIMALS;
 use crate::token::{AssetToken, AssetTokenRegistry};
-use crate::gmx::gmx_reader_structs::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps};
-use crate::gmx::gmx_reader;
-use crate::return_calculation_utils;
+use crate::gmx::{
+    gmx_reader_structs::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps},
+    gmx_reader,
+    gmx_datastore
+};
+use crate::return_calculation_utils::{
+    self,
+    i256_to_decimal_scaled, 
+    // u256_to_decimal_scaled, 
+};
 
 #[derive(Debug, Clone)]
 pub struct Market {
+    // --- Market properties & data ---
     pub market_token: Address,
     pub index_token: AssetToken,
     pub long_token: AssetToken,
     pub short_token: AssetToken,
-    market_info: Option<MarketInfo>,
-    pool_info_deposit_min: Option<MarketPoolValueInfoProps>,
-    pool_info_deposit_max: Option<MarketPoolValueInfoProps>,
-    pool_info_withdrawal_min: Option<MarketPoolValueInfoProps>,
-    pool_info_withdrawal_max: Option<MarketPoolValueInfoProps>,
+    pub market_info: Option<MarketInfo>,
+    pub pool_info_deposit_min: Option<MarketPoolValueInfoProps>,
+    pub pool_info_deposit_max: Option<MarketPoolValueInfoProps>,
+    pub pool_info_withdrawal_min: Option<MarketPoolValueInfoProps>,
+    pub pool_info_withdrawal_max: Option<MarketPoolValueInfoProps>,
     pub has_supply : bool, // Indicates if the market has supply (won't for swap or deprecated markets), default is true
     pub gm_token_price_min: Option<I256>, 
     pub gm_token_price_max: Option<I256>,
-    pub current_apr: Option<Decimal>, 
-    
-    // Timestamp of the last market data (market_info + pool_info) update, set time of least recent update between market_info and all pool_info's
+    pub long_open_interest: Option<U256>, 
+    pub short_open_interest: Option<U256>, 
+
+    // Timestamp of the last market data update
     pub updated_at: Option<Instant>,  
+
+    // --- Calculated values ---
+    pub current_borrowing_apr: Option<Decimal>, 
 }
 
 impl fmt::Display for Market {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/USD [{} - {}],  APR: {},  GM Token Price Range: [${}, ${}]",
+            "{}/USD [{} - {}],  Borrowing APR: {},  GM Token Price Range: [${}, ${}]",
             self.index_token.symbol,
             self.long_token.symbol,
             self.short_token.symbol,
-            self.current_apr.map_or("N/A".to_string(), |v| format!("{:.2}%", v * dec!(100.0))),
+            self.current_borrowing_apr.map_or("N/A".to_string(), |v| format!("{:.2}%", v * dec!(100.0))),
             self.gm_token_price_min.map_or("N/A".to_string(), |v| format!("{:.5}", i256_to_decimal_scaled(v))),
             self.gm_token_price_max.map_or("N/A".to_string(), |v| format!("{:.5}", i256_to_decimal_scaled(v))),
         )
@@ -94,6 +105,10 @@ impl Market {
             // If pool_supply is zero, set has_supply to false
             self.has_supply = self.pool_info_deposit_min.as_ref().map_or(true, |pool_info| !pool_info.pool_value.is_zero());
 
+            // Fetch long and short open interest
+            self.long_open_interest = Some(gmx_datastore::get_open_interest(config, self.market_props(), true).await?);
+            self.short_open_interest = Some(gmx_datastore::get_open_interest(config, self.market_props(), false).await?);
+
             // Update the timestamp of the last update
             self.updated_at = Some(Instant::now());
 
@@ -103,18 +118,22 @@ impl Market {
         }
     }
 
-    pub fn calculate_apr(&mut self) {
-        if let (Some(market_info), Some(pool_info_deposit_min)) = (&self.market_info, &self.pool_info_deposit_min) {
-            self.current_apr = return_calculation_utils::calculate_apr(market_info, pool_info_deposit_min);
+    pub fn calculate_borrowing_apr(&mut self) {
+        if let (Some(market_info), Some(pool_info_deposit_min), Some(long_open_interest), Some(short_open_interest)) = (
+            &self.market_info, &self.pool_info_deposit_min, self.long_open_interest, self.short_open_interest,
+        ) {
+            self.current_borrowing_apr = Some(
+                return_calculation_utils::calculate_borrowing_apr(
+                    market_info,
+                    pool_info_deposit_min,
+                    long_open_interest,
+                    short_open_interest,
+                )
+            )
         } else {
-            tracing::warn!("Market data not fully available for APR calculation for market {}, continuing...", self);
+            tracing::warn!("Market data not fully available for borrowing APR calculation for market {}, continuing...", self);
         }
     }
-}
-
-fn i256_to_decimal_scaled(val: I256) -> Decimal {
-    let formatted = ethers::utils::format_units(val, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string());
-    Decimal::from_str(&formatted).unwrap_or(Decimal::ZERO)
 }
 
 pub struct MarketRegistry {
@@ -152,10 +171,13 @@ impl MarketRegistry {
                 pool_info_withdrawal_min: None,
                 pool_info_withdrawal_max: None,
                 has_supply: true,
-                current_apr: None,
                 gm_token_price_min: None,
                 gm_token_price_max: None,
+                long_open_interest: None,
+                short_open_interest: None,
                 updated_at: None,
+
+                current_borrowing_apr: None,
             };
             self.markets.insert(props.market_token, market);
         } else {
@@ -254,18 +276,18 @@ impl MarketRegistry {
     }
 
     #[instrument(skip(self), fields(on_close = false))]
-    pub fn calculate_all_aprs(&mut self) {
+    pub fn calculate_all_borrowing_aprs(&mut self) {
         for market in self.markets.values_mut() {
-            market.calculate_apr();
+            market.calculate_borrowing_apr();
         }
-        info!("All APRs calculated");
+        info!("All borrowing APRs calculated");
     }
 
-    pub fn print_markets_by_apr_desc(&self) {
+    pub fn print_markets_by_borrowing_apr_desc(&self) {
         let mut markets: Vec<&Market> = self.markets.values().collect();
         markets.sort_by(|a, b| {
-            let a_apr = a.current_apr.unwrap_or(Decimal::ZERO);
-            let b_apr = b.current_apr.unwrap_or(Decimal::ZERO);
+            let a_apr = a.current_borrowing_apr.unwrap_or(Decimal::ZERO);
+            let b_apr = b.current_borrowing_apr.unwrap_or(Decimal::ZERO);
             b_apr.partial_cmp(&a_apr).unwrap_or(std::cmp::Ordering::Equal)
         });
         let output = markets
@@ -274,14 +296,14 @@ impl MarketRegistry {
             .map(|m| format!("{}", m))
             .collect::<Vec<_>>()
             .join("\n");
-        info!("Markets by APR (desc):\n{}", output);
+        info!("Markets by borrowing APR (desc):\n{}", output);
     }
 
-    pub fn top_markets_by_apr(&self, count: usize) -> Vec<&Market> {
+    pub fn top_markets_by_borrowing_apr(&self, count: usize) -> Vec<&Market> {
         let mut markets: Vec<&Market> = self.markets.values().collect();
         markets.sort_by(|a, b| {
-            let a_apr = a.current_apr.unwrap_or(Decimal::ZERO);
-            let b_apr = b.current_apr.unwrap_or(Decimal::ZERO);
+            let a_apr = a.current_borrowing_apr.unwrap_or(Decimal::ZERO);
+            let b_apr = b.current_borrowing_apr.unwrap_or(Decimal::ZERO);
             b_apr.partial_cmp(&a_apr).unwrap_or(std::cmp::Ordering::Equal)
         });
         markets.into_iter().take(count).collect()

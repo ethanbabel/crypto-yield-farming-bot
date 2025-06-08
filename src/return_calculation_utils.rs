@@ -1,33 +1,41 @@
-use ethers::types::U256;
-use ethers::utils;
+use ethers::types::{I256, U256};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 
 use crate::gmx::gmx_reader_structs::{MarketInfo, MarketPoolValueInfoProps};
 use crate::constants::GMX_DECIMALS;
 
-pub fn calculate_apr(market_info: &MarketInfo, pool_info: &MarketPoolValueInfoProps) -> Option<Decimal> {
-    // Convert U256 to Decimal using format_units and parsing
-    fn u256_to_decimal_scaled(val: U256) -> Decimal {
-        let formatted = utils::format_units(val, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string());
-        Decimal::from_str(&formatted).unwrap_or(Decimal::ZERO)
-    }
-    let borrowing_fee_rate_longs = u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_longs);
-    let borrowing_fee_rate_shorts = u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_shorts);
-    let long_usd_value = u256_to_decimal_scaled(pool_info.long_token_usd);
-    let short_usd_value = u256_to_decimal_scaled(pool_info.short_token_usd);
-    let lp_borrowing_fee_pool_rate = u256_to_decimal_scaled(pool_info.borrowing_fee_pool_factor);
+pub fn i256_to_decimal_scaled(val: I256) -> Decimal {
+    let formatted = ethers::utils::format_units(val, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string());
+    Decimal::from_str(&formatted).unwrap_or(Decimal::ZERO)
+}
 
-    let total_borrowing_fees_per_second = (long_usd_value * borrowing_fee_rate_longs)
-        + (short_usd_value * borrowing_fee_rate_shorts);
-    let lp_income_per_second = total_borrowing_fees_per_second * lp_borrowing_fee_pool_rate;
-    let total_pool_value = long_usd_value + short_usd_value;
+pub fn u256_to_decimal_scaled(val: U256) -> Decimal {
+    let formatted = ethers::utils::format_units(val, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string());
+    Decimal::from_str(&formatted).unwrap_or(Decimal::ZERO)
+}
 
-    if total_pool_value.is_zero() {
-        return None;
-    }
+pub fn calculate_borrowing_apr(
+    market_info: &MarketInfo, 
+    pool_info: &MarketPoolValueInfoProps,
+    long_open_interest: U256,
+    short_open_interest: U256,
+) -> Decimal {
+    let borrowing_factor_per_second_longs_scaled = u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_longs);
+    let borrowing_factor_per_second_shorts_scaled = u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_shorts);
+    let long_open_interest_scaled = u256_to_decimal_scaled(long_open_interest);
+    let short_open_interest_scaled = u256_to_decimal_scaled(short_open_interest);
+    let pool_value_scaled = i256_to_decimal_scaled(pool_info.pool_value);
+    let lp_borrowing_fee_pool_factor_scaled = u256_to_decimal_scaled(pool_info.borrowing_fee_pool_factor);
 
-    let seconds_per_year = Decimal::from(60 * 60 * 24 * 365);
-    let apr = (lp_income_per_second / total_pool_value) * seconds_per_year;
-    Some(apr)
+    let total_borrowing_fees_per_second = (borrowing_factor_per_second_longs_scaled * long_open_interest_scaled) +
+        (borrowing_factor_per_second_shorts_scaled * short_open_interest_scaled);
+    let lp_borrowing_income_per_second = total_borrowing_fees_per_second * lp_borrowing_fee_pool_factor_scaled;
+    let lp_borrowing_income_per_year = lp_borrowing_income_per_second * Decimal::from(60 * 60 * 24 * 365);
+    let current_borrowing_apr = if pool_value_scaled > Decimal::ZERO {
+        lp_borrowing_income_per_year / pool_value_scaled
+    } else {
+        Decimal::ZERO
+    };
+    return current_borrowing_apr;
 }

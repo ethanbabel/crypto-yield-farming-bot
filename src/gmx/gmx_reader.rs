@@ -53,11 +53,13 @@ pub async fn get_market_token_price(config: &Config, market_props: gmx_reader_st
             pnl_factor_type: PnlFactorType, maximize: bool) -> Result<(I256, gmx_reader_structs::MarketPoolValueInfoProps)> {
     let reader = Reader::new(config.gmx_reader, config.alchemy_provider.clone());
 
-    let pnl_factor_type: H256 = match pnl_factor_type {
-        PnlFactorType::Deposit => H256::from(keccak256("MAX_PNL_FACTOR_FOR_DEPOSITS")),
-        PnlFactorType::Withdrawal => H256::from(keccak256("MAX_PNL_FACTOR_FOR_WITHDRAWALS")),
-        PnlFactorType::Trader => H256::from(keccak256("MAX_PNL_FACTOR_FOR_TRADERS")),
+    let pnl_factor_type_string = match pnl_factor_type {
+        PnlFactorType::Deposit => "MAX_PNL_FACTOR_FOR_DEPOSITS".to_string(),
+        PnlFactorType::Withdrawal => "MAX_PNL_FACTOR_FOR_WITHDRAWALS".to_string(),
+        PnlFactorType::Trader => "MAX_PNL_FACTOR_FOR_TRADERS".to_string(),
     };
+    let pnl_factor_type_encoded = ethers::abi::encode(&[ethers::abi::Token::String(pnl_factor_type_string)]);
+    let pnl_factor_type = H256::from_slice(&keccak256(&pnl_factor_type_encoded));
 
     let raw_response = reader.get_market_token_price(
         config.gmx_datastore,

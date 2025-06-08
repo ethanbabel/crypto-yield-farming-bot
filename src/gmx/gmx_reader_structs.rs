@@ -14,8 +14,8 @@ pub struct MarketProps {
 #[derive(Debug, Clone)]
 pub struct MarketInfo {
     pub market: MarketProps,                                // Address  of market, index, long, and short tokens
-    pub borrowing_factor_per_second_for_longs: U256,        // Borrowing cost growth rate for long positions (fee that short traders pay per second for holding a long position)
-    pub borrowing_factor_per_second_for_shorts: U256,       // Borrowing cost growth rate for short positions (fee that long traders pay per second for holding a short position)
+    pub borrowing_factor_per_second_for_longs: U256,        // Borrowing cost growth rate for long positions (fee that long traders pay per second for holding a long position)
+    pub borrowing_factor_per_second_for_shorts: U256,       // Borrowing cost growth rate for short positions (fee that short traders pay per second for holding a short position)
     pub base_funding: BaseFundingValues,                    // Struct of current cumulative funding fee values
     pub next_funding: GetNextFundingAmountPerSizeResult,    // Struct of projected next values for each funding fee
     pub virtual_inventory: VirtualInventory,                // Struct reflecting GMX internal inventory state

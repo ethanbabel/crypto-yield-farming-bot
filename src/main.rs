@@ -81,10 +81,9 @@ async fn main() -> eyre::Result<()> {
         return Err(err);
     }
     tracing::info!(relevant = market_registry.num_relevant_markets(), "All market data updated successfully");
-    market_registry.calculate_all_aprs();
-    tracing::info!("All APRs calculated successfully");
-    market_registry.print_markets_by_apr_desc();
-    
+    market_registry.calculate_all_borrowing_aprs();
+    tracing::info!("All borrowing APRs calculated successfully");
+    market_registry.print_markets_by_borrowing_apr_desc();
 
     Ok(())
 }

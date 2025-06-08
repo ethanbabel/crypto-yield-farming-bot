@@ -1,0 +1,44 @@
+use ethers::prelude::*;
+use ethers::utils::keccak256;
+use eyre::Result;
+
+use crate::config::Config;
+use super::gmx_reader_structs;
+
+abigen!(
+    DataStore,
+    "./abis/DataStore.json"
+);
+
+async fn get_uint(config: &Config, key: H256) -> Result<U256> {
+    let datastore = DataStore::new(config.gmx_datastore, config.alchemy_provider.clone());
+    let value: U256 = datastore.get_uint(key.into()).call().await?;
+    Ok(value)
+}
+
+pub async fn get_open_interest(config: &Config, market_props: gmx_reader_structs::MarketProps, is_long: bool) -> Result<U256> {
+    fn get_key(market: Address, collateral_token: Address, is_long: bool) -> H256 {
+        let open_interest_encoded = ethers::abi::encode(&[ethers::abi::Token::String("OPEN_INTEREST".to_string())]);
+        let open_interest_key = H256::from_slice(&keccak256(&open_interest_encoded));
+        // let open_interest_key = H256::from(keccak256("OPEN_INTEREST"));
+        let encoded = ethers::abi::encode(&[
+            ethers::abi::Token::FixedBytes(open_interest_key.as_bytes().to_vec()),
+            ethers::abi::Token::Address(market),
+            ethers::abi::Token::Address(collateral_token),
+            ethers::abi::Token::Bool(is_long),
+        ]);
+        H256::from(keccak256(encoded))
+    }
+
+    let long_collateral_key = get_key(market_props.market_token, market_props.long_token, is_long);
+    let short_collateral_key = get_key(market_props.market_token, market_props.short_token, is_long);
+
+    let open_interest_using_long_token_collateral = get_uint(config, long_collateral_key).await?;
+    let open_interest_using_short_token_collateral = get_uint(config, short_collateral_key).await?;
+
+    let divisor = if market_props.long_token == market_props.short_token { 2 } else { 1 };
+
+    let open_interest = (open_interest_using_long_token_collateral / U256::from(divisor))
+        + (open_interest_using_short_token_collateral / U256::from(divisor));
+    Ok(open_interest)
+}

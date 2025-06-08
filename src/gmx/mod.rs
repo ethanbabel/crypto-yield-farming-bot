@@ -1,2 +1,3 @@
 pub mod gmx_reader;
 pub mod gmx_reader_structs;
+pub mod gmx_datastore;

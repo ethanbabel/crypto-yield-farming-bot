@@ -18,7 +18,9 @@ use crate::gmx::{
 use crate::return_calculation_utils::{
     self,
     i256_to_decimal_scaled, 
-    // u256_to_decimal_scaled, 
+    // i256_to_decimal_scaled_decimals,
+    u256_to_decimal_scaled, 
+    // u256_to_decimal_scaled_decimals
 };
 
 #[derive(Debug, Clone)]
@@ -38,6 +40,10 @@ pub struct Market {
     pub gm_token_price_max: Option<I256>,
     pub long_open_interest: Option<U256>, 
     pub short_open_interest: Option<U256>, 
+    pub long_open_interest_via_tokens_min: Option<U256>,
+    pub long_open_interest_via_tokens_max: Option<U256>,
+    pub short_open_interest_via_tokens_min: Option<U256>,
+    pub short_open_interest_via_tokens_max: Option<U256>,
 
     // Timestamp of the last market data update
     pub updated_at: Option<Instant>,  
@@ -50,13 +56,19 @@ impl fmt::Display for Market {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/USD [{} - {}],  Borrowing APR: {},  GM Token Price Range: [${}, ${}]",
+            "{}/USD [{} - {}],  Borrowing APR: {},  GM Token Price Range: [${}, ${}], OI: Long = {}, Short = {}, OI_Tokens: Long = [{} - {}], Short = [{} - {}]",
             self.index_token.symbol,
             self.long_token.symbol,
             self.short_token.symbol,
             self.current_borrowing_apr.map_or("N/A".to_string(), |v| format!("{:.2}%", v * dec!(100.0))),
             self.gm_token_price_min.map_or("N/A".to_string(), |v| format!("{:.5}", i256_to_decimal_scaled(v))),
             self.gm_token_price_max.map_or("N/A".to_string(), |v| format!("{:.5}", i256_to_decimal_scaled(v))),
+            self.long_open_interest.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
+            self.short_open_interest.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
+            self.long_open_interest_via_tokens_max.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
+            self.long_open_interest_via_tokens_min.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
+            self.short_open_interest_via_tokens_min.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
+            self.short_open_interest_via_tokens_max.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v)))
         )
     }
 }
@@ -108,6 +120,14 @@ impl Market {
             // Fetch long and short open interest
             self.long_open_interest = Some(gmx_datastore::get_open_interest(config, self.market_props(), true).await?);
             self.short_open_interest = Some(gmx_datastore::get_open_interest(config, self.market_props(), false).await?);
+
+            // Fetch long and short open interest in tokens
+            let long_open_interest_in_tokens = gmx_datastore::get_open_interest_in_tokens(config, self.market_props(), true).await?;
+            let short_open_interest_in_tokens = gmx_datastore::get_open_interest_in_tokens(config, self.market_props(), false).await?;
+            self.long_open_interest_via_tokens_min = Some(long_open_interest_in_tokens * prices.index_token_price.min);
+            self.long_open_interest_via_tokens_max = Some(long_open_interest_in_tokens * prices.index_token_price.max);
+            self.short_open_interest_via_tokens_min = Some(short_open_interest_in_tokens * prices.index_token_price.min);
+            self.short_open_interest_via_tokens_max = Some(short_open_interest_in_tokens * prices.index_token_price.max);
 
             // Update the timestamp of the last update
             self.updated_at = Some(Instant::now());
@@ -175,6 +195,10 @@ impl MarketRegistry {
                 gm_token_price_max: None,
                 long_open_interest: None,
                 short_open_interest: None,
+                long_open_interest_via_tokens_min: None,
+                long_open_interest_via_tokens_max: None,
+                short_open_interest_via_tokens_min: None,
+                short_open_interest_via_tokens_max: None,
                 updated_at: None,
 
                 current_borrowing_apr: None,

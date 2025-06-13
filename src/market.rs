@@ -1,19 +1,22 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
 use std::time::Instant;
 use futures::stream::{self, StreamExt};
 use ethers::types::{Address, H160, I256, U256};
+use ethers::utils::to_checksum;
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use tracing::{instrument, info, warn, error};
+use serde_json::json;
 
 use crate::config::Config;
 use crate::token::{AssetToken, AssetTokenRegistry};
 use crate::gmx::{
-    gmx_reader_structs::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps},
-    gmx_reader,
-    gmx_datastore
+    reader_utils::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps},
+    reader,
+    datastore
 };
 use crate::return_calculation_utils::{
     self,
@@ -98,12 +101,12 @@ impl Market {
         let market_prices = self.market_prices();
         if let Some(prices) = market_prices {
             // Fetch market info
-            self.market_info = Some(gmx_reader::get_market_info(config, self.market_token, prices.clone()).await?);
+            self.market_info = Some(reader::get_market_info(config, self.market_token, prices.clone()).await?);
             // Fetch pool info for deposit and withdrawal
-            let deposit_min = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Deposit, false).await?;
-            let deposit_max = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Deposit, true).await?;
-            let withdrawal_min = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Withdrawal, false).await?;
-            let withdrawal_max = gmx_reader::get_market_token_price(config, self.market_props(), prices.clone(), gmx_reader::PnlFactorType::Withdrawal, true).await?;
+            let deposit_min = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Deposit, false).await?;
+            let deposit_max = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Deposit, true).await?;
+            let withdrawal_min = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Withdrawal, false).await?;
+            let withdrawal_max = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Withdrawal, true).await?;
 
             // Update pool info and gm token prices
             self.pool_info_deposit_min = Some(deposit_min.1);
@@ -118,12 +121,12 @@ impl Market {
             self.has_supply = self.pool_info_deposit_min.as_ref().map_or(true, |pool_info| !pool_info.pool_value.is_zero());
 
             // Fetch long and short open interest
-            self.long_open_interest = Some(gmx_datastore::get_open_interest(config, self.market_props(), true).await?);
-            self.short_open_interest = Some(gmx_datastore::get_open_interest(config, self.market_props(), false).await?);
+            self.long_open_interest = Some(datastore::get_open_interest(config, self.market_props(), true).await?);
+            self.short_open_interest = Some(datastore::get_open_interest(config, self.market_props(), false).await?);
 
             // Fetch long and short open interest in tokens
-            let long_open_interest_in_tokens = gmx_datastore::get_open_interest_in_tokens(config, self.market_props(), true).await?;
-            let short_open_interest_in_tokens = gmx_datastore::get_open_interest_in_tokens(config, self.market_props(), false).await?;
+            let long_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, self.market_props(), true).await?;
+            let short_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, self.market_props(), false).await?;
             self.long_open_interest_via_tokens_min = Some(long_open_interest_in_tokens * prices.index_token_price.min);
             self.long_open_interest_via_tokens_max = Some(long_open_interest_in_tokens * prices.index_token_price.max);
             self.short_open_interest_via_tokens_min = Some(short_open_interest_in_tokens * prices.index_token_price.min);
@@ -158,12 +161,16 @@ impl Market {
 
 pub struct MarketRegistry {
     markets: HashMap<Address, Market>,
+    network_mode: String, 
 }
 
 impl MarketRegistry {
     #[instrument]
-    pub fn new() -> Self {
-        Self { markets: HashMap::new() }
+    pub fn new(config: &Config) -> Self {
+        Self { 
+            markets: HashMap::new(), 
+            network_mode: config.network_mode.clone() 
+        }
     }
 
     /// Insert a market into the registry if it is valid 
@@ -221,7 +228,7 @@ impl MarketRegistry {
         config: &Config,
         asset_token_registry: &AssetTokenRegistry,
     ) -> eyre::Result<()> {
-        let market_props_list = gmx_reader::get_markets(config).await?;
+        let market_props_list = reader::get_markets(config).await?;
         info!(count = market_props_list.len(), "Fetched market props from GMX");
         for props in &market_props_list {
             self.insert_market_if_possible(props, asset_token_registry, false);
@@ -237,7 +244,7 @@ impl MarketRegistry {
         asset_token_registry: &mut AssetTokenRegistry,
     ) -> eyre::Result<()> {
         asset_token_registry.update_tracked_tokens().await?;
-        let market_props_list = gmx_reader::get_markets(config).await?;
+        let market_props_list = reader::get_markets(config).await?;
         for props in &market_props_list {
             self.insert_market_if_possible(props, asset_token_registry, true);
         }
@@ -332,4 +339,40 @@ impl MarketRegistry {
         });
         markets.into_iter().take(count).collect()
     }
+
+    pub fn save_markets_to_file(&self) -> eyre::Result<()> {
+        let markets_json = self.all_markets().map(|market| {
+            let description = format!(
+                "{}/USD [{} - {}]",
+                market.index_token.symbol,
+                market.long_token.symbol,
+                market.short_token.symbol
+            );
+            let market_address = to_checksum(&market.market_token, None);
+            let token_json = |token: &AssetToken| json!({
+                "symbol": token.symbol,
+                "address": to_checksum(&token.address, None),
+                "decimals": token.decimals
+            });
+            json!({
+                "description": description,
+                "marketAddress": market_address,
+                "indexToken": token_json(&market.index_token),
+                "longToken": token_json(&market.long_token),
+                "shortToken": token_json(&market.short_token)
+            })
+        }).collect::<Vec<_>>();
+        let output = json!({ "markets": markets_json });
+
+        let path = match self.network_mode.as_str() {
+            "prod" => "data/markets_data.json",
+            "test" => "data/testnet_markets_data.json",
+            _ => eyre::bail!("Unknown network mode: {}", self.network_mode),
+        };
+
+        fs::write(path, serde_json::to_string_pretty(&output)?)?;
+        Ok(())
+    }
+
+    
 }

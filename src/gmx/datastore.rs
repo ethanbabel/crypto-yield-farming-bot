@@ -4,7 +4,7 @@ use eyre::Result;
 
 use crate::config::Config;
 use crate::constants::GMX_DECIMALS;
-use super::gmx_reader_structs;
+use super::reader_utils;
 
 abigen!(
     DataStore,
@@ -17,7 +17,7 @@ async fn get_uint(config: &Config, key: H256) -> Result<U256> {
     Ok(value)
 }
 
-pub async fn get_open_interest(config: &Config, market_props: gmx_reader_structs::MarketProps, is_long: bool) -> Result<U256> {
+pub async fn get_open_interest(config: &Config, market_props: reader_utils::MarketProps, is_long: bool) -> Result<U256> {
     fn get_key(market: Address, collateral_token: Address, is_long: bool) -> H256 {
         let open_interest_encoded = ethers::abi::encode(&[ethers::abi::Token::String("OPEN_INTEREST".to_string())]);
         let open_interest_key = H256::from_slice(&keccak256(&open_interest_encoded));
@@ -43,7 +43,7 @@ pub async fn get_open_interest(config: &Config, market_props: gmx_reader_structs
     Ok(open_interest)
 }
 
-pub async fn get_open_interest_in_tokens(config: &Config, market_props: gmx_reader_structs::MarketProps, is_long: bool) -> Result<U256> {
+pub async fn get_open_interest_in_tokens(config: &Config, market_props: reader_utils::MarketProps, is_long: bool) -> Result<U256> {
     fn get_key(market: Address, collateral_token: Address, is_long: bool) -> H256 {
         let open_interest_in_tokens_encoded = ethers::abi::encode(&[ethers::abi::Token::String("OPEN_INTEREST_IN_TOKENS".to_string())]);
         let open_interest_in_tokens_key = H256::from_slice(&keccak256(&open_interest_in_tokens_encoded));

@@ -3,9 +3,22 @@ name = "crypto-yield-farming-bot"
 version = "0.1.0"
 edition = "2024"
 
+# Binary targets
+[[bin]]
+name = "data_recorder"
+path = "src/bin/data_recorder.rs"
+
+[[bin]]
+name = "trading_bot"
+path = "src/bin/trading_bot.rs"
+
+[[bin]]
+name = "main"   # For development and testing
+path = "src/bin/main.rs"
+
 [dependencies]
 dotenvy = "0.15"    # Load environment variables from .env file
-ethers = "2" # Ethereum
+ethers = { version = "2", features = ["ws"] } # Ethereum with WebSocket support
 serde = { version = "1.0", features = ["derive"] } # Serialization/deserialization
 tokio = { version = "1", features = ["full"] } # Async runtime
 eyre = "0.6" # East error handling

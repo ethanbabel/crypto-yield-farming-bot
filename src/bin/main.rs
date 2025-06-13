@@ -3,7 +3,7 @@ use crypto_yield_farming_bot::abi_fetcher;
 use crypto_yield_farming_bot::token;
 use crypto_yield_farming_bot::market;
 use crypto_yield_farming_bot::logging;
-use crypto_yield_farming_bot::gmx::gmx_datastore;
+use crypto_yield_farming_bot::gmx::datastore;
 use dotenvy::dotenv;
 
 
@@ -12,13 +12,13 @@ async fn main() -> eyre::Result<()> {
     // Load environment variables from .env file
     dotenv().ok();
 
-    // Initialize logging (console always, file if enabled, structured JSON)
+    // Initialize logging
     logging::init_logging();
     // Set panic hook to log panics
     logging::set_panic_hook();
 
     // Load configuration (including provider)
-    let cfg = config::Config::load();
+    let cfg = config::Config::load().await;
 
     tracing::info!(network_mode = %cfg.network_mode, "Loaded configuration and initialized logging");
 
@@ -62,7 +62,7 @@ async fn main() -> eyre::Result<()> {
     tracing::info!("All token prices fetched in {} seconds", waited_secs);
 
     // Fetch GMX markets and populate market registry
-    let mut market_registry = market::MarketRegistry::new();
+    let mut market_registry = market::MarketRegistry::new(&cfg);
     if let Err(err) = market_registry.populate(&cfg, &token_registry).await {
         tracing::error!(?err, "Failed to populate market registry");
         return Err(err);
@@ -86,7 +86,7 @@ async fn main() -> eyre::Result<()> {
     tracing::info!("All borrowing APRs calculated successfully");
     market_registry.print_markets_by_borrowing_apr_desc();
 
-    let pool_factors = gmx_datastore::get_lp_fee_pool_factors(&cfg).await?;
+    let pool_factors = datastore::get_lp_fee_pool_factors(&cfg).await?;
     tracing::info!(
         position_fee_receiver_factor = %pool_factors.0,
         liquidation_fee_receiver_factor = %pool_factors.1,
@@ -94,6 +94,12 @@ async fn main() -> eyre::Result<()> {
         borrowing_fee_receiver_factor = %pool_factors.3,
         "Fetched LP fee pool factors"
     );
+
+    if let Err(err) = market_registry.save_markets_to_file() {
+        tracing::error!(?err, "Failed to save market data to file");
+        return Err(err);
+    }
+    tracing::info!("Market data saved to file");
 
     Ok(())
 }

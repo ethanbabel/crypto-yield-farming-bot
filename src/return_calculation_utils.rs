@@ -2,7 +2,7 @@ use ethers::types::{I256, U256};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 
-use crate::gmx::gmx_reader_structs::{MarketInfo, MarketPoolValueInfoProps};
+use crate::gmx::reader_utils::{MarketInfo, MarketPoolValueInfoProps};
 use crate::constants::GMX_DECIMALS;
 
 pub fn i256_to_decimal_scaled(val: I256) -> Decimal {

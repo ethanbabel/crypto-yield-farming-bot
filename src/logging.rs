@@ -39,14 +39,14 @@ pub fn init_logging() {
     // Load file log flag from env
     let log_to_file = env::var("LOG_TO_FILE").unwrap_or_else(|_| "false".to_string()) == "true";
 
-    // Set up EnvFilter for runtime log levels, filter globally to "warn", filter our own crate to the specified levels in .env
+    // Set up EnvFilter for runtime log levels, filter globally to "warn", filter our own crate and binaries to the specified levels in .env
     let env_filter_console = EnvFilter::try_new(
-        &format!("warn,crypto_yield_farming_bot={}", console_log_level)
-    ).unwrap_or_else(|_| EnvFilter::new("crypto_yield_farming_bot=info"));
+        &format!("warn,crypto_yield_farming_bot={0},data_recorder={0},main={0},trading_bot={0}", console_log_level)
+    ).unwrap_or_else(|_| EnvFilter::new("warn,crypto_yield_farming_bot=info,data_recorder=info,main=info,trading_bot=info"));
 
     let env_filter_file = EnvFilter::try_new(
-        &format!("warn,crypto_yield_farming_bot={}", file_log_level)
-    ).unwrap_or_else(|_| EnvFilter::new("crypto_yield_farming_bot=info"));
+        &format!("warn,crypto_yield_farming_bot={0},data_recorder={0},main={0},trading_bot={0}", file_log_level)
+    ).unwrap_or_else(|_| EnvFilter::new("warn,crypto_yield_farming_bot=info,data_recorder=info,main=info,trading_bot=info"));
 
     // Console layer: always enabled, pretty human-readable logs
     let console_layer = fmt::Layer::new()

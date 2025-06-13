@@ -1,5 +1,5 @@
 use ethers::types::{Address, U256, I256};
-use super::gmx_reader::reader;
+use super::reader::reader;
 
 // Return type for Reader.getMarkets
 #[derive(Debug, Clone)]

@@ -48,6 +48,7 @@ pub async fn fetch_all_abis(config: &Config) -> Result<()> {
     let abis = vec![
         ("Reader", config.gmx_reader),
         ("DataStore", config.gmx_datastore),
+        ("EventEmitter", config.gmx_eventemitter)
     ];
 
     if config.refetch_abis {

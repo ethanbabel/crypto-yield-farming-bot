@@ -15,7 +15,7 @@ use tracing::{instrument, info, warn};
 use crate::oracle::Oracle;
 use crate::constants::{GMX_API_PRICES_ENDPOINT, GMX_SUPPORTED_TOKENS_ENDPOINT, GMX_DECIMALS};
 use crate::config::Config;
-use crate::gmx::gmx_reader_structs::PriceProps;
+use crate::gmx::reader_utils::PriceProps;
 
 #[derive(Debug, Clone)]
 pub struct AssetToken {
@@ -70,8 +70,8 @@ impl AssetTokenRegistry {
     #[instrument(skip(self), fields(on_close = true))]
     pub fn load_from_file(&mut self) -> Result<()> {
         let path = match self.network_mode.as_str() {
-            "test" => "tokens/testnet_asset_token_data.json".to_string(),
-            "prod" => "tokens/asset_token_data.json".to_string(),
+            "test" => "data/testnet_asset_token_data.json".to_string(),
+            "prod" => "data/asset_token_data.json".to_string(),
             _ => panic!("Invalid NETWORK_MODE"),
         };
         info!(file = %path, "Loading asset tokens from file");
@@ -182,7 +182,7 @@ impl AssetTokenRegistry {
         }
 
         // Write the new tokens to json file
-        let path = "tokens/asset_token_data.json".to_string();
+        let path = "data/asset_token_data.json".to_string();
         let existing_file_content = fs::read_to_string(&path)?;
         let mut existing_json_data: Value = serde_json::from_str(&existing_file_content)?;
         let tokens_arr: &mut Vec<Value> = existing_json_data["tokens"].as_array_mut().ok_or_else(|| 

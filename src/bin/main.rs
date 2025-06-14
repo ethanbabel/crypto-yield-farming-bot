@@ -76,15 +76,13 @@ async fn main() -> eyre::Result<()> {
     }
     tracing::info!(count = market_registry.num_markets(), "Repopulated market registry");
 
-    // Update all markets with their data and calculate APRs
+    // Update all markets with their data
     if let Err(err) = market_registry.update_all_market_data(&cfg).await {
         tracing::error!(?err, "Failed to update all market data");
         return Err(err);
     }
     tracing::info!(relevant = market_registry.num_relevant_markets(), "All market data updated successfully");
-    market_registry.calculate_all_borrowing_aprs();
-    tracing::info!("All borrowing APRs calculated successfully");
-    market_registry.print_markets_by_borrowing_apr_desc();
+    market_registry.print_relevant_markets();
 
     let pool_factors = datastore::get_lp_fee_pool_factors(&cfg).await?;
     tracing::info!(

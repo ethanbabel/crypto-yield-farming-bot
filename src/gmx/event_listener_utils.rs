@@ -20,12 +20,14 @@ pub fn string_to_bytes32(s: &str) -> H256 {
 // --- Cumulative Fees Struct (for each market) ---
 #[derive(Debug, Clone)]
 pub struct MarketFees {
-    /// Cumulative fees for each fee type (e.g. "position_fees")
-    /// Each fee type is now a map from token address to amount (U256)
+    // Cumulative fees for each fee type
     pub position_fees: HashMap<Address, U256>,
     pub liquidation_fees: HashMap<Address, U256>,
     pub swap_fees: HashMap<Address, U256>,
     pub borrowing_fees: HashMap<Address, U256>,
+
+    pub trading_volume: U256,
+    pub swap_volume: HashMap<Address, U256>,
 }
 
 impl MarketFees {
@@ -35,6 +37,8 @@ impl MarketFees {
             liquidation_fees: HashMap::new(),
             swap_fees: HashMap::new(),
             borrowing_fees: HashMap::new(),
+            trading_volume: U256::zero(),
+            swap_volume: HashMap::new(),
         }
     }
 }

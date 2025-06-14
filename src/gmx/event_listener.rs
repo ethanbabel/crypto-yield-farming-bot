@@ -95,6 +95,13 @@ impl GmxEventListener {
             }
         };
 
+        let trade_size_usd = match event.event_data.uint_items.items.get(2) {
+            Some(item) => item.value,
+            None => {
+                error!("Missing trade_size_usd at index 2");
+                return;
+            }
+        };
         let borrowing_fee_amount = match event.event_data.uint_items.items.get(10) {
             Some(item) => item.value,
             None => {
@@ -127,14 +134,14 @@ impl GmxEventListener {
                     return;
                 }
             };
-            let liquidation_fee_amount_for_fee_receriver = match event.event_data.uint_items.items.get(n - 1) {
+            let liquidation_fee_amount_for_fee_receiver = match event.event_data.uint_items.items.get(n - 1) {
                 Some(item) => item.value,
                 None => {
-                    error!("Missing liquidation_fee_amount_for_fee_receriver at index {}", n - 1);
+                    error!("Missing liquidation_fee_amount_for_fee_receiver at index {}", n - 1);
                     return;
                 }
             };
-            liquidation_fee_amount - liquidation_fee_amount_for_fee_receriver
+            liquidation_fee_amount - liquidation_fee_amount_for_fee_receiver
         } else {
             U256::zero()
         };
@@ -143,14 +150,13 @@ impl GmxEventListener {
         let mut fees_map = self.fees.lock().await;
         let market_fees = fees_map.entry(market_address).or_insert_with(MarketFees::new);
         // Update position_fees
-        let position_amount = event.event_data.uint_items.items[0].value;
-        *market_fees.position_fees.entry(collateral_token).or_insert(U256::zero()) += position_amount;
+        *market_fees.position_fees.entry(collateral_token).or_insert(U256::zero()) +=  position_fee_amount_for_pool;
         // Update liquidation_fees
-        let liquidation_amount = event.event_data.uint_items.items[1].value;
-        *market_fees.liquidation_fees.entry(collateral_token).or_insert(U256::zero()) += liquidation_amount;
+        *market_fees.liquidation_fees.entry(collateral_token).or_insert(U256::zero()) += liquidation_fee_amount_for_pool;
         // Update borrowing_fees
-        let borrowing_amount = event.event_data.uint_items.items[2].value;
-        *market_fees.borrowing_fees.entry(collateral_token).or_insert(U256::zero()) += borrowing_amount;
+        *market_fees.borrowing_fees.entry(collateral_token).or_insert(U256::zero()) += borrowing_fee_amount_for_pool;
+        // Update trading volume
+        market_fees.trading_volume += trade_size_usd;
     }
 
     // Process SwapFeesCollected event
@@ -177,10 +183,18 @@ impl GmxEventListener {
                 return;
             }
         };
+        let amount_after_fees = match event.event_data.uint_items.items.get(3) {
+            Some(item) => item.value,
+            None => {
+                error!("Missing amount_after_fees at index 3");
+                return;
+            }
+        };
         
         // Update fees map
         let mut fees_map = self.fees.lock().await;
         let market_fees = fees_map.entry(market_address).or_insert_with(MarketFees::new);
         *market_fees.swap_fees.entry(token).or_insert(U256::zero()) += fee_amount_for_pool;
+        *market_fees.swap_volume.entry(token).or_insert(U256::zero()) += amount_after_fees;
     }
 }

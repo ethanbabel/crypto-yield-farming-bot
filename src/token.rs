@@ -29,6 +29,7 @@ pub struct AssetToken {
     pub last_max_price: Option<U256>,
     pub last_min_price_usd: Option<Decimal>,
     pub last_max_price_usd: Option<Decimal>,
+    pub last_mid_price_usd: Option<Decimal>, 
     pub updated_at: Option<Instant>, // Timestamp of last price update
 }
 
@@ -121,6 +122,7 @@ impl AssetTokenRegistry {
                 last_max_price: None,
                 last_min_price_usd: None,
                 last_max_price_usd: None,
+                last_mid_price_usd: None,
                 updated_at: None,
             };
             self.asset_tokens.insert(address, asset_token);
@@ -168,6 +170,7 @@ impl AssetTokenRegistry {
                     last_max_price: None,
                     last_min_price_usd: None,
                     last_max_price_usd: None,
+                    last_mid_price_usd: None,
                     updated_at: None,
                 };
                 self.asset_tokens.insert(address, new_token.clone());
@@ -227,14 +230,15 @@ impl AssetTokenRegistry {
                             token.last_min_price = Some(min_price);
                             token.last_max_price = Some(max_price);
                             let min_price_usd: Decimal = Decimal::from_str(
-                                &utils::format_units(min_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
+                                &utils::format_units(min_price, (GMX_DECIMALS - token.decimals) as usize).unwrap_or_else(|_| "0".to_string())
                             ).unwrap_or(Decimal::ZERO);
                             let max_price_usd: Decimal = Decimal::from_str(
-                                &utils::format_units(max_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
+                                &utils::format_units(max_price, (GMX_DECIMALS - token.decimals) as usize).unwrap_or_else(|_| "0".to_string())
                             ).unwrap_or(Decimal::ZERO);
                             let adjustment = Decimal::from(10u64).powu(token.decimals as u64);
                             token.last_min_price_usd = Some(min_price_usd * adjustment);
                             token.last_max_price_usd = Some(max_price_usd * adjustment);
+                            token.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
                             token.updated_at = Some(Instant::now());
                         }
                     } else {
@@ -257,6 +261,7 @@ impl AssetTokenRegistry {
                             let adjustment = Decimal::from(10u64).powu(token.decimals as u64);
                             token.last_min_price_usd = Some(min_price_usd * adjustment);
                             token.last_max_price_usd = Some(max_price_usd * adjustment);
+                            token.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
                             token.updated_at = Some(Instant::now());
                         }
                     }

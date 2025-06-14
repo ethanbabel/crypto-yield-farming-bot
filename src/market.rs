@@ -16,14 +16,15 @@ use crate::token::{AssetToken, AssetTokenRegistry};
 use crate::gmx::{
     reader_utils::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps},
     reader,
-    datastore
+    datastore,
+    event_listener_utils::MarketFees,
 };
-use crate::return_calculation_utils::{
+use crate::market_utils::{
     self,
     i256_to_decimal_scaled, 
-    // i256_to_decimal_scaled_decimals,
-    u256_to_decimal_scaled, 
-    // u256_to_decimal_scaled_decimals
+    i256_to_decimal_scaled_decimals,
+    u256_to_decimal_scaled,
+    u256_to_decimal_scaled_decimals
 };
 
 #[derive(Debug, Clone)]
@@ -33,51 +34,35 @@ pub struct Market {
     pub index_token: AssetToken,
     pub long_token: AssetToken,
     pub short_token: AssetToken,
-    pub market_info: Option<MarketInfo>,
-    pub pool_info_deposit_min: Option<MarketPoolValueInfoProps>,
-    pub pool_info_deposit_max: Option<MarketPoolValueInfoProps>,
-    pub pool_info_withdrawal_min: Option<MarketPoolValueInfoProps>,
-    pub pool_info_withdrawal_max: Option<MarketPoolValueInfoProps>,
-    pub has_supply : bool, // Indicates if the market has supply (won't for swap or deprecated markets), default is true
-    pub gm_token_price_min: Option<I256>, 
-    pub gm_token_price_max: Option<I256>,
-    pub long_open_interest: Option<U256>, 
-    pub short_open_interest: Option<U256>, 
-    pub long_open_interest_via_tokens_min: Option<U256>,
-    pub long_open_interest_via_tokens_max: Option<U256>,
-    pub short_open_interest_via_tokens_min: Option<U256>,
-    pub short_open_interest_via_tokens_max: Option<U256>,
+    pub borrowing_factor_per_second: Option<market_utils::BorrowingFactorPerSecond>,
+    pub has_supply: bool, // Indicates if the market has supply (won't for swap or deprecated markets), default is true
+    pub pnl: Option<market_utils::Pnl>,
+    pub token_pool: Option<market_utils::TokenPool>,
+    pub gm_token_price: Option<market_utils::GmTokenPrice>,
+    pub open_interest: Option<market_utils::OpenInterest>,
+    pub current_utilization: Option<Decimal>,
+    pub volume: Option<market_utils::Volume>,
+    pub cumulative_fees: Option<market_utils::CumulativeFees>,
 
     // Timestamp of the last market data update
     pub updated_at: Option<Instant>,  
-
-    // --- Calculated values ---
-    pub current_borrowing_apr: Option<Decimal>, 
 }
 
 impl fmt::Display for Market {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/USD [{} - {}],  Borrowing APR: {},  GM Token Price Range: [${}, ${}], OI: Long = {}, Short = {}, OI_Tokens: Long = [{} - {}], Short = [{} - {}]",
+            "{}/USD [{} - {}], Total Fees: {}",
             self.index_token.symbol,
             self.long_token.symbol,
             self.short_token.symbol,
-            self.current_borrowing_apr.map_or("N/A".to_string(), |v| format!("{:.2}%", v * dec!(100.0))),
-            self.gm_token_price_min.map_or("N/A".to_string(), |v| format!("{:.5}", i256_to_decimal_scaled(v))),
-            self.gm_token_price_max.map_or("N/A".to_string(), |v| format!("{:.5}", i256_to_decimal_scaled(v))),
-            self.long_open_interest.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
-            self.short_open_interest.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
-            self.long_open_interest_via_tokens_max.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
-            self.long_open_interest_via_tokens_min.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
-            self.short_open_interest_via_tokens_min.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v))),
-            self.short_open_interest_via_tokens_max.map_or("N/A".to_string(), |v| format!("{:.2}", u256_to_decimal_scaled(v)))
+            self.cumulative_fees.as_ref().map_or("N/A".to_string(), |u| format!("${:.5}", u.total_fees))
         )
     }
 }
 
 impl Market {
-    /// Construct a MarketProps struct from the latest price data
+    // Construct a MarketProps struct from the latest price data
     pub fn market_props(&self) -> MarketProps {
         MarketProps {
             market_token: self.market_token,
@@ -87,7 +72,7 @@ impl Market {
         }
     }
 
-    /// Construct a MarketPrices struct from the latest price data
+    // Construct a MarketPrices struct from the latest price data
     pub fn market_prices(&self) -> Option<MarketPrices> {
         Some(MarketPrices {
             index_token_price: self.index_token.price_props()?,
@@ -96,41 +81,131 @@ impl Market {
         })
     }
 
-    /// Fetch market info and pool info for the market
-    pub async fn fetch_market_data(&mut self, config: &Config) -> Result<()> {
+    /// Returns a reference to the asset token (index, long, or short) matching the given address, if any.
+    pub fn get_asset_token_by_address(&self, address: &Address) -> Option<&AssetToken> {
+        if &self.index_token.address == address {
+            Some(&self.index_token)
+        } else if &self.long_token.address == address {
+            Some(&self.long_token)
+        } else if &self.short_token.address == address {
+            Some(&self.short_token)
+        } else {
+            None
+        }
+    }
+
+    // Fetch market info and pool info for the market
+    pub async fn fetch_market_data(&mut self, config: &Config, market_fees: &MarketFees) -> Result<()> {
         let market_prices = self.market_prices();
         if let Some(prices) = market_prices {
             // Fetch market info
-            self.market_info = Some(reader::get_market_info(config, self.market_token, prices.clone()).await?);
+            let market_info = Some(reader::get_market_info(config, self.market_token, prices.clone()).await?);
             // Fetch pool info for deposit and withdrawal
-            let deposit_min = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Deposit, false).await?;
-            let deposit_max = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Deposit, true).await?;
-            let withdrawal_min = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Withdrawal, false).await?;
-            let withdrawal_max = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Withdrawal, true).await?;
+            let (gm_price_min, pool_info_min) = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Deposit, false).await?;
+            let (gm_price_max, pool_info_max) = reader::get_market_token_price(config, self.market_props(), prices.clone(), reader::PnlFactorType::Deposit, true).await?;
 
-            // Update pool info and gm token prices
-            self.pool_info_deposit_min = Some(deposit_min.1);
-            self.pool_info_deposit_max = Some(deposit_max.1);
-            self.pool_info_withdrawal_min = Some(withdrawal_min.1);
-            self.pool_info_withdrawal_max = Some(withdrawal_max.1);
-            
-            self.gm_token_price_min = Some(deposit_min.0);
-            self.gm_token_price_max = Some(deposit_max.0);
+            // Set borrowing factor per second
+            self.borrowing_factor_per_second = Some(
+                market_utils::BorrowingFactorPerSecond {
+                    longs: u256_to_decimal_scaled(market_info.as_ref().map_or(U256::zero(), |m| m.borrowing_factor_per_second_for_longs)),
+                    shorts: u256_to_decimal_scaled(market_info.as_ref().map_or(U256::zero(), |m| m.borrowing_factor_per_second_for_shorts)),
+                }
+            );
 
             // If pool_supply is zero, set has_supply to false
-            self.has_supply = self.pool_info_deposit_min.as_ref().map_or(true, |pool_info| !pool_info.pool_value.is_zero());
+            self.has_supply =  pool_info_min.pool_value != I256::zero() || pool_info_max.pool_value != I256::zero();
+
+            // Set GM token price
+            self.gm_token_price = Some(
+                market_utils::GmTokenPrice {
+                    min: i256_to_decimal_scaled(gm_price_min),
+                    max: i256_to_decimal_scaled(gm_price_max),
+                    mid: i256_to_decimal_scaled((gm_price_min + gm_price_max) / I256::from(2)),
+                }
+            );
+
+            // Set pnl
+            self.pnl = Some(
+                market_utils::Pnl {
+                    long: i256_to_decimal_scaled(pool_info_min.long_pnl + pool_info_max.long_pnl) / Decimal::from(2),
+                    short: i256_to_decimal_scaled(pool_info_min.short_pnl + pool_info_max.short_pnl) / Decimal::from(2),
+                    net: i256_to_decimal_scaled(pool_info_min.net_pnl + pool_info_max.net_pnl) / Decimal::from(2),
+                }
+            );
+
+            // Set token pool info
+            self.token_pool = Some(
+                market_utils::TokenPool {
+                    long_token_amount: u256_to_decimal_scaled(pool_info_min.long_token_amount),
+                    short_token_amount: u256_to_decimal_scaled(pool_info_min.short_token_amount),
+                    long_token_usd: u256_to_decimal_scaled(pool_info_min.long_token_usd + pool_info_max.long_token_usd) / Decimal::from(2),
+                    short_token_usd: u256_to_decimal_scaled(pool_info_min.short_token_usd + pool_info_max.short_token_usd) / Decimal::from(2),
+                }
+            );
 
             // Fetch long and short open interest
-            self.long_open_interest = Some(datastore::get_open_interest(config, self.market_props(), true).await?);
-            self.short_open_interest = Some(datastore::get_open_interest(config, self.market_props(), false).await?);
+            let long_open_interest = datastore::get_open_interest(config, self.market_props(), true).await?;
+            let short_open_interest = datastore::get_open_interest(config, self.market_props(), false).await?;
 
             // Fetch long and short open interest in tokens
             let long_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, self.market_props(), true).await?;
             let short_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, self.market_props(), false).await?;
-            self.long_open_interest_via_tokens_min = Some(long_open_interest_in_tokens * prices.index_token_price.min);
-            self.long_open_interest_via_tokens_max = Some(long_open_interest_in_tokens * prices.index_token_price.max);
-            self.short_open_interest_via_tokens_min = Some(short_open_interest_in_tokens * prices.index_token_price.min);
-            self.short_open_interest_via_tokens_max = Some(short_open_interest_in_tokens * prices.index_token_price.max);
+            
+            // Set open interest
+            self.open_interest = Some(
+                market_utils::OpenInterest {
+                    long: u256_to_decimal_scaled(long_open_interest),
+                    short: u256_to_decimal_scaled(short_open_interest),
+                    long_via_tokens: u256_to_decimal_scaled(long_open_interest_in_tokens) * self.index_token.last_mid_price_usd.unwrap(),
+                    short_via_tokens: u256_to_decimal_scaled(short_open_interest_in_tokens) * self.index_token.last_mid_price_usd.unwrap(),
+                }
+            );
+
+            // Calculate utilization
+            let total_open_interest = self.open_interest.as_ref().unwrap().long + self.open_interest.as_ref().unwrap().short;
+            let total_pool_liquidity = self.token_pool.as_ref().unwrap().long_token_usd + self.token_pool.as_ref().unwrap().short_token_usd;
+            if total_pool_liquidity > Decimal::ZERO {
+                self.current_utilization = Some(total_open_interest / total_pool_liquidity);
+            } 
+
+            // Set volume and cumulative fees
+            let mut total_swap_volume = Decimal::ZERO;
+            for (token_address, volume) in &market_fees.swap_volume {
+                if let Some(token) = self.get_asset_token_by_address(token_address) {
+                    total_swap_volume += u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
+                } else {
+                    warn!("Market {} has swap volume for unknown token {}", self.market_token, to_checksum(token_address, None));
+                }
+            }
+            self.volume = Some(
+                market_utils::Volume {
+                    trading: u256_to_decimal_scaled(market_fees.trading_volume),
+                    swap: total_swap_volume,
+                }
+            );
+            
+            let mut cumulative_fees = market_utils::CumulativeFees::new();
+            let mut fee_types = [
+                (&market_fees.position_fees, &mut cumulative_fees.position_fees),
+                (&market_fees.liquidation_fees, &mut cumulative_fees.liquidation_fees),
+                (&market_fees.swap_fees, &mut cumulative_fees.swap_fees),
+                (&market_fees.borrowing_fees, &mut cumulative_fees.borrowing_fees),
+            ];
+
+            for (fee_map, field) in fee_types.iter_mut() {
+                for (token_address, fee) in fee_map.iter() {
+                    if let Some(token) = self.get_asset_token_by_address(token_address) {
+                        tracing::info!("Market {} has fee for token {}: {}", to_checksum(&self.market_token, None), to_checksum(token_address, None), fee);
+                        let fee_val = u256_to_decimal_scaled_decimals(*fee, token.decimals) * token.last_mid_price_usd.unwrap();
+                        tracing::info!("Converting fee {} to decimal with decimals {}: {}, token price: {}", fee, token.decimals, fee_val, token.last_mid_price_usd.unwrap());
+                        **field += fee_val;
+                        cumulative_fees.total_fees += fee_val;
+                    } else {
+                        warn!("Market {} has fee for unknown token {}", self.market_token, to_checksum(token_address, None));
+                    }
+                }
+            }
+            self.cumulative_fees = Some(cumulative_fees);
 
             // Update the timestamp of the last update
             self.updated_at = Some(Instant::now());
@@ -138,23 +213,6 @@ impl Market {
             Ok(())
         } else {
             eyre::bail!("Fetch market prices before fetching market data for market {}", self);
-        }
-    }
-
-    pub fn calculate_borrowing_apr(&mut self) {
-        if let (Some(market_info), Some(pool_info_deposit_min), Some(long_open_interest), Some(short_open_interest)) = (
-            &self.market_info, &self.pool_info_deposit_min, self.long_open_interest, self.short_open_interest,
-        ) {
-            self.current_borrowing_apr = Some(
-                return_calculation_utils::calculate_borrowing_apr(
-                    market_info,
-                    pool_info_deposit_min,
-                    long_open_interest,
-                    short_open_interest,
-                )
-            )
-        } else {
-            tracing::warn!("Market data not fully available for borrowing APR calculation for market {}, continuing...", self);
         }
     }
 }
@@ -192,23 +250,16 @@ impl MarketRegistry {
                 index_token: index.clone(),
                 long_token: long.clone(),
                 short_token: short.clone(),
-                market_info: None,
-                pool_info_deposit_min: None,
-                pool_info_deposit_max: None,
-                pool_info_withdrawal_min: None,
-                pool_info_withdrawal_max: None,
-                has_supply: true,
-                gm_token_price_min: None,
-                gm_token_price_max: None,
-                long_open_interest: None,
-                short_open_interest: None,
-                long_open_interest_via_tokens_min: None,
-                long_open_interest_via_tokens_max: None,
-                short_open_interest_via_tokens_min: None,
-                short_open_interest_via_tokens_max: None,
+                borrowing_factor_per_second: None,
+                has_supply: true, // Default to true
+                pnl: None,
+                token_pool: None,
+                gm_token_price: None,
+                open_interest: None,
+                current_utilization: None,
+                volume: None,
+                cumulative_fees: None,
                 updated_at: None,
-
-                current_borrowing_apr: None,
             };
             self.markets.insert(props.market_token, market);
         } else {
@@ -277,67 +328,40 @@ impl MarketRegistry {
 
     // Prints all markets in the registry
     pub fn print_all_markets(&self) {
-        for market in self.all_markets() {
-            info!(market = %market, "Market info");
-        }
+        let output = self.all_markets()
+            .map(|m| format!("{}", m))
+            .collect::<Vec<_>>()
+            .join("\n");
+        info!("All markets:\n{}", output);
     }
 
     // Prints all markets that have supply
     pub fn print_relevant_markets(&self) {
-        for market in self.relevant_markets() {
-            info!(market = %market, "Relevant market info");
-        }
+        let output =  self.relevant_markets()
+            .map(|m| format!("{}", m))
+            .collect::<Vec<_>>()
+            .join("\n");
+        info!("Relevant markets:\n{}", output);
     }
 
     #[instrument(skip(self, config), fields(on_close = true))]
-    pub async fn update_all_market_data(&mut self, config: &Config) -> Result<()> {
+    pub async fn update_all_market_data(&mut self, config: &Config, fee_map: &HashMap<Address, MarketFees>) -> Result<()> {
 
         stream::iter(self.markets.values_mut())
             .for_each_concurrent(1, |market| {  // Limit concurrency to 1 for now, can be adjusted later with a paid alchemy plan
                 let config = config.clone();
                 async move {
-                    if let Err(e) = market.fetch_market_data(&config).await {
+                    let fallback_fees = MarketFees::new();
+                    let market_fees = fee_map.get(&market.market_token).unwrap_or(&fallback_fees);
+                    if let Err(e) = market.fetch_market_data(&config, market_fees).await {
                         error!(market = %market.market_token, "Failed to fetch market data: {}", e);
                     } 
                 }
             })
             .await;
+
         info!("All market data updated");
         Ok(())
-    }
-
-    #[instrument(skip(self), fields(on_close = false))]
-    pub fn calculate_all_borrowing_aprs(&mut self) {
-        for market in self.markets.values_mut() {
-            market.calculate_borrowing_apr();
-        }
-        info!("All borrowing APRs calculated");
-    }
-
-    pub fn print_markets_by_borrowing_apr_desc(&self) {
-        let mut markets: Vec<&Market> = self.markets.values().collect();
-        markets.sort_by(|a, b| {
-            let a_apr = a.current_borrowing_apr.unwrap_or(Decimal::ZERO);
-            let b_apr = b.current_borrowing_apr.unwrap_or(Decimal::ZERO);
-            b_apr.partial_cmp(&a_apr).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let output = markets
-            .iter()
-            .filter(|m| m.has_supply)
-            .map(|m| format!("{}", m))
-            .collect::<Vec<_>>()
-            .join("\n");
-        info!("Markets by borrowing APR (desc):\n{}", output);
-    }
-
-    pub fn top_markets_by_borrowing_apr(&self, count: usize) -> Vec<&Market> {
-        let mut markets: Vec<&Market> = self.markets.values().collect();
-        markets.sort_by(|a, b| {
-            let a_apr = a.current_borrowing_apr.unwrap_or(Decimal::ZERO);
-            let b_apr = b.current_borrowing_apr.unwrap_or(Decimal::ZERO);
-            b_apr.partial_cmp(&a_apr).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        markets.into_iter().take(count).collect()
     }
 
     pub fn save_markets_to_file(&self) -> eyre::Result<()> {

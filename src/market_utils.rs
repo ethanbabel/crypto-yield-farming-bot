@@ -80,6 +80,15 @@ pub struct Volume {
     pub swap: Decimal,
 }
 
+impl Volume {
+    pub fn new() -> Self {
+        Self {
+            trading: Decimal::ZERO,
+            swap: Decimal::ZERO,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CumulativeFees {
     pub position_fees: Decimal,

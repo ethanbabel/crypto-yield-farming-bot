@@ -70,12 +70,14 @@ async fn main() -> eyre::Result<()> {
     });
 
     // Periodically update markets
-    let mut ticker = interval(Duration::from_secs(60));
+    let mut ticker = interval(Duration::from_secs(300));
     loop {
         ticker.tick().await;
         let snapshot = {
-            let map = fees_map.lock().await;
-            map.clone()
+            let mut map = fees_map.lock().await;
+            let ss = map.clone();
+            map.clear();
+            ss
         };
         tracing::info!("Updating market data with snapshot: {:?}", snapshot);
         if let Err(e) = market_registry.update_all_market_data(&cfg, &snapshot).await {

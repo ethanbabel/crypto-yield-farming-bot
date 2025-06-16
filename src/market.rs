@@ -41,8 +41,8 @@ pub struct Market {
     pub gm_token_price: Option<market_utils::GmTokenPrice>,
     pub open_interest: Option<market_utils::OpenInterest>,
     pub current_utilization: Option<Decimal>,
-    pub volume: Option<market_utils::Volume>,
-    pub cumulative_fees: Option<market_utils::CumulativeFees>,
+    pub volume: market_utils::Volume,
+    pub cumulative_fees: market_utils::CumulativeFees,
 
     // Timestamp of the last market data update
     pub updated_at: Option<Instant>,  
@@ -56,7 +56,11 @@ impl fmt::Display for Market {
             self.index_token.symbol,
             self.long_token.symbol,
             self.short_token.symbol,
-            self.cumulative_fees.as_ref().map_or("N/A".to_string(), |u| format!("${:.5}", u.total_fees))
+            if self.cumulative_fees.total_fees == Decimal::ZERO {
+                "N/A".to_string()
+            } else {
+                format!("${:.5}", self.cumulative_fees.total_fees)
+            }
         )
     }
 }
@@ -169,43 +173,46 @@ impl Market {
             } 
 
             // Set volume and cumulative fees
-            let mut total_swap_volume = Decimal::ZERO;
             for (token_address, volume) in &market_fees.swap_volume {
                 if let Some(token) = self.get_asset_token_by_address(token_address) {
-                    total_swap_volume += u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
+                    self.volume.swap += u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
                 } else {
                     warn!("Market {} has swap volume for unknown token {}", self.market_token, to_checksum(token_address, None));
                 }
             }
-            self.volume = Some(
-                market_utils::Volume {
-                    trading: u256_to_decimal_scaled(market_fees.trading_volume),
-                    swap: total_swap_volume,
-                }
-            );
-            
-            let mut cumulative_fees = market_utils::CumulativeFees::new();
+            self.volume.trading += u256_to_decimal_scaled(market_fees.trading_volume);
+
             let mut fee_types = [
-                (&market_fees.position_fees, &mut cumulative_fees.position_fees),
-                (&market_fees.liquidation_fees, &mut cumulative_fees.liquidation_fees),
-                (&market_fees.swap_fees, &mut cumulative_fees.swap_fees),
-                (&market_fees.borrowing_fees, &mut cumulative_fees.borrowing_fees),
+                (&market_fees.position_fees, &mut self.cumulative_fees.position_fees),
+                (&market_fees.liquidation_fees, &mut self.cumulative_fees.liquidation_fees),
+                (&market_fees.swap_fees, &mut self.cumulative_fees.swap_fees),
+                (&market_fees.borrowing_fees, &mut self.cumulative_fees.borrowing_fees),
             ];
 
+            // Prepare token map to avoid borrow checker issues
+            let mut token_map = HashMap::new();
+            token_map.insert(self.index_token.address, self.index_token.clone());
+            token_map.insert(self.long_token.address, self.long_token.clone());
+            token_map.insert(self.short_token.address, self.short_token.clone());
+            
             for (fee_map, field) in fee_types.iter_mut() {
                 for (token_address, fee) in fee_map.iter() {
-                    if let Some(token) = self.get_asset_token_by_address(token_address) {
-                        tracing::info!("Market {} has fee for token {}: {}", to_checksum(&self.market_token, None), to_checksum(token_address, None), fee);
+                    let token_opt = token_map.get(token_address);
+                    if let Some(token) = token_opt {
                         let fee_val = u256_to_decimal_scaled_decimals(*fee, token.decimals) * token.last_mid_price_usd.unwrap();
-                        tracing::info!("Converting fee {} to decimal with decimals {}: {}, token price: {}", fee, token.decimals, fee_val, token.last_mid_price_usd.unwrap());
+                        tracing::info!("Market {}, Token {}, Fee before scaling: {}, after scaling: {}", 
+                            to_checksum(&self.market_token, None),
+                            to_checksum(token_address, None),
+                            fee,
+                            fee_val
+                        );
                         **field += fee_val;
-                        cumulative_fees.total_fees += fee_val;
+                        self.cumulative_fees.total_fees += fee_val;
                     } else {
                         warn!("Market {} has fee for unknown token {}", self.market_token, to_checksum(token_address, None));
                     }
                 }
             }
-            self.cumulative_fees = Some(cumulative_fees);
 
             // Update the timestamp of the last update
             self.updated_at = Some(Instant::now());
@@ -257,8 +264,8 @@ impl MarketRegistry {
                 gm_token_price: None,
                 open_interest: None,
                 current_utilization: None,
-                volume: None,
-                cumulative_fees: None,
+                volume:  market_utils::Volume::new(),
+                cumulative_fees:  market_utils::CumulativeFees::new(),
                 updated_at: None,
             };
             self.markets.insert(props.market_token, market);
@@ -359,8 +366,6 @@ impl MarketRegistry {
                 }
             })
             .await;
-
-        info!("All market data updated");
         Ok(())
     }
 

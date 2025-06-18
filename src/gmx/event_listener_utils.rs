@@ -1,16 +1,10 @@
 use ethers::{
-    prelude::*,
-    types::{Address, U256, H256, TxHash},
-    utils::{format_units, keccak256},
-    abi::{encode, decode, Token},
+    types::{Address, U256, H256},
+    utils::{keccak256},
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
-
-use crate::constants::GMX_DECIMALS;
 
 // --- Helper functions ---
 pub fn string_to_bytes32(s: &str) -> H256 {

@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, token_id, timestamp, min_price, max_price, mid_price\n        FROM token_prices\n        WHERE token_id = $1\n          AND timestamp >= $2\n          AND timestamp <= $3\n        ORDER BY timestamp ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "token_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "min_price",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_price",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 5,
+        "name": "mid_price",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "58779f629126e0e2b2e0515e6a65f93cab6ed94a4b68febfd3b507e195b0d7bf"
+}

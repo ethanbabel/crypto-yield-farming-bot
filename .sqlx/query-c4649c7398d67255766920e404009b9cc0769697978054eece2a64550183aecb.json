@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tokens (address, symbol, decimals)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (address) DO UPDATE SET address = EXCLUDED.address\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c4649c7398d67255766920e404009b9cc0769697978054eece2a64550183aecb"
+}

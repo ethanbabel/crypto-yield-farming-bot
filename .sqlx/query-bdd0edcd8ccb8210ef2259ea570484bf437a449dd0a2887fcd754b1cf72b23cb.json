@@ -1,0 +1,179 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,\n            pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,\n            pool_short_amount, pool_long_token_usd, pool_short_token_usd, open_interest_long,\n            open_interest_short, open_interest_long_via_tokens, open_interest_short_via_tokens,\n            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap,\n            fees_borrowing, fees_total\n        FROM market_states\n        WHERE market_id = $1 AND timestamp > $2\n        ORDER BY timestamp ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "market_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "borrowing_factor_long",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 4,
+        "name": "borrowing_factor_short",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 5,
+        "name": "pnl_long",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 6,
+        "name": "pnl_short",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 7,
+        "name": "pnl_net",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 8,
+        "name": "gm_price_min",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 9,
+        "name": "gm_price_max",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 10,
+        "name": "gm_price_mid",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 11,
+        "name": "pool_long_amount",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 12,
+        "name": "pool_short_amount",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 13,
+        "name": "pool_long_token_usd",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 14,
+        "name": "pool_short_token_usd",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 15,
+        "name": "open_interest_long",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 16,
+        "name": "open_interest_short",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 17,
+        "name": "open_interest_long_via_tokens",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 18,
+        "name": "open_interest_short_via_tokens",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 19,
+        "name": "utilization",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 20,
+        "name": "swap_volume",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 21,
+        "name": "trading_volume",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 22,
+        "name": "fees_position",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 23,
+        "name": "fees_liquidation",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 24,
+        "name": "fees_swap",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 25,
+        "name": "fees_borrowing",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 26,
+        "name": "fees_total",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bdd0edcd8ccb8210ef2259ea570484bf437a449dd0a2887fcd754b1cf72b23cb"
+}

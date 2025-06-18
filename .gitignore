@@ -6,3 +6,6 @@
 
 # Ignore log files
 /logs/*.log
+
+# Ignore cargo config
+/.cargo/config.toml

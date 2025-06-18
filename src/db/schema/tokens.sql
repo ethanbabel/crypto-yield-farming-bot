@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS tokens (
+    id SERIAL PRIMARY KEY,
+    address TEXT NOT NULL UNIQUE,
+    symbol TEXT NOT NULL,
+    decimals INTEGER NOT NULL
+);

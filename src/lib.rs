@@ -9,3 +9,4 @@ pub mod market;
 pub mod market_utils;
 pub mod return_calculation_utils;
 pub mod logging;
+pub mod db;

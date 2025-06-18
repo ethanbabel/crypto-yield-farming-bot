@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
-use std::time::Instant;
+use std::time::SystemTime;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
-use futures::future::join_all;
 use ethers::types::{Address, U256};
 use ethers::utils;
 use eyre::{Result, eyre};
@@ -30,7 +31,7 @@ pub struct AssetToken {
     pub last_min_price_usd: Option<Decimal>,
     pub last_max_price_usd: Option<Decimal>,
     pub last_mid_price_usd: Option<Decimal>, 
-    pub updated_at: Option<Instant>, // Timestamp of last price update
+    pub updated_at: Option<SystemTime>, // Timestamp of last price update
 }
 
 impl AssetToken {
@@ -44,7 +45,7 @@ impl AssetToken {
 
 #[derive(Debug)]
 pub struct AssetTokenRegistry {
-    asset_tokens: HashMap<Address, AssetToken>,
+    asset_tokens: HashMap<Address, Arc<RwLock<AssetToken>>>,
     network_mode: String, // "prod" or "test"
 }
 
@@ -56,16 +57,16 @@ impl AssetTokenRegistry {
         }
     }
 
-    pub fn get_asset_token(&self, address: &Address) -> Option<&AssetToken> {
-        self.asset_tokens.get(address)
+    pub fn get_asset_token(&self, address: &Address) -> Option<Arc<RwLock<AssetToken>>> {
+        self.asset_tokens.get(address).cloned()
     }
 
     pub fn num_asset_tokens(&self) -> usize {
         self.asset_tokens.len()
     }
 
-    pub fn asset_tokens(&self) -> impl Iterator<Item = &AssetToken> {
-        self.asset_tokens.values()
+    pub fn asset_tokens(&self) -> impl Iterator<Item = Arc<RwLock<AssetToken>>> + '_ {
+        self.asset_tokens.values().cloned()
     }
 
     #[instrument(skip(self), fields(on_close = true))]
@@ -125,7 +126,7 @@ impl AssetTokenRegistry {
                 last_mid_price_usd: None,
                 updated_at: None,
             };
-            self.asset_tokens.insert(address, asset_token);
+            self.asset_tokens.insert(address, Arc::new(RwLock::new(asset_token)));
         }
         info!("Loaded asset tokens from file");
         Ok(())
@@ -152,7 +153,6 @@ impl AssetTokenRegistry {
         let mut new_tokens = Vec::new();
         for token in tokens_arr {
             let address = Address::from_str(token["address"].as_str().expect("Token must have an address"))?;
-
             // If the token isn't already in the registry, add it and add it to new tokens
             if !self.asset_tokens.contains_key(&address) {
                 let symbol = token["symbol"].as_str().expect("Token must have a symbol").to_string();
@@ -173,7 +173,7 @@ impl AssetTokenRegistry {
                     last_mid_price_usd: None,
                     updated_at: None,
                 };
-                self.asset_tokens.insert(address, new_token.clone());
+                self.asset_tokens.insert(address, Arc::new(RwLock::new(new_token.clone())));
                 new_tokens.push(new_token);
             }
         }
@@ -220,7 +220,8 @@ impl AssetTokenRegistry {
             if let Some(address_str) = entry["tokenAddress"].as_str() {
                 if let Ok(address) = Address::from_str(address_str) {
                     if self.network_mode == "prod" {
-                        if let Some(token) = self.asset_tokens.get_mut(&address) {
+                        if let Some(token) = self.asset_tokens.get(&address) {
+                            let mut token = token.write().await;
                             let min_raw = entry["minPrice"].as_str().unwrap_or("0");
                             let max_raw = entry["maxPrice"].as_str().unwrap_or("0");
 
@@ -235,34 +236,36 @@ impl AssetTokenRegistry {
                             let max_price_usd: Decimal = Decimal::from_str(
                                 &utils::format_units(max_price, (GMX_DECIMALS - token.decimals) as usize).unwrap_or_else(|_| "0".to_string())
                             ).unwrap_or(Decimal::ZERO);
-                            let adjustment = Decimal::from(10u64).powu(token.decimals as u64);
-                            token.last_min_price_usd = Some(min_price_usd * adjustment);
-                            token.last_max_price_usd = Some(max_price_usd * adjustment);
+                            token.last_min_price_usd = Some(min_price_usd);
+                            token.last_max_price_usd = Some(max_price_usd);
                             token.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
-                            token.updated_at = Some(Instant::now());
+                            token.updated_at = Some(SystemTime::now());
                         }
                     } else {
                         // In test mode, update all tokens whose mainnet_address matches
-                        for token in self.asset_tokens.values_mut().filter(|token| token.mainnet_address == Some(address)) {
-                            let min_raw = entry["minPrice"].as_str().unwrap_or("0");
-                            let max_raw = entry["maxPrice"].as_str().unwrap_or("0");
+                        for token in self.asset_tokens.values() {
+                            let mut token_guard = token.write().await;
+                            if token_guard.mainnet_address == Some(address) {
+                                let min_raw = entry["minPrice"].as_str().unwrap_or("0");
+                                let max_raw = entry["maxPrice"].as_str().unwrap_or("0");
 
-                            let min_price: U256 = U256::from_dec_str(min_raw).unwrap_or(U256::zero());
-                            let max_price: U256 = U256::from_dec_str(max_raw).unwrap_or(U256::zero());
+                                let min_price: U256 = U256::from_dec_str(min_raw).unwrap_or(U256::zero());
+                                let max_price: U256 = U256::from_dec_str(max_raw).unwrap_or(U256::zero());
 
-                            token.last_min_price = Some(min_price);
-                            token.last_max_price = Some(max_price);
-                            let min_price_usd: Decimal = Decimal::from_str(
-                                &utils::format_units(min_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
-                            ).unwrap_or(Decimal::ZERO);
-                            let max_price_usd: Decimal = Decimal::from_str(
-                                &utils::format_units(max_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
-                            ).unwrap_or(Decimal::ZERO);
-                            let adjustment = Decimal::from(10u64).powu(token.decimals as u64);
-                            token.last_min_price_usd = Some(min_price_usd * adjustment);
-                            token.last_max_price_usd = Some(max_price_usd * adjustment);
-                            token.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
-                            token.updated_at = Some(Instant::now());
+                                token_guard.last_min_price = Some(min_price);
+                                token_guard.last_max_price = Some(max_price);
+                                let min_price_usd: Decimal = Decimal::from_str(
+                                    &utils::format_units(min_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
+                                ).unwrap_or(Decimal::ZERO);
+                                let max_price_usd: Decimal = Decimal::from_str(
+                                    &utils::format_units(max_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
+                                ).unwrap_or(Decimal::ZERO);
+                                let adjustment = Decimal::from(10u64).powu(token_guard.decimals as u64);
+                                token_guard.last_min_price_usd = Some(min_price_usd * adjustment);
+                                token_guard.last_max_price_usd = Some(max_price_usd * adjustment);
+                                token_guard.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
+                                token_guard.updated_at = Some(SystemTime::now());
+                            }
                         }
                     }
                 }
@@ -273,27 +276,35 @@ impl AssetTokenRegistry {
 
     pub async fn update_all_oracle_prices(&mut self, config: &Config) -> Result<()> {
         let mut tasks = Vec::new();
-
-        for token in self.asset_tokens.values_mut() {
-            if let Some(oracle) = &mut token.oracle {
-                tasks.push(oracle.fetch_price(config));
-            }
+        for token_arc in self.asset_tokens.values() {
+            let token_arc = Arc::clone(token_arc);
+            let config = config.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut token = token_arc.write().await;
+                if let Some(oracle) = &mut token.oracle {
+                    if let Err(e) = oracle.fetch_price(&config).await {
+                        tracing::warn!("Failed to update oracle price: {}", e);
+                    }
+                }
+            }));
         }
 
-        // Run all updates in parallel
-        let results = join_all(tasks).await;
-
-        for result in results {
-            if let Err(e) = result {
-                tracing::warn!("Failed to update oracle price: {}", e);
-            }
+        // Wait for all tasks to complete
+        for task in tasks {
+            let _ = task.await;
         }
 
         Ok(())
     }
 
     /// Returns true if all asset tokens have both min and max prices set
-    pub fn all_prices_fetched(&self) -> bool {
-        self.asset_tokens.values().all(|token| token.last_min_price.is_some() && token.last_max_price.is_some())
+    pub async fn all_prices_fetched(&self) -> bool {
+        for token in self.asset_tokens.values() {
+            let token = token.read().await;
+            if token.last_min_price.is_none() || token.last_max_price.is_none() {
+                return false;
+            }
+        }
+        true
     }
 }

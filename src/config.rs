@@ -17,6 +17,7 @@ pub struct Config {
     pub gmx_eventemitter: Address,
     pub etherscan_api_key: String,
     pub refetch_abis: bool,
+    pub database_url: String,
 }
 
 impl Config {
@@ -81,7 +82,10 @@ impl Config {
         let refetch_abis = env::var("REFETCH_ABIS")
             .map(|v| v.parse().unwrap_or(false))
             .unwrap_or(false);
-            
+
+        // Load database URL
+        let database_url = env::var("DATABASE_URL").expect("Missing DATABASE_URL");
+
         Config {
             alchemy_provider: Arc::new(provider),
             alchemy_ws_provider: Arc::new(ws_provider),
@@ -93,6 +97,7 @@ impl Config {
             gmx_eventemitter: gmx_eventemitter.parse().expect("Invalid GMX EventEmitter address"),
             etherscan_api_key,
             refetch_abis,
+            database_url,
         }
     }
 }

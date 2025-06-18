@@ -1,14 +1,11 @@
 use ethers::{
-    types::{Address, U256, H256, Filter},
-    providers::{Provider, Ws, StreamExt, Middleware},
-    utils::keccak256,
-    abi::{encode, Token},
+    types::{Address, U256, H256},
+    providers::{Provider, Ws, StreamExt},
     contract::abigen,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::time::Duration;
 use eyre::Result;
 use tracing::{info, error};
 

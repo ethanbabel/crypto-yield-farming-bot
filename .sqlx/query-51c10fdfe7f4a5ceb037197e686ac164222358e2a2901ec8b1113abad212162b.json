@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, address, index_token_id, long_token_id, short_token_id FROM markets WHERE address = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "address",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "index_token_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "long_token_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "short_token_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "51c10fdfe7f4a5ceb037197e686ac164222358e2a2901ec8b1113abad212162b"
+}

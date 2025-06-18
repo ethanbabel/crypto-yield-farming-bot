@@ -38,20 +38,20 @@ pub fn u256_to_decimal_scaled_decimals(val: U256, decimals: u8) -> Decimal {
 }
 
 // --- Structs for GMX Market Data ---
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct BorrowingFactorPerSecond {
     pub longs: Decimal,
     pub shorts: Decimal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Pnl {
     pub long: Decimal,
     pub short: Decimal,
     pub net: Decimal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct TokenPool {
     pub long_token_amount: Decimal,
     pub short_token_amount: Decimal,
@@ -59,14 +59,14 @@ pub struct TokenPool {
     pub short_token_usd: Decimal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct GmTokenPrice {
     pub min: Decimal,
     pub max: Decimal,
     pub mid: Decimal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct OpenInterest {
     pub long: Decimal,
     pub short: Decimal,
@@ -74,7 +74,7 @@ pub struct OpenInterest {
     pub short_via_tokens: Decimal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Volume {
     pub trading: Decimal,
     pub swap: Decimal,
@@ -89,7 +89,7 @@ impl Volume {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CumulativeFees {
     pub position_fees: Decimal,
     pub liquidation_fees: Decimal,

@@ -98,7 +98,7 @@ async fn main() -> eyre::Result<()> {
         };
 
         // Update market data
-        if let Err(e) = market_registry.update_all_market_data(&cfg, &snapshot).await {
+        if let Err(e) = market_registry.update_all_market_data(Arc::clone(&cfg), &snapshot).await {
             tracing::error!(?e, "Failed to update market data");
             return Err(e);
         }

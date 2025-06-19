@@ -5,7 +5,7 @@ use ethers::types::Address;
 
 use crate::constants;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Config {
     pub alchemy_provider: Arc<Provider<Http>>,
     pub alchemy_ws_provider: Arc<Provider<Ws>>,
@@ -21,7 +21,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub async fn load() -> Self {
+    pub async fn load() -> Arc<Self> {
         // Load network mode env var and validate it
         let network_mode = env::var("NETWORK_MODE").expect("Missing NETWORK_MODE environment variable");
         if network_mode != "test" && network_mode != "prod" {
@@ -86,7 +86,7 @@ impl Config {
         // Load database URL
         let database_url = env::var("DATABASE_URL").expect("Missing DATABASE_URL");
 
-        Config {
+        let config = Config {
             alchemy_provider: Arc::new(provider),
             alchemy_ws_provider: Arc::new(ws_provider),
             wallet_private_key,
@@ -98,6 +98,8 @@ impl Config {
             etherscan_api_key,
             refetch_abis,
             database_url,
-        }
+        };
+        
+        Arc::new(config)
     }
 }

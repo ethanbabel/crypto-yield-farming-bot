@@ -274,11 +274,11 @@ impl AssetTokenRegistry {
         Ok(())
     }
 
-    pub async fn update_all_oracle_prices(&mut self, config: &Config) -> Result<()> {
+    pub async fn update_all_oracle_prices(&mut self, config: Arc<Config>) -> Result<()> {
         let mut tasks = Vec::new();
         for token_arc in self.asset_tokens.values() {
             let token_arc = Arc::clone(token_arc);
-            let config = config.clone();
+            let config = Arc::clone(&config);
             tasks.push(tokio::spawn(async move {
                 let mut token = token_arc.write().await;
                 if let Some(oracle) = &mut token.oracle {

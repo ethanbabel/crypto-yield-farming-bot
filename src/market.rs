@@ -350,10 +350,10 @@ impl MarketRegistry {
     }
 
     #[instrument(skip(self, config, fee_map), fields(on_close = true))]
-    pub async fn update_all_market_data(&mut self, config: &Config, fee_map: &HashMap<Address, MarketFees>) -> Result<()> {
+    pub async fn update_all_market_data(&mut self, config: Arc<Config>, fee_map: &HashMap<Address, MarketFees>) -> Result<()> {
         stream::iter(self.markets.values_mut())
             .for_each_concurrent(1, |market| {  // Limit concurrency to 1 for now, can be adjusted later with a paid alchemy plan
-                let config = config.clone();
+                let config = Arc::clone(&config);
                 async move {
                     let fallback_fees = MarketFees::new();
                     let market_fees = fee_map.get(&market.market_token).unwrap_or(&fallback_fees);

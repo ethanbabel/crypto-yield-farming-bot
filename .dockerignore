@@ -1,0 +1,16 @@
+# Ignore target directory
+target/
+
+# Ignore Git
+.git
+.gitignore
+
+# Dependency cache
+.cargo
+.sqlx
+
+# Docs
+README.md
+
+# Local logs output
+logs/*

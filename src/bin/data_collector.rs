@@ -14,9 +14,8 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-
     // Load environment variables from .env file
-    dotenv().ok();
+    dotenv()?;
 
     // Initialize logging
     logging::init_logging();

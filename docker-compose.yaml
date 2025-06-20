@@ -1,0 +1,8 @@
+services:
+  data_collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.data_collector
+    env_file:
+      - .env
+    # restart: unless-stopped

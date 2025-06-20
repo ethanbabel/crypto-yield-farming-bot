@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use std::collections::HashMap;
 
-use crate::market::Market;
+use crate::market::market::Market;
 
 #[derive(Debug, FromRow)]
 pub struct MarketStateModel {

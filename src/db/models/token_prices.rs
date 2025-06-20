@@ -4,7 +4,7 @@ use ethers::types::Address;
 use std::collections::HashMap;
 use sqlx::FromRow;
 
-use crate::token::AssetToken;
+use crate::token::token::AssetToken;
 
 #[derive(Debug, FromRow)]
 pub struct TokenPriceModel {

@@ -19,8 +19,8 @@ use super::models::{
     market_states::{NewMarketStateModel, MarketStateModel},
 };
 use crate::config::Config;
-use crate::token::AssetToken;
-use crate::market::Market;
+use crate::token::token::AssetToken;
+use crate::market::market::Market;
 
 pub struct DbManager {
     pub pool: PgPool,

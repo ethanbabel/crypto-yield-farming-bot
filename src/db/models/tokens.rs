@@ -1,6 +1,6 @@
 use sqlx::FromRow;
 
-use crate::token::AssetToken;
+use crate::token::token::AssetToken;
 
 #[derive(Debug, FromRow)]
 pub struct TokenModel {

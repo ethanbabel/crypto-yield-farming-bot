@@ -3,8 +3,8 @@ use dotenvy::dotenv;
 use crypto_yield_farming_bot::config;
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::db;
-use crypto_yield_farming_bot::token;
-use crypto_yield_farming_bot::market;
+use crypto_yield_farming_bot::token::token_registry;
+use crypto_yield_farming_bot::market::market_registry;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -21,7 +21,7 @@ async fn main() -> eyre::Result<()> {
     tracing::info!(network_mode = %cfg.network_mode, "Loaded configuration and initialized logging");
 
     // Initialize token registry
-    let mut token_registry = token::AssetTokenRegistry::new(&cfg);
+    let mut token_registry = token_registry::AssetTokenRegistry::new(&cfg);
     if let Err(err) = token_registry.load_from_file() {
         tracing::error!(?err, "Failed to load asset tokens from file");
         return Err(err);
@@ -29,7 +29,7 @@ async fn main() -> eyre::Result<()> {
     tracing::info!(count = token_registry.num_asset_tokens(), "Loaded asset tokens to registry");
 
     // Initialize market registry
-    let mut market_registry = market::MarketRegistry::new(&cfg);
+    let mut market_registry = market_registry::MarketRegistry::new(&cfg);
     if let Err(err) = market_registry.populate(&cfg, &token_registry).await {
         tracing::error!(?err, "Failed to populate market registry");
         return Err(err);

@@ -1,6 +1,6 @@
 use ethers::prelude::*;
 use eyre::Result;
-use std::time::Instant;
+use std::time::SystemTime;
 
 use crate::config::Config;
 
@@ -24,7 +24,7 @@ pub struct OracleFeed {
 pub struct Oracle {
     pub feeds: Vec<OracleFeed>,         // Ordered list of feeds (e.g., [wstETH/ETH, ETH/USD])
     pub price: Option<f64>,             // Final computed USD price
-    pub updated_at: Option<Instant>,    // Timestamp of last price update
+    pub updated_at: Option<SystemTime>,    // Timestamp of last price update
 }
 
 impl Oracle {
@@ -61,7 +61,7 @@ impl Oracle {
             final_price *= price;
         }
         self.price = Some(final_price);
-        self.updated_at = Some(Instant::now());
+        self.updated_at = Some(SystemTime::now());
         Ok(())
     }
 }

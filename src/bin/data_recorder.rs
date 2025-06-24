@@ -12,8 +12,9 @@ use tracing;
 use dotenvy::dotenv;
 use redis::AsyncCommands;
 use redis::streams::{StreamReadOptions, StreamReadReply};
+use futures::StreamExt;
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration, interval};
+use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -35,56 +36,103 @@ async fn main() -> eyre::Result<()> {
     // Create Redis client
     let redis_client = redis::Client::open("redis://redis:6379")?;
     let mut redis_connection = redis_client.get_multiplexed_async_connection().await?;
-
+    
     // Create channels for batching
     let (token_tx, mut token_rx) = mpsc::channel::<NewTokenPriceModel>(1000);
     let (market_tx, mut market_rx) = mpsc::channel::<NewMarketStateModel>(1000);
 
-    // Wait a bit to let data_collector start and begin producing data
-    tracing::info!("Waiting 90 seconds to offset from data_collector...");
-    sleep(Duration::from_secs(90)).await;
-    tracing::info!("Starting database writer task and Redis stream processing");
+    tracing::info!("Starting database writer task and waiting for coordination signals");
 
     // Spawn database writer task
     tokio::spawn(async move {
+        // Create PubSub connection inside the task
+        let pubsub_client = redis::Client::open("redis://redis:6379").unwrap();
+        let mut pubsub = pubsub_client.get_async_pubsub().await.unwrap();
+        pubsub.subscribe("data_collection_starting").await.unwrap();
+        tracing::info!("Subscribed to data_collection_starting channel");        
         let mut token_batch = Vec::new();
         let mut market_batch = Vec::new();
-        let mut flush_interval = interval(Duration::from_secs(300)); // Same as data_collector frequency
+        let mut message_stream = pubsub.on_message();
+        
+        // Count-based coordination state
+        let mut waiting_for_flush = false;
+        let mut expected_tokens = None::<usize>;
+        let mut expected_markets = None::<usize>;
+        let mut tokens_processed_since_signal = 0usize;
+        let mut markets_processed_since_signal = 0usize;
         
         loop {
             tokio::select! {
                 // Collect tokens
                 Some(token_price) = token_rx.recv() => {
                     token_batch.push(token_price);
-                    // Flush immediately if batch gets large
-                    if token_batch.len() >= 100 {
+                    tokens_processed_since_signal += 1; 
+                    
+                    // Safety flush if batch gets large
+                    if token_batch.len() >= 200 {
                         if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_batch)).await {
                             tracing::error!("Failed to insert token prices batch: {:?}", e);
                         } else {
-                            tracing::info!("Flushed large token prices batch to database");
+                            tracing::info!("Flushed large token prices batch to database (safety flush)");
                         }
                     }
                 }
                 // Collect markets  
                 Some(market_state) = market_rx.recv() => {
                     market_batch.push(market_state);
-                    // Flush immediately if batch gets large
-                    if market_batch.len() >= 100 {
+                    markets_processed_since_signal += 1; 
+                    
+                    // Safety flush if batch gets large
+                    if market_batch.len() >= 200 {
                         if let Err(e) = db.insert_market_states(std::mem::take(&mut market_batch)).await {
                             tracing::error!("Failed to insert market states batch: {:?}", e);
                         } else {
-                            tracing::info!("Flushed large market states batch to database");
+                            tracing::info!("Flushed large market states batch to database (safety flush)");
                         }
                     }
                 }
-                // Periodic flush
-                _ = flush_interval.tick() => {
+                // PubSub signal - set coordination expectations
+                Some(message) = message_stream.next() => {
+                    let channel: String = message.get_channel_name().to_string();
+                    let payload: String = message.get_payload().unwrap_or_default();
+                    
+                    if channel == "data_collection_starting" {
+                        // Parse the payload: "starting:token_count:market_count"
+                        let parts: Vec<&str> = payload.split(':').collect();
+                        if parts.len() == 3 && parts[0] == "starting" {
+                            if let (Ok(token_count), Ok(market_count)) = (parts[1].parse::<usize>(), parts[2].parse::<usize>()) {
+                                tracing::debug!("Received data collection starting signal, expecting {} tokens and {} markets", 
+                                               token_count, market_count);
+                                
+                                expected_tokens = Some(token_count);
+                                expected_markets = Some(market_count);
+                                waiting_for_flush = true;
+                            } else {
+                                tracing::error!("Failed to parse token/market counts from payload: {}", payload);
+                            }
+                        } else {
+                            tracing::warn!("Received unexpected message format on channel '{}' with payload '{}'", channel, payload);
+                        }
+                    } else {
+                        tracing::warn!("Received message on unexpected channel: {}", channel);
+                    }
+                }
+                // Coordination flush - check if expected counts are met or exceeded
+                _ = async {}, if waiting_for_flush && 
+                                expected_tokens.is_some() && 
+                                expected_markets.is_some() &&
+                                tokens_processed_since_signal >= expected_tokens.unwrap() && 
+                                markets_processed_since_signal >= expected_markets.unwrap() => {
+                    tracing::debug!("Processed expected counts ({} tokens, {} markets), performing coordination flush", 
+                                   tokens_processed_since_signal, markets_processed_since_signal);
+                    
+                    // Flush all batches (may contain more than expected if catching up from offline)
                     if !token_batch.is_empty() {
                         let count = token_batch.len();
                         if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_batch)).await {
                             tracing::error!("Failed to insert token prices: {:?}", e);
                         } else {
-                            tracing::info!("Periodic flush: inserted {} token prices", count);
+                            tracing::info!("Coordination flush: inserted {} token prices", count);
                         }
                     }
                     if !market_batch.is_empty() {
@@ -92,9 +140,16 @@ async fn main() -> eyre::Result<()> {
                         if let Err(e) = db.insert_market_states(std::mem::take(&mut market_batch)).await {
                             tracing::error!("Failed to insert market states: {:?}", e);
                         } else {
-                            tracing::info!("Periodic flush: inserted {} market states", count);
+                            tracing::info!("Coordination flush: inserted {} market states", count);
                         }
                     }
+                    
+                    // Reset coordination state after successful flush
+                    waiting_for_flush = false;
+                    expected_tokens = None;
+                    expected_markets = None;
+                    tokens_processed_since_signal = 0;
+                    markets_processed_since_signal = 0;
                 }
             }
         }

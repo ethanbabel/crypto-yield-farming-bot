@@ -122,12 +122,24 @@ async fn main() -> eyre::Result<()> {
             .collect();
         
         // Send token_price and market_state models to redis
+        let token_count = serialized_token_prices.len();
+        let market_count = serialized_market_states.len();
+        
+        // Publish pre-emptive coordination event with expected counts
+        let message = format!("starting:{}:{}", token_count, market_count);
+        let _: () = redis_connection.publish("data_collection_starting", message).await?;
+        tracing::debug!("Published data_collection_starting event, about to send {} token prices and {} market states", 
+                       token_count, market_count);
+        
         for tp in serialized_token_prices {
             let _: () = redis_connection.xadd("token_prices", "*", &[("data", tp)]).await?;
         }
         for ms in serialized_market_states {
             let _: () = redis_connection.xadd("market_states", "*", &[("data", ms)]).await?;
         }
+
+        tracing::debug!("Completed sending {} token prices and {} market states to Redis streams", 
+                       token_count, market_count);
                 
     }
 }

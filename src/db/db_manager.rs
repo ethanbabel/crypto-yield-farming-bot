@@ -85,24 +85,40 @@ impl DbManager {
         Ok(())
     }
 
-    pub async fn insert_token_prices<I>(&self, tokens_iter: I) -> Result<(), sqlx::Error>
+    pub async fn prepare_token_prices<I>(&self, tokens_iter: I) -> Vec<NewTokenPriceModel>
     where
         I: IntoIterator<Item = Arc<RwLock<AssetToken>>>,
     {
+        let mut token_prices = Vec::new();
         for token_arc in tokens_iter {
             let token = token_arc.read().await;
             let new_token_price = NewTokenPriceModel::from(&*token, &self.token_id_map);
+            token_prices.push(new_token_price);
+        }
+        token_prices
+    }
+
+    pub async fn insert_token_prices(&self, token_prices: Vec<NewTokenPriceModel>) -> Result<(), sqlx::Error> {
+        for new_token_price in token_prices {
             token_prices_queries::insert_token_price(&self.pool, &new_token_price).await?;
         }
         Ok(())
     }
 
-    pub async fn insert_market_states<'a, I>(&self, markets_iter: I) -> Result<(), sqlx::Error>
+    pub fn prepare_market_states<'a, I>(&self, markets_iter: I) -> Vec<NewMarketStateModel>
     where
         I: IntoIterator<Item = &'a Market>,
     {
+        let mut market_states = Vec::new();
         for market in markets_iter {
             let new_market_state = NewMarketStateModel::from(market, &self.market_id_map);
+            market_states.push(new_market_state);
+        }
+        market_states
+    }
+
+    pub async fn insert_market_states(&self, market_states: Vec<NewMarketStateModel>) -> Result<(), sqlx::Error> {
+        for new_market_state in market_states {
             market_states_queries::insert_market_state(&self.pool, &new_market_state).await?;
         }
         Ok(())

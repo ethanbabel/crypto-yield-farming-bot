@@ -3,6 +3,7 @@ use sqlx::FromRow;
 use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 use crate::market::market::Market;
 
@@ -37,7 +38,7 @@ pub struct MarketStateModel {
     pub fees_total: Option<Decimal>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NewMarketStateModel {
     pub market_id: i32,
     pub timestamp: DateTime<Utc>,

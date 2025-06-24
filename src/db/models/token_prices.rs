@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use std::collections::HashMap;
 use sqlx::FromRow;
+use serde::{Serialize, Deserialize};
 
 use crate::token::token::AssetToken;
 
@@ -16,7 +17,7 @@ pub struct TokenPriceModel {
     pub mid_price: Decimal,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NewTokenPriceModel {
     pub token_id: i32,
     pub timestamp: chrono::DateTime<Utc>,

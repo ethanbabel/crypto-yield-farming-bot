@@ -9,6 +9,10 @@ name = "data_collector"
 path = "src/bin/data_collector.rs"
 
 [[bin]]
+name = "data_recorder"
+path = "src/bin/data_recorder.rs"
+
+[[bin]]
 name = "trading_bot"
 path = "src/bin/trading_bot.rs"
 
@@ -29,6 +33,7 @@ tracing = "0.1" # Logging, especially for async code
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time", "json"] } # Subscriber for tracing
 tracing-appender = "0.2"
 rust_decimal = { version = "1.37.1", features = ["macros", "maths"] } # Decimal arithmetic
-chrono = "0.4" # Date and time handling
+chrono = { version = "0.4", features = ["serde"] } # Date and time handling
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "chrono", "rust_decimal"] } # Database interaction
+redis = { version = "0.27", features = ["tokio-comp"] } # Redis client 
 

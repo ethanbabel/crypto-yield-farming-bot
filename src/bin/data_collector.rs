@@ -10,7 +10,7 @@ use dotenvy::dotenv;
 use std::time::Duration;
 use tokio::time::interval;
 use std::sync::Arc;
-// use tokio::sync::Mutex;
+use redis::AsyncCommands;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -41,7 +41,7 @@ async fn main() -> eyre::Result<()> {
     }
     tracing::info!(count = market_registry.num_markets(), "Populated market registry");
 
-    // Initialize database
+    // Initialize database manager
     let mut db =  db::db_manager::DbManager::init(&cfg).await?;
 
     // Sync tokens and markets with the database
@@ -54,6 +54,10 @@ async fn main() -> eyre::Result<()> {
         return Err(e.into());
     }
     tracing::info!("Synchronized tokens and markets with the database");
+
+    // Create Redis client
+    let redis_client = redis::Client::open("redis://redis:6379")?;
+    let mut redis_connection = redis_client.get_multiplexed_async_connection().await?;
 
     // Initialize the GMX event listener
     let event_listener = GmxEventListener::init(
@@ -103,15 +107,27 @@ async fn main() -> eyre::Result<()> {
         }
         market_registry.print_relevant_markets();
 
-        // Save token prices and market states to database
-        if let Err(e) = db.insert_token_prices(token_registry.asset_tokens()).await {
-            tracing::error!(?e, "Failed to insert token prices into the database");
-            return Err(e.into());
+        // Get token_price and market_state models
+        let token_prices = db.prepare_token_prices(token_registry.asset_tokens()).await;
+        let market_states = db.prepare_market_states(market_registry.relevant_markets());
+
+        // Serialize token_price and market_state models
+        let serialized_token_prices: Vec<String> = token_prices
+            .iter()
+            .filter_map(|tp| serde_json::to_string(tp).ok())
+            .collect();
+        let serialized_market_states: Vec<String> = market_states
+            .iter()
+            .filter_map(|ms| serde_json::to_string(ms).ok())
+            .collect();
+        
+        // Send token_price and market_state models to redis
+        for tp in serialized_token_prices {
+            let _: () = redis_connection.xadd("token_prices", "*", &[("data", tp)]).await?;
         }
-        if let Err(e) = db.insert_market_states(market_registry.relevant_markets()).await {
-            tracing::error!(?e, "Failed to insert market states into the database");
-            return Err(e.into());
+        for ms in serialized_market_states {
+            let _: () = redis_connection.xadd("market_states", "*", &[("data", ms)]).await?;
         }
-        tracing::info!("Updated market data and saved to database");
+                
     }
 }

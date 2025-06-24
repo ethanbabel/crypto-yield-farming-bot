@@ -1,8 +1,27 @@
 services:
   data_collector:
+    container_name: data_collector
     build:
       context: .
       dockerfile: Dockerfile.data_collector
     env_file:
       - .env
+    depends_on:
+      - redis
+    # restart: unless-stopped
+  
+  redis:
+    container_name: redis
+    image: redis:8.0
+    # restart: unless-stopped
+
+  data_recorder:
+    container_name: data_recorder
+    build:
+      context: .
+      dockerfile: Dockerfile.data_recorder
+    env_file:
+      - .env
+    depends_on:
+      - redis
     # restart: unless-stopped

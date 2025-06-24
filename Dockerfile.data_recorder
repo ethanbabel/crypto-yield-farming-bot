@@ -1,0 +1,36 @@
+# Stage 1: Build the Rust binary
+FROM rust:1.87 as builder
+WORKDIR /app
+
+# Copy dependency manifests
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy source structure to cache dependencies
+RUN mkdir -p src/bin
+RUN echo "fn main() {}" > src/bin/data_recorder.rs
+RUN echo "fn main() {}" > src/lib.rs
+
+# Build dependencies only (this layer will be cached unless Cargo.toml/Cargo.lock changes)
+RUN cargo fetch
+RUN cargo check --bin data_recorder
+RUN rm -rf src
+
+# Copy actual source code, data directory, abis, and .env file
+COPY src ./src
+COPY abis ./abis
+COPY .env ./
+
+# Build the actual application binary (dev)
+RUN cargo build --bin data_recorder
+
+# Stage 2: Runtime image
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Copy .env file for runtime environment loading
+COPY --from=builder /app/.env ./
+
+# Copy the built (dev) binary
+COPY --from=builder /app/target/debug/data_recorder /usr/local/bin/data_recorder
+
+ENTRYPOINT ["/usr/local/bin/data_recorder"]

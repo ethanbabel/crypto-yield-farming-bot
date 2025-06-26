@@ -32,6 +32,7 @@ futures = "0.3" # Async programming utilities
 tracing = "0.1" # Logging, especially for async code
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time", "json"] } # Subscriber for tracing
 tracing-appender = "0.2"
+tracing-loki = "0.2" # Loki logging integration
 rust_decimal = { version = "1.37.1", features = ["macros", "maths"] } # Decimal arithmetic
 chrono = { version = "0.4", features = ["serde"] } # Date and time handling
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "chrono", "rust_decimal"] } # Database interaction

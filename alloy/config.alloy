@@ -1,0 +1,20 @@
+loki.write "cloud" {
+    endpoint {
+        url = "https://logs-prod-021.grafana.net/loki/api/v1/push"
+        basic_auth {
+            username = "1256273"
+            password_file = "/etc/alloy/grafana_api_key.txt"
+        }
+    }
+}
+
+loki.source.api "loki_push_api" {
+    http {
+        listen_address = "0.0.0.0"
+        listen_port = 9999
+    }
+    forward_to = [
+        loki.write.cloud.receiver,
+    ]
+
+}

@@ -6,22 +6,58 @@ services:
       dockerfile: Dockerfile.data_collector
     env_file:
       - .env
+    environment:
+      - STAGE=test  # 'test' for testing, 'prod' for production deployment
+      - DEPLOYMENT=docker  # Explicit deployment type
+      - CONTAINER_NAME=data_collector  # Pass the container name for logging
     depends_on:
-      - redis
-    # restart: unless-stopped
+      redis:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    # restart: unless-stopped   # Comment out during testing
   
   redis:
     container_name: redis
     image: redis:8.0
-    # restart: unless-stopped
+    # restart: unless-stopped    # Comment out during testing
 
   data_recorder:
-    container_name: data_recorder
+    container_name: data_recorder 
     build:
       context: .
       dockerfile: Dockerfile.data_recorder
     env_file:
       - .env
+    environment:
+      - STAGE=test  # 'test' for testing, 'prod' for production deployment
+      - DEPLOYMENT=docker  # Explicit deployment type
+      - CONTAINER_NAME=data_recorder  # Pass the container name for logging
     depends_on:
-      - redis
-    # restart: unless-stopped
+      redis:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    # restart: unless-stopped   # Comment out during testing
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    ports:
+      - 12345:12345   # For Alloy UI
+      - 9999:9999     # Alloy listening port
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy
+      - ./alloy/grafana_api_key.txt:/etc/alloy/grafana_api_key.txt:ro
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "alloy"]
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 10s
+    # restart: unless-stopped     # Comment out during testing

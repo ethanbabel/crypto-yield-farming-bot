@@ -10,6 +10,7 @@ use tracing_subscriber::{
 use tracing::{Id, Subscriber, span, field::Field, field::Visit, debug, error};
 use std::time::{Instant, Duration};
 use std::sync::OnceLock; // For global file guard
+use tracing_loki::url::Url;
 
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
@@ -31,29 +32,69 @@ pub fn set_panic_hook() {
     }));
 }
 
-pub fn init_logging() {
+pub fn init_logging(bin_name: String) -> Result<(), tracing_loki::Error> {
     // Load log levels for console and file from env
     let console_log_level = env::var("CONSOLE_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
     let file_log_level = env::var("FILE_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
+    let loki_log_level = env::var("LOKI_LOG_LEVEL").unwrap_or_else(|_| "TRACE".to_string());
 
     // Load file log flag from env
     let log_to_file = env::var("LOG_TO_FILE").unwrap_or_else(|_| "false".to_string()) == "true";
 
+    // Load Loki URL (should point to local Alloy container base URL)
+    // Note: tracing-loki automatically appends /loki/api/v1/push to the base URL
+    let deployment = env::var("DEPLOYMENT").unwrap_or_else(|_| "local".to_string());
+    let loki_url_str = if deployment == "docker" {
+        // In Docker: use service name
+        "http://alloy:9999".to_string()
+    } else {
+        // Local development: use localhost
+        "http://localhost:9999".to_string()
+    };
+    let loki_url = Url::parse(&loki_url_str).unwrap();
+
+    // Determine service name: use container name in Docker, otherwise binary name
+    let service_name = if deployment == "docker" {
+        // In Docker, use the explicitly set container name
+        env::var("CONTAINER_NAME").unwrap_or_else(|_| bin_name.clone())
+    } else {
+        // Local development: use binary name
+        bin_name
+    };
+
+    // Determine stage: use STAGE env var, default to "test"
+    let stage = env::var("STAGE").unwrap_or_else(|_| "test".to_string());
+
     // Set up EnvFilter for runtime log levels, filter globally to "warn", filter our own crate and binaries to the specified levels in .env
     let env_filter_console = EnvFilter::try_new(
         &format!("warn,crypto_yield_farming_bot={0},data_collector={0},data_recorder={0},main={0},trading_bot={0}", console_log_level)
-    ).unwrap_or_else(|_| EnvFilter::new("warn,crypto_yield_farming_bot=info,data_collector=info,main=info,trading_bot=info"));
+    ).unwrap_or_else(|_| EnvFilter::new("warn,crypto_yield_farming_bot=info,data_collector=info,data_recorder=info,main=info,trading_bot=info"));
 
     let env_filter_file = EnvFilter::try_new(
-        &format!("warn,crypto_yield_farming_bot={0},data_collector={0},main={0},trading_bot={0}", file_log_level)
+        &format!("warn,crypto_yield_farming_bot={0},data_collector={0},data_recorder={0},main={0},trading_bot={0}", file_log_level)
     ).unwrap_or_else(|_| EnvFilter::new("warn,crypto_yield_farming_bot=info,data_collector=info,data_recorder=info,main=info,trading_bot=info"));
+
+    let env_filter_loki = EnvFilter::try_new(
+        &format!("warn,crypto_yield_farming_bot={0},data_collector={0},data_recorder={0},main={0},trading_bot={0}", loki_log_level)
+    ).unwrap_or_else(|_| EnvFilter::new("warn,crypto_yield_farming_bot=trace,data_collector=trace,data_recorder=trace,main=trace,trading_bot=trace"));
 
     // Console layer: always enabled, pretty human-readable logs
     let console_layer = fmt::Layer::new()
         .pretty()
         .with_filter(env_filter_console);
-
+    
+    // Timing layer: always enabled, tracks span timing
     let timing_layer = SpanTimingLayer;
+
+    // Loki layer: structured JSON logs via local Alloy container
+    let (loki_layer, loki_task) = tracing_loki::builder()
+        .label("job", "crypto-yield-farming-bot")?
+        .label("service", service_name)?
+        .label("deployment", deployment)?
+        .label("stage", stage)?
+        .build_url(loki_url)?;
+    let loki_layer = loki_layer
+        .with_filter(env_filter_loki);
 
     if log_to_file {   
         // Generate log file path with timestamp
@@ -76,6 +117,7 @@ pub fn init_logging() {
 
         tracing_subscriber::registry()
             .with(console_layer)
+            .with(loki_layer)
             .with(file_layer)
             .with(timing_layer)
             .init();
@@ -83,9 +125,16 @@ pub fn init_logging() {
         // If not logging to file, just use console layer with timing
         tracing_subscriber::registry()
             .with(console_layer)
+            .with(loki_layer)
             .with(timing_layer)
             .init();
     }
+
+    // Spawn Loki background task so logs are delivered asynchronously
+    tokio::spawn(loki_task);
+    set_panic_hook(); // Set the panic hook after initializing logging
+
+    Ok(())
 }
 
 // Custom layer to track span timing for specific spans with "on_close" field = true

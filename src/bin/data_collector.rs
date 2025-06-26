@@ -18,8 +18,10 @@ async fn main() -> eyre::Result<()> {
     dotenv()?;
 
     // Initialize logging
-    logging::init_logging();
-    logging::set_panic_hook();
+    if let Err(e) = logging::init_logging(env!("CARGO_BIN_NAME").to_string()) {
+        eprintln!("Failed to initialize logging: {}", e);
+        return Err(e.into());
+    }
 
     // Load configuration (including provider)
     let cfg = config::Config::load().await;

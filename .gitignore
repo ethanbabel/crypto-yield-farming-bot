@@ -9,3 +9,6 @@
 
 # Ignore cargo config
 /.cargo/config.toml
+
+# Ignore Grafana API key file
+/alloy/grafana_api_key.txt

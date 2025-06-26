@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use eyre::Result;
-use tracing::{info, error};
+use tracing::{info, error, warn, debug, instrument};
 
 use super::event_listener_utils::{
     // u256_to_decimal_scaled,
@@ -32,7 +32,9 @@ pub struct GmxEventListener {
 
 impl GmxEventListener {
     // Initialize the cumulative fees data structure and return the listener
+    #[instrument(skip(provider))]
     pub fn init(provider: Arc<Provider<Ws>>, event_emitter_address: Address) -> Self {
+        info!("Initializing GMX event listener");
         GmxEventListener {
             fees: Arc::new(Mutex::new(HashMap::new())),
             provider,
@@ -41,8 +43,9 @@ impl GmxEventListener {
     }
 
     // Start listening for events (to be called in long-running background task)
+    #[instrument(skip(self), fields(event_emitter = %self.event_emitter_address))]
     pub async fn start_listening(&self) -> Result<()> {
-        info!("Starting GMX event listener...");
+        info!("Starting GMX event listener");
 
         let event_emitter = EventEmitter::new(self.event_emitter_address, self.provider.clone());
 
@@ -60,22 +63,37 @@ impl GmxEventListener {
             .topic1(topic1_vec);
         let mut stream = event_watcher.subscribe().await?;
         
+        info!("Event stream subscribed, starting to process events");
+        
         // Process events as they come in
+        let mut events_processed = 0u64;
         while let Some(Ok(event)) = stream.next().await {
             let event_name = event.event_name.as_str();
             match event_name {
-                "PositionFeesCollected" => { self.process_position_fees_event(event).await; },
-                "SwapFeesCollected" => { self.process_swap_fees_event(event).await; },
+                "PositionFeesCollected" => { 
+                    self.process_position_fees_event(event).await; 
+                    events_processed += 1;
+                },
+                "SwapFeesCollected" => { 
+                    self.process_swap_fees_event(event).await; 
+                    events_processed += 1;
+                },
                 _ => {
-                    error!("Unknown event type: {}", event_name);
+                    warn!(event_name = event_name, "Unknown event type received");
                 }
+            }
+            
+            if events_processed % 100 == 0 {
+                debug!(events_processed = events_processed, "Event processing milestone");
             }
         }
 
+        warn!("Event stream ended unexpectedly");
         Ok(())
     }
 
     // Process PositionFeesCollected event
+    #[instrument(skip(self, event), fields(event_name = "PositionFeesCollected"))]
     async fn process_position_fees_event(&self, event: event_emitter::EventLog1Filter) {
         let market_address = match event.event_data.address_items.items.get(0) {
             Some(item) => Address::from(H256::from(item.value)),
@@ -154,9 +172,20 @@ impl GmxEventListener {
         *market_fees.borrowing_fees.entry(collateral_token).or_insert(U256::zero()) += borrowing_fee_amount_for_pool;
         // Update trading volume
         market_fees.trading_volume += trade_size_usd;
+        
+        debug!(
+            market = %market_address,
+            collateral_token = %collateral_token,
+            position_fee = %position_fee_amount_for_pool,
+            borrowing_fee = %borrowing_fee_amount_for_pool,
+            liquidation_fee = %liquidation_fee_amount_for_pool,
+            trade_size_usd = %trade_size_usd,
+            "Position fees event processed"
+        );
     }
 
     // Process SwapFeesCollected event
+    #[instrument(skip(self, event), fields(event_name = "SwapFeesCollected"))]
     async fn process_swap_fees_event(&self, event: event_emitter::EventLog1Filter) {
         let market_address = match event.event_data.address_items.items.get(1) {
             Some(item) => Address::from(H256::from(item.value)),
@@ -193,5 +222,13 @@ impl GmxEventListener {
         let market_fees = fees_map.entry(market_address).or_insert_with(MarketFees::new);
         *market_fees.swap_fees.entry(token).or_insert(U256::zero()) += fee_amount_for_pool;
         *market_fees.swap_volume.entry(token).or_insert(U256::zero()) += amount_after_fees;
+        
+        debug!(
+            market = %market_address,
+            token = %token,
+            fee_amount = %fee_amount_for_pool,
+            volume = %amount_after_fees,
+            "Swap fees event processed"
+        );
     }
 }

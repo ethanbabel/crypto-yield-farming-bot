@@ -59,6 +59,5 @@ pub async fn get_token_id_map(pool: &PgPool) -> Result<HashMap<Address, i32>, Er
             Some((addr, row.id))
         })
         .collect();
-
     Ok(map)
 }

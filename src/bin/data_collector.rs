@@ -5,13 +5,14 @@ use crypto_yield_farming_bot::token::token_registry;
 use crypto_yield_farming_bot::market::market_registry;
 use crypto_yield_farming_bot::db;
 
-use tracing;
+use tracing::{info, error, debug, instrument};
 use dotenvy::dotenv;
 use std::time::Duration;
 use tokio::time::interval;
 use std::sync::Arc;
 use redis::AsyncCommands;
 
+#[instrument(name = "data_collector_main")]
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Load environment variables from .env file
@@ -25,41 +26,47 @@ async fn main() -> eyre::Result<()> {
 
     // Load configuration (including provider)
     let cfg = config::Config::load().await;
-    tracing::info!(network_mode = %cfg.network_mode, "Loaded configuration and initialized logging");
+    info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
     // Initialize and populate token registry
     let mut token_registry = token_registry::AssetTokenRegistry::new(&cfg);
     if let Err(err) = token_registry.load_from_file() {
-        tracing::error!(?err, "Failed to load asset tokens from file");
+        error!(?err, "Failed to load asset tokens from file");
         return Err(err);
     }
-    tracing::info!(count = token_registry.num_asset_tokens(), "Loaded asset tokens to registry");
+    info!(count = token_registry.num_asset_tokens(), "Asset token registry initialized");
 
     // Initialize and populate market registry
     let mut market_registry = market_registry::MarketRegistry::new(&cfg);
     if let Err(err) = market_registry.populate(&cfg, &token_registry).await {
-        tracing::error!(?err, "Failed to populate market registry");
+        error!(?err, "Failed to populate market registry");
         return Err(err);
     }
-    tracing::info!(count = market_registry.num_markets(), "Populated market registry");
+    info!(
+        total_markets = market_registry.num_markets(),
+        relevant_markets = market_registry.num_relevant_markets(),
+        "Market registry populated"
+    );
 
     // Initialize database manager
-    let mut db =  db::db_manager::DbManager::init(&cfg).await?;
+    let mut db = db::db_manager::DbManager::init(&cfg).await?;
+    info!("Database manager initialized");
 
     // Sync tokens and markets with the database
     if let Err(e) = db.sync_tokens(token_registry.asset_tokens()).await {
-        tracing::error!(?e, "Failed to sync tokens with the database");
+        error!(?e, "Failed to sync tokens with database");
         return Err(e.into());
     }
     if let Err(e) = db.sync_markets(market_registry.all_markets()).await {
-        tracing::error!(?e, "Failed to sync markets with the database");
+        error!(?e, "Failed to sync markets with database");
         return Err(e.into());
     }
-    tracing::info!("Synchronized tokens and markets with the database");
+    info!("Tokens and markets synchronized with database");
 
     // Create Redis client
     let redis_client = redis::Client::open("redis://redis:6379")?;
     let mut redis_connection = redis_client.get_multiplexed_async_connection().await?;
+    info!("Redis connection established");
 
     // Initialize the GMX event listener
     let event_listener = GmxEventListener::init(
@@ -71,28 +78,32 @@ async fn main() -> eyre::Result<()> {
     // Spawn the event listener in a background task
     tokio::spawn(async move {
         if let Err(e) = event_listener.start_listening().await {
-            tracing::error!("Event listener failed: {:?}", e);
+            error!(?e, "GMX event listener failed");
         }
     });
-    tracing::info!("Started GMX event listener");
+    info!("GMX event listener started in background task");
 
     // Periodically update markets and save to database
     let mut ticker = interval(Duration::from_secs(300));
+    info!("Starting main data collection loop with 300s interval");
+    
     loop {
         ticker.tick().await;
+        debug!("Data collection cycle started");
         
         // Repopulate the market registry 
         if let Err(e) = market_registry.repopulate(&cfg, &mut token_registry).await {
-            tracing::error!(?e, "Failed to repopulate market registry");
+            error!(?e, "Failed to repopulate market registry");
             return Err(e);
         }
+        debug!("Market registry repopulated");
 
         // Fetch Asset Token price data from GMX
         if let Err(e) = token_registry.update_all_gmx_prices().await {
-            tracing::error!(?e, "Failed to update asset token prices from GMX");
+            error!(?e, "Failed to update asset token prices from GMX");
             return Err(e);
         }
-        tracing::info!("Updated asset token prices from GMX");
+        debug!("Asset token prices updated from GMX");
 
         // Fetch GMX fees
         let snapshot = {
@@ -101,10 +112,11 @@ async fn main() -> eyre::Result<()> {
             map.clear();
             ss
         };
+        debug!(fee_markets = snapshot.len(), "Fee snapshot captured");
 
         // Update market data
         if let Err(e) = market_registry.update_all_market_data(Arc::clone(&cfg), &snapshot).await {
-            tracing::error!(?e, "Failed to update market data");
+            error!(?e, "Failed to update market data");
             return Err(e);
         }
         market_registry.print_relevant_markets();
@@ -130,8 +142,11 @@ async fn main() -> eyre::Result<()> {
         // Publish pre-emptive coordination event with expected counts
         let message = format!("starting:{}:{}", token_count, market_count);
         let _: () = redis_connection.publish("data_collection_starting", message).await?;
-        tracing::debug!("Published data_collection_starting event, about to send {} token prices and {} market states", 
-                       token_count, market_count);
+        debug!(
+            token_count = token_count,
+            market_count = market_count,
+            "Published data collection coordination event"
+        );
         
         for tp in serialized_token_prices {
             let _: () = redis_connection.xadd("token_prices", "*", &[("data", tp)]).await?;
@@ -140,8 +155,10 @@ async fn main() -> eyre::Result<()> {
             let _: () = redis_connection.xadd("market_states", "*", &[("data", ms)]).await?;
         }
 
-        tracing::debug!("Completed sending {} token prices and {} market states to Redis streams", 
-                       token_count, market_count);
-                
+        info!(
+            token_count = token_count,
+            market_count = market_count,
+            "Data collection cycle completed"
+        );
     }
 }

@@ -5,7 +5,7 @@ use ethers::types::{Address, I256, U256};
 use ethers::utils::to_checksum;
 use eyre::Result;
 use rust_decimal::Decimal;
-use tracing::warn;
+use tracing::{warn, instrument, debug, error};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -87,15 +87,28 @@ impl Market {
     }
 
     // Fetch market info and pool info for the market
+    #[instrument(skip(self, config, market_fees), fields(
+        on_close = true,
+        market_token = %self.market_token
+    ))]
     pub async fn fetch_market_data(&mut self, config: &Config, market_fees: &MarketFees) -> Result<()> {
         let market_prices = self.market_prices().await;
         if let Some(prices) = market_prices {
+            debug!("Market prices available, proceeding with data fetch");
             // Fetch market props for gmx
             let market_props = self.market_props().await;
             // Get read locks for tokens
             let index_token = self.index_token.read().await.clone();
             let long_token = self.long_token.read().await.clone();
             let short_token = self.short_token.read().await.clone();
+            
+            debug!(
+                index_symbol = %index_token.symbol,
+                long_symbol = %long_token.symbol,
+                short_symbol = %short_token.symbol,
+                "Token information loaded"
+            );
+            
             // Fetch market info
             let market_info = Some(reader::get_market_info(config, self.market_token, prices.clone()).await?);
             // Fetch pool info for deposit and withdrawal
@@ -106,6 +119,8 @@ impl Market {
                 config, market_props.clone(), prices.clone(), reader::PnlFactorType::Deposit, true
             ).await?;
 
+            debug!("Market info and pool info fetched successfully");
+
             // Set borrowing factor per second
             self.borrowing_factor_per_second = Some(
                 market_utils::BorrowingFactorPerSecond {
@@ -115,7 +130,15 @@ impl Market {
             );
 
             // If pool_supply is zero, set has_supply to false
-            self.has_supply =  pool_info_min.pool_value != I256::zero() || pool_info_max.pool_value != I256::zero();
+            let has_supply =  pool_info_min.pool_value != I256::zero() || pool_info_max.pool_value != I256::zero();
+            self.has_supply = has_supply;
+            
+            debug!(
+                has_supply = has_supply,
+                pool_value_min = %pool_info_min.pool_value,
+                pool_value_max = %pool_info_max.pool_value,
+                "Supply status determined"
+            );
 
             // Set GM token price
             self.gm_token_price = Some(
@@ -178,15 +201,29 @@ impl Market {
             ].into_iter().collect();
 
             // Set volume and cumulative fees
+            let mut swap_volume_total = Decimal::ZERO;
             for (token_address, volume) in &market_fees.swap_volume {
                 if let Some(token) = token_map.get(token_address) {
                     let token = token.read().await;
-                    self.volume.swap += u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
+                    let volume_usd = u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
+                    self.volume.swap += volume_usd;
+                    swap_volume_total += volume_usd;
                 } else {
-                    warn!("Market {} has swap volume for unknown token {}", self.market_token, to_checksum(token_address, None));
+                    warn!(
+                        market = %self.market_token,
+                        token = %to_checksum(token_address, None),
+                        "Market has swap volume for unknown token"
+                    );
                 }
             }
-            self.volume.trading += u256_to_decimal_scaled(market_fees.trading_volume);
+            let trading_volume_usd = u256_to_decimal_scaled(market_fees.trading_volume);
+            self.volume.trading += trading_volume_usd;
+
+            debug!(
+                swap_volume = %swap_volume_total,
+                trading_volume = %trading_volume_usd,
+                "Volume data updated"
+            );
 
             let mut fee_types = [
                 (&market_fees.position_fees, &mut self.cumulative_fees.position_fees),
@@ -195,6 +232,7 @@ impl Market {
                 (&market_fees.borrowing_fees, &mut self.cumulative_fees.borrowing_fees),
             ];
 
+            let mut total_fees_added = Decimal::ZERO;
             for (fee_map, field) in fee_types.iter_mut() {
                 for (token_address, fee) in fee_map.iter() {
                     if let Some(token) = token_map.get(token_address) {
@@ -202,17 +240,30 @@ impl Market {
                         let fee_val = u256_to_decimal_scaled_decimals(*fee, token.decimals) * token.last_mid_price_usd.unwrap();
                         **field += fee_val;
                         self.cumulative_fees.total_fees += fee_val;
+                        total_fees_added += fee_val;
                     } else {
-                        warn!("Market {} has fee for unknown token {}", self.market_token, to_checksum(token_address, None));
+                        warn!(
+                            market = %self.market_token,
+                            token = %to_checksum(token_address, None),
+                            "Market has fee for unknown token"
+                        );
                     }
                 }
             }
 
+            debug!(
+                total_fees_added = %total_fees_added,
+                cumulative_total = %self.cumulative_fees.total_fees,
+                "Fee data updated"
+            );
+
             // Update the timestamp of the last update
             self.updated_at = Some(SystemTime::now());
 
+            debug!("Market data fetch completed successfully");
             Ok(())
         } else {
+            error!("Market prices not available for market {}", self.market_token);
             eyre::bail!("Fetch market prices before fetching market data for market {}", self);
         }
     }

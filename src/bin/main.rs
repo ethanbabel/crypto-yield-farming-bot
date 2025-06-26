@@ -12,18 +12,6 @@ async fn main() -> eyre::Result<()> {
         eprintln!("Failed to initialize logging: {}", e);
         return Err(e.into());
     }
-    
-    // Test Loki logging via tracing
-    tracing::error!("Hello Loki! (Error)");
-    tracing::warn!("Hello Loki! (Warning)");
-    tracing::info!("Hello Loki! (Info)");
-    tracing::debug!("Hello Loki! (Debug)");
-    tracing::trace!("Hello Loki! (Trace)");
-
-    // Give time for tracing-loki to send logs to Alloy
-    println!("Waiting 3 seconds for logs to be sent to Loki...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-    println!("Done waiting. Check Grafana Cloud for the logs!");
 
     Ok(())
 }

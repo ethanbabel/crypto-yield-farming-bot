@@ -8,7 +8,7 @@ use crypto_yield_farming_bot::db::{
     }
 };
 
-use tracing;
+use tracing::{self, info, debug, error, warn, instrument};
 use dotenvy::dotenv;
 use redis::AsyncCommands;
 use redis::streams::{StreamReadOptions, StreamReadReply};
@@ -17,6 +17,60 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 
+#[instrument(skip(token_tx, market_tx), fields(stream_name, entry_count))]
+async fn process_stream_entries(
+    stream_name: &str,
+    stream_entries: &[redis::streams::StreamId],
+    token_tx: &mpsc::Sender<NewTokenPriceModel>,
+    market_tx: &mpsc::Sender<NewMarketStateModel>,
+    last_ids: &mut HashMap<String, String>,
+) -> eyre::Result<()> {
+    tracing::Span::current().record("stream_name", stream_name);
+    tracing::Span::current().record("entry_count", stream_entries.len());
+    
+    for stream_id in stream_entries {
+        let data = &stream_id.map;
+        // Use redis::Value::BulkString for the payload
+        if let Some(redis::Value::BulkString(payload)) = data.get("data") {
+            // Try to convert payload to string for printing
+            if let Ok(text) = std::str::from_utf8(payload) {
+                // Deserialize based on stream name
+                match stream_name {
+                    "token_prices" => {
+                        if let Ok(token_price_model) = serde_json::from_str::<NewTokenPriceModel>(text) {
+                            debug!(token_id = token_price_model.token_id, "Deserialized token price");
+                            if let Err(_) = token_tx.send(token_price_model).await {
+                                error!("Token price channel closed");
+                                return Err(eyre::eyre!("Token price channel closed"));
+                            }
+                        } else {
+                            error!(data = %text, "Failed to deserialize token price data");
+                        }
+                    },
+                    "market_states" => {
+                        if let Ok(market_state_model) = serde_json::from_str::<NewMarketStateModel>(text) {
+                            debug!(market_id = market_state_model.market_id, "Deserialized market state");
+                            if let Err(_) = market_tx.send(market_state_model).await {
+                                error!("Market state channel closed");
+                                return Err(eyre::eyre!("Market state channel closed"));
+                            }
+                        } else {
+                            error!(data = %text, "Failed to deserialize market state data");
+                        }
+                    },
+                    _ => {
+                        warn!(stream_name = %stream_name, "Unknown stream");
+                    }
+                }
+            }
+        }
+        last_ids.insert(stream_name.to_string(), stream_id.id.clone());
+    }
+    
+    Ok(())
+}
+
+#[instrument]
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Load environment variables from .env file
@@ -30,7 +84,7 @@ async fn main() -> eyre::Result<()> {
 
     // Load configuration (including provider)
     let cfg = config::Config::load().await;
-    tracing::info!(network_mode = %cfg.network_mode, "Loaded configuration and initialized logging");
+    info!(network_mode = %cfg.network_mode, "Loaded configuration and initialized logging");
 
     // Initialize database manager
     let db = db::db_manager::DbManager::init(&cfg).await?;
@@ -43,7 +97,7 @@ async fn main() -> eyre::Result<()> {
     let (token_tx, mut token_rx) = mpsc::channel::<NewTokenPriceModel>(1000);
     let (market_tx, mut market_rx) = mpsc::channel::<NewMarketStateModel>(1000);
 
-    tracing::info!("Starting database writer task and waiting for coordination signals");
+    info!("Starting database writer task and waiting for coordination signals");
 
     // Spawn database writer task
     tokio::spawn(async move {
@@ -51,7 +105,7 @@ async fn main() -> eyre::Result<()> {
         let pubsub_client = redis::Client::open("redis://redis:6379").unwrap();
         let mut pubsub = pubsub_client.get_async_pubsub().await.unwrap();
         pubsub.subscribe("data_collection_starting").await.unwrap();
-        tracing::info!("Subscribed to data_collection_starting channel");        
+        info!("Subscribed to data_collection_starting channel");        
         let mut token_batch = Vec::new();
         let mut market_batch = Vec::new();
         let mut message_stream = pubsub.on_message();
@@ -73,9 +127,9 @@ async fn main() -> eyre::Result<()> {
                     // Safety flush if batch gets large
                     if token_batch.len() >= 200 {
                         if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_batch)).await {
-                            tracing::error!("Failed to insert token prices batch: {:?}", e);
+                            error!(error = %e, "Failed to insert token prices batch");
                         } else {
-                            tracing::info!("Flushed large token prices batch to database (safety flush)");
+                            info!("Flushed large token prices batch to database (safety flush)");
                         }
                     }
                 }
@@ -87,9 +141,9 @@ async fn main() -> eyre::Result<()> {
                     // Safety flush if batch gets large
                     if market_batch.len() >= 200 {
                         if let Err(e) = db.insert_market_states(std::mem::take(&mut market_batch)).await {
-                            tracing::error!("Failed to insert market states batch: {:?}", e);
+                            error!(error = %e, "Failed to insert market states batch");
                         } else {
-                            tracing::info!("Flushed large market states batch to database (safety flush)");
+                            info!("Flushed large market states batch to database (safety flush)");
                         }
                     }
                 }
@@ -103,20 +157,19 @@ async fn main() -> eyre::Result<()> {
                         let parts: Vec<&str> = payload.split(':').collect();
                         if parts.len() == 3 && parts[0] == "starting" {
                             if let (Ok(token_count), Ok(market_count)) = (parts[1].parse::<usize>(), parts[2].parse::<usize>()) {
-                                tracing::debug!("Received data collection starting signal, expecting {} tokens and {} markets", 
-                                               token_count, market_count);
+                                debug!(token_count, market_count, "Received data collection starting signal");
                                 
                                 expected_tokens = Some(token_count);
                                 expected_markets = Some(market_count);
                                 waiting_for_flush = true;
                             } else {
-                                tracing::error!("Failed to parse token/market counts from payload: {}", payload);
+                                error!(payload = %payload, "Failed to parse token/market counts from payload");
                             }
                         } else {
-                            tracing::warn!("Received unexpected message format on channel '{}' with payload '{}'", channel, payload);
+                            warn!(channel = %channel, payload = %payload, "Received unexpected message format");
                         }
                     } else {
-                        tracing::warn!("Received message on unexpected channel: {}", channel);
+                        warn!(channel = %channel, "Received message on unexpected channel");
                     }
                 }
                 // Coordination flush - check if expected counts are met or exceeded
@@ -125,24 +178,27 @@ async fn main() -> eyre::Result<()> {
                                 expected_markets.is_some() &&
                                 tokens_processed_since_signal >= expected_tokens.unwrap() && 
                                 markets_processed_since_signal >= expected_markets.unwrap() => {
-                    tracing::debug!("Processed expected counts ({} tokens, {} markets), performing coordination flush", 
-                                   tokens_processed_since_signal, markets_processed_since_signal);
+                    debug!(
+                        tokens_processed = tokens_processed_since_signal, 
+                        markets_processed = markets_processed_since_signal,
+                        "Processed expected counts, performing coordination flush"
+                    );
                     
                     // Flush all batches (may contain more than expected if catching up from offline)
                     if !token_batch.is_empty() {
                         let count = token_batch.len();
                         if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_batch)).await {
-                            tracing::error!("Failed to insert token prices: {:?}", e);
+                            error!(error = %e, "Failed to insert token prices");
                         } else {
-                            tracing::info!("Coordination flush: inserted {} token prices", count);
+                            info!(count, "Coordination flush: inserted token prices");
                         }
                     }
                     if !market_batch.is_empty() {
                         let count = market_batch.len();
                         if let Err(e) = db.insert_market_states(std::mem::take(&mut market_batch)).await {
-                            tracing::error!("Failed to insert market states: {:?}", e);
+                            error!(error = %e, "Failed to insert market states");
                         } else {
-                            tracing::info!("Coordination flush: inserted {} market states", count);
+                            info!(count, "Coordination flush: inserted market states");
                         }
                     }
                     
@@ -164,6 +220,7 @@ async fn main() -> eyre::Result<()> {
         ("market_states".to_string(), "0".to_string()),
     ]);
 
+    info!("Starting Redis stream listener");
     loop {
         // Use explicit stream names and IDs for xread_options
         let reply: StreamReadReply = redis_connection
@@ -174,47 +231,22 @@ async fn main() -> eyre::Result<()> {
             )
             .await?;
 
+        debug!(stream_count = reply.keys.len(), "Received stream entries");
+
         // Iterate over reply.keys and reply.streams together
         for stream_key in reply.keys {
             let stream_name = stream_key.key.as_str();
             let stream_entries = stream_key.ids;
-            for stream_id in stream_entries {
-                let data = &stream_id.map;
-                // Use redis::Value::BulkString for the payload
-                if let Some(redis::Value::BulkString(payload)) = data.get("data") {
-                    // Try to convert payload to string for printing
-                    if let Ok(text) = std::str::from_utf8(payload) {
-                        // Deserialize based on stream name
-                        match stream_name {
-                            "token_prices" => {
-                                if let Ok(token_price_model) = serde_json::from_str::<NewTokenPriceModel>(text) {
-                                    tracing::debug!("Deserialized token price: {:?}", token_price_model);
-                                    if let Err(_) = token_tx.send(token_price_model).await {
-                                        tracing::error!("Token price channel closed");
-                                        return Ok(());
-                                    }
-                                } else {
-                                    tracing::error!("Failed to deserialize token price data: {}", text);
-                                }
-                            },
-                            "market_states" => {
-                                if let Ok(market_state_model) = serde_json::from_str::<NewMarketStateModel>(text) {
-                                    tracing::debug!("Deserialized market state: {:?}", market_state_model);
-                                    if let Err(_) = market_tx.send(market_state_model).await {
-                                        tracing::error!("Market state channel closed");
-                                        return Ok(());
-                                    }
-                                } else {
-                                    tracing::error!("Failed to deserialize market state data: {}", text);
-                                }
-                            },
-                            _ => {
-                                tracing::warn!("Unknown stream: {}", stream_name);
-                            }
-                        }
-                    }
-                }
-                last_ids.insert(stream_name.to_string(), stream_id.id.clone());
+            
+            if let Err(e) = process_stream_entries(
+                stream_name,
+                &stream_entries,
+                &token_tx,
+                &market_tx,
+                &mut last_ids,
+            ).await {
+                error!(error = %e, stream_name = %stream_name, "Failed to process stream entries");
+                return Err(e);
             }
         }
 

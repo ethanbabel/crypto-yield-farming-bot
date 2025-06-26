@@ -5,13 +5,12 @@ use std::time::SystemTime;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
 use ethers::types::{Address, U256};
 use ethers::utils;
 use eyre::{Result, eyre};
 use serde_json::Value;
 use reqwest::Client;
-use tracing::{instrument, info, warn};
+use tracing::{instrument, info, warn, debug};
 
 use super::token::AssetToken;
 use super::oracle::Oracle;
@@ -25,6 +24,7 @@ pub struct AssetTokenRegistry {
 }
 
 impl AssetTokenRegistry {
+    #[instrument(skip(config), fields(network_mode = %config.network_mode))]
     pub fn new(config: &Config) -> Self {
         Self {
             asset_tokens: HashMap::new(),
@@ -32,14 +32,17 @@ impl AssetTokenRegistry {
         }
     }
 
+    #[instrument(skip(self))]
     pub fn get_asset_token(&self, address: &Address) -> Option<Arc<RwLock<AssetToken>>> {
         self.asset_tokens.get(address).cloned()
     }
 
+    #[instrument(skip(self), ret)]
     pub fn num_asset_tokens(&self) -> usize {
         self.asset_tokens.len()
     }
 
+    #[instrument(skip(self))]
     pub fn asset_tokens(&self) -> impl Iterator<Item = Arc<RwLock<AssetToken>>> + '_ {
         self.asset_tokens.values().cloned()
     }
@@ -56,6 +59,7 @@ impl AssetTokenRegistry {
         let json_data: Value = serde_json::from_str(&file_content)?;
         let tokens = json_data.get("tokens").ok_or_else(|| eyre!("Tokens not found in JSON data"))?;
 
+        let mut loaded_count = 0;
         for token in tokens.as_array().unwrap_or(&vec![]) {
             let symbol = token["symbol"].as_str().expect("Token must have a symbol").to_string();
             let decimals = token["decimals"].as_u64().expect("Token must have decimals") as u8;
@@ -88,7 +92,7 @@ impl AssetTokenRegistry {
             };
 
             let asset_token = AssetToken {
-                symbol,
+                symbol: symbol.clone(),
                 address,
                 mainnet_address,
                 decimals,
@@ -102,8 +106,16 @@ impl AssetTokenRegistry {
                 updated_at: None,
             };
             self.asset_tokens.insert(address, Arc::new(RwLock::new(asset_token)));
+            loaded_count += 1;
+            debug!(
+                symbol = %symbol,
+                address = %address,
+                decimals = decimals,
+                is_synthetic = is_synthetic,
+                "Loaded token"
+            );
         }
-        info!("Loaded asset tokens from file");
+        info!(loaded_count = loaded_count, "Asset tokens loaded from file");
         Ok(())
     }
 
@@ -111,9 +123,11 @@ impl AssetTokenRegistry {
     pub async fn update_tracked_tokens(&mut self) -> Result<()> {
         // If the network mode is test, we don't update tracked tokens
         if self.network_mode == "test" {
+            debug!("Skipping tracked tokens update in test mode");
             return Ok(());
         }
 
+        debug!("Fetching supported tokens from GMX API");
         let client = Client::new();
         let res = client
             .get(GMX_SUPPORTED_TOKENS_ENDPOINT)
@@ -135,7 +149,7 @@ impl AssetTokenRegistry {
                 let is_synthetic = token.get("synthetic").map_or(false, |v| v.as_bool().unwrap_or(false));
 
                 let new_token = AssetToken {
-                    symbol,
+                    symbol: symbol.clone(),
                     address,
                     mainnet_address: None, // Mainnet address is none in test mode
                     decimals,
@@ -150,12 +164,17 @@ impl AssetTokenRegistry {
                 };
                 self.asset_tokens.insert(address, Arc::new(RwLock::new(new_token.clone())));
                 new_tokens.push(new_token);
+                debug!(
+                    symbol = %symbol,
+                    address = %address,
+                    "Added new tracked token"
+                );
             }
         }
 
         // If no new tokens were found, return early
         if new_tokens.is_empty() {
-            tracing::info!("No new supported tokens found.");
+            info!("No new supported tokens found");
             return Ok(());
         }
 
@@ -176,13 +195,17 @@ impl AssetTokenRegistry {
             tokens_arr.push(new_token_json);
         }
         fs::write(&path, serde_json::to_string_pretty(&existing_json_data)?)?;
-        tracing::info!("Added {} new tokens to the registry and updated the token data file. New tokens: {}", new_tokens.len(), 
-            new_tokens.iter().map(|t| t.symbol.clone()).collect::<Vec<String>>().join(", "));
+        info!(
+            new_token_count = new_tokens.len(),
+            new_tokens = ?new_tokens.iter().map(|t| &t.symbol).collect::<Vec<_>>(),
+            "Added new tokens to registry and updated data file"
+        );
         Ok(())
     }                  
 
     #[instrument(skip(self), fields(on_close = true))]
     pub async fn update_all_gmx_prices(&mut self) -> Result<()> {
+        debug!("Fetching token prices from GMX API");
         let client = Client::new();
         let res = client
             .get(GMX_API_PRICES_ENDPOINT)
@@ -191,6 +214,7 @@ impl AssetTokenRegistry {
             .error_for_status()?;
         let prices: Vec<Value> = res.json().await?;
 
+        let mut updated_count = 0;
         for entry in prices.iter() {
             if let Some(address_str) = entry["tokenAddress"].as_str() {
                 if let Ok(address) = Address::from_str(address_str) {
@@ -215,6 +239,14 @@ impl AssetTokenRegistry {
                             token.last_max_price_usd = Some(max_price_usd);
                             token.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
                             token.updated_at = Some(SystemTime::now());
+                            updated_count += 1;
+                            debug!(
+                                symbol = %token.symbol,
+                                address = %address,
+                                min_price_usd = %min_price_usd,
+                                max_price_usd = %max_price_usd,
+                                "Updated token price"
+                            );
                         }
                     } else {
                         // In test mode, update all tokens whose mainnet_address matches
@@ -230,27 +262,40 @@ impl AssetTokenRegistry {
                                 token_guard.last_min_price = Some(min_price);
                                 token_guard.last_max_price = Some(max_price);
                                 let min_price_usd: Decimal = Decimal::from_str(
-                                    &utils::format_units(min_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
+                                    &utils::format_units(min_price, (GMX_DECIMALS - token_guard.decimals) as usize).unwrap_or_else(|_| "0".to_string())
                                 ).unwrap_or(Decimal::ZERO);
                                 let max_price_usd: Decimal = Decimal::from_str(
-                                    &utils::format_units(max_price, GMX_DECIMALS as usize).unwrap_or_else(|_| "0".to_string())
+                                    &utils::format_units(max_price, (GMX_DECIMALS - token_guard.decimals) as usize).unwrap_or_else(|_| "0".to_string())
                                 ).unwrap_or(Decimal::ZERO);
-                                let adjustment = Decimal::from(10u64).powu(token_guard.decimals as u64);
-                                token_guard.last_min_price_usd = Some(min_price_usd * adjustment);
-                                token_guard.last_max_price_usd = Some(max_price_usd * adjustment);
+                                token_guard.last_min_price_usd = Some(min_price_usd);
+                                token_guard.last_max_price_usd = Some(max_price_usd);
                                 token_guard.last_mid_price_usd = Some((min_price_usd + max_price_usd) / Decimal::from(2));
                                 token_guard.updated_at = Some(SystemTime::now());
+                                updated_count += 1;
+                                debug!(
+                                    symbol = %token_guard.symbol,
+                                    testnet_address = %token_guard.address,
+                                    mainnet_address = %address,
+                                    min_price_usd = %min_price_usd,
+                                    max_price_usd = %max_price_usd,
+                                    "Updated token price (test mode)"
+                                );
                             }
                         }
                     }
                 }
             }
         }
+        info!(updated_count = updated_count, "GMX token prices updated");
         Ok(())
     }
 
+    #[instrument(skip(self, config), fields(on_close = true))]
     pub async fn update_all_oracle_prices(&mut self, config: Arc<Config>) -> Result<()> {
+        debug!("Updating oracle prices for all tokens");
         let mut tasks = Vec::new();
+        let token_count = self.asset_tokens.len();
+        
         for token_arc in self.asset_tokens.values() {
             let token_arc = Arc::clone(token_arc);
             let config = Arc::clone(&config);
@@ -258,7 +303,18 @@ impl AssetTokenRegistry {
                 let mut token = token_arc.write().await;
                 if let Some(oracle) = &mut token.oracle {
                     if let Err(e) = oracle.fetch_price(&config).await {
-                        tracing::warn!("Failed to update oracle price: {}", e);
+                        warn!(
+                            symbol = %token.symbol,
+                            address = %token.address,
+                            error = %e,
+                            "Failed to update oracle price"
+                        );
+                    } else {
+                        debug!(
+                            symbol = %token.symbol,
+                            address = %token.address,
+                            "Oracle price updated"
+                        );
                     }
                 }
             }));
@@ -269,17 +325,25 @@ impl AssetTokenRegistry {
             let _ = task.await;
         }
 
+        info!(token_count = token_count, "Oracle price updates completed");
         Ok(())
     }
 
     /// Returns true if all asset tokens have both min and max prices set
+    #[instrument(skip(self))]
     pub async fn all_prices_fetched(&self) -> bool {
         for token in self.asset_tokens.values() {
             let token = token.read().await;
             if token.last_min_price.is_none() || token.last_max_price.is_none() {
+                debug!(
+                    symbol = %token.symbol,
+                    address = %token.address,
+                    "Token missing price data"
+                );
                 return false;
             }
         }
+        debug!("All tokens have price data");
         true
     }
 }

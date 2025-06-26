@@ -1,4 +1,5 @@
 use sqlx::FromRow;
+use ethers::utils::to_checksum;
 
 use crate::token::token::AssetToken;
 
@@ -20,7 +21,7 @@ pub struct NewTokenModel {
 impl NewTokenModel {
     pub fn from(token: &AssetToken) -> Self {
         Self {
-            address: token.address.to_string(),
+            address: to_checksum(&token.address, None),
             symbol: token.symbol.clone(),
             decimals: token.decimals as i32,
         }

@@ -1,5 +1,6 @@
 use sqlx::FromRow;
 use ethers::types::Address;
+use ethers::utils::to_checksum;
 use std::collections::HashMap;
 
 use crate::market::market::Market;
@@ -30,7 +31,7 @@ impl NewMarketModel {
         let long_token_id = token_id_map[&long_token.address];
         let short_token_id = token_id_map[&short_token.address];
         Self {
-            address: market.market_token.to_string(),
+            address: to_checksum(&market.market_token, None),
             index_token_id,
             long_token_id,
             short_token_id,

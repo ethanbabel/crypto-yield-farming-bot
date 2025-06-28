@@ -160,5 +160,8 @@ async fn main() -> eyre::Result<()> {
             market_count = market_count,
             "Data collection cycle completed"
         );
+
+        // Zero out tracked fields for all markets at the end of the data collection loop
+        market_registry.zero_all_tracked_fields();
     }
 }

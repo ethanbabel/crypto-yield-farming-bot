@@ -360,4 +360,17 @@ impl Market {
 
         Ok((long_open_interest, short_open_interest, long_open_interest_in_tokens, short_open_interest_in_tokens))
     }
+
+    /// Zero out tracked fields (for each data collection cycle).
+    pub fn zero_out_tracked_fields(&mut self) {
+        self.borrowing_factor_per_second = None;
+        self.pnl = None;
+        self.token_pool = None;
+        self.gm_token_price = None;
+        self.open_interest = None;
+        self.current_utilization = None;
+        self.volume = market_utils::Volume::new();
+        self.cumulative_fees = market_utils::CumulativeFees::new();
+        self.updated_at = None;
+    }
 }

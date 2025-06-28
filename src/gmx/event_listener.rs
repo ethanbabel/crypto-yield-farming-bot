@@ -47,8 +47,6 @@ impl GmxEventListener {
     pub async fn start_listening(&self) -> Result<()> {
         info!("Starting GMX event listener");
 
-        let event_emitter = EventEmitter::new(self.event_emitter_address, self.provider.clone());
-
         // Filter for PositionFeesCollected and SwapFeesCollected events
         let position_fees_collected_hash = string_to_bytes32("PositionFeesCollected");
         let swap_fees_collected_hash = string_to_bytes32("SwapFeesCollected");
@@ -57,39 +55,52 @@ impl GmxEventListener {
             swap_fees_collected_hash,
         ];
 
-        // Build the event stream directly from the contract instance
-       let event_watcher = event_emitter
-            .event::<event_emitter::EventLog1Filter>()
-            .topic1(topic1_vec);
-        let mut stream = event_watcher.subscribe().await?;
-        
-        info!("Event stream subscribed, starting to process events");
-        
-        // Process events as they come in
-        let mut events_processed = 0u64;
-        while let Some(Ok(event)) = stream.next().await {
-            let event_name = event.event_name.as_str();
-            match event_name {
-                "PositionFeesCollected" => { 
-                    self.process_position_fees_event(event).await; 
-                    events_processed += 1;
-                },
-                "SwapFeesCollected" => { 
-                    self.process_swap_fees_event(event).await; 
-                    events_processed += 1;
-                },
-                _ => {
-                    warn!(event_name = event_name, "Unknown event type received");
+        loop {
+            let event_emitter = EventEmitter::new(self.event_emitter_address, self.provider.clone());
+            let event_watcher = event_emitter
+                .event::<event_emitter::EventLog1Filter>()
+                .topic1(topic1_vec.clone());
+
+            match event_watcher.subscribe().await {
+                Ok(mut stream) => {
+                    info!("Event stream subscribed, processing events");
+                    let mut events_processed = 0u64;
+                    while let Some(event_result) = stream.next().await {
+                        match event_result {
+                            Ok(event) => {
+                                let event_name = event.event_name.as_str();
+                                match event_name {
+                                    "PositionFeesCollected" => { 
+                                        self.process_position_fees_event(event).await; 
+                                        events_processed += 1;
+                                    },
+                                    "SwapFeesCollected" => { 
+                                        self.process_swap_fees_event(event).await; 
+                                        events_processed += 1;
+                                    },
+                                    _ => {
+                                        warn!(event_name = event_name, "Unknown event type received");
+                                    }
+                                }
+
+                                if events_processed % 100 == 0 {
+                                    debug!(events_processed = events_processed, "Event processing milestone");
+                                }
+                            }
+                            Err(e) => {
+                                error!(?e, "WebSocket error while processing event stream");
+                                break;
+                            }
+                        }
+                    }
+                    warn!("Event stream ended unexpectedly, reconnecting...");
+                }
+                Err(e) => {
+                    error!(?e, "Failed to subscribe to GMX event stream, retrying in 10s...");
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 }
             }
-            
-            if events_processed % 100 == 0 {
-                debug!(events_processed = events_processed, "Event processing milestone");
-            }
         }
-
-        warn!("Event stream ended unexpectedly");
-        Ok(())
     }
 
     // Process PositionFeesCollected event

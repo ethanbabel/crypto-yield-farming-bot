@@ -193,6 +193,13 @@ impl MarketRegistry {
         info!(relevant_count = relevant_count, "Relevant markets:\n{}", output);
     }
 
+    /// Zero out tracked fields for all markets (for each data collection cycle).
+    pub fn zero_all_tracked_fields(&mut self) {
+        for market in self.markets.values_mut() {
+            market.zero_out_tracked_fields();
+        }
+    }
+
     #[instrument(skip(self, config, fee_map), fields(on_close = true))]
     pub async fn update_all_market_data(&mut self, config: Arc<Config>, fee_map: &HashMap<Address, MarketFees>) -> Result<()> {
         let market_count = self.markets.len();

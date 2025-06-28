@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::gmx::{
-    reader_utils::{MarketPrices, MarketProps},
+    reader_utils::{MarketPrices, MarketProps, MarketInfo, MarketPoolValueInfoProps},
     reader,
     datastore,
     event_listener_utils::MarketFees,
@@ -109,23 +109,17 @@ impl Market {
                 "Token information loaded"
             );
             
-            // Fetch market info
-            let market_info = Some(reader::get_market_info(config, self.market_token, prices.clone()).await?);
-            // Fetch pool info for deposit and withdrawal
-            let (gm_price_min, pool_info_min) = reader::get_market_token_price(
-                config, market_props.clone(), prices.clone(), reader::PnlFactorType::Deposit, false
-            ).await?;
-            let (gm_price_max, pool_info_max) = reader::get_market_token_price(
-                config, market_props.clone(), prices.clone(), reader::PnlFactorType::Deposit, true
-            ).await?;
+            // Fetch market info and pool data
+            let (market_info, gm_price_min, pool_info_min, gm_price_max, pool_info_max) = 
+                self.fetch_market_info_and_pool_data(config, market_props.clone(), prices.clone()).await?;
 
             debug!("Market info and pool info fetched successfully");
 
             // Set borrowing factor per second
             self.borrowing_factor_per_second = Some(
                 market_utils::BorrowingFactorPerSecond {
-                    longs: u256_to_decimal_scaled(market_info.as_ref().map_or(U256::zero(), |m| m.borrowing_factor_per_second_for_longs)),
-                    shorts: u256_to_decimal_scaled(market_info.as_ref().map_or(U256::zero(), |m| m.borrowing_factor_per_second_for_shorts)),
+                    longs: u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_longs),
+                    shorts: u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_shorts),
                 }
             );
 
@@ -168,13 +162,9 @@ impl Market {
                 }
             );
 
-            // Fetch long and short open interest
-            let long_open_interest = datastore::get_open_interest(config, market_props.clone(), true).await?;
-            let short_open_interest = datastore::get_open_interest(config, market_props.clone(), false).await?;
-
-            // Fetch long and short open interest in tokens
-            let long_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, market_props.clone(), true).await?;
-            let short_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, market_props.clone(), false).await?;
+            // Fetch open interest data
+            let (long_open_interest, short_open_interest, long_open_interest_in_tokens, short_open_interest_in_tokens) = 
+                self.fetch_open_interest_data(config, market_props.clone()).await?;
 
             // Set open interest
             self.open_interest = Some(
@@ -266,5 +256,108 @@ impl Market {
             error!("Market prices not available for market {}", self.market_token);
             eyre::bail!("Fetch market prices before fetching market data for market {}", self);
         }
+    }
+
+    // Helper method to fetch market info and pool data with retry logic
+    async fn fetch_market_info_and_pool_data(
+        &self,
+        config: &Config,
+        market_props: MarketProps,
+        prices: MarketPrices,
+    ) -> Result<(MarketInfo, I256, MarketPoolValueInfoProps, I256, MarketPoolValueInfoProps)> {
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.try_fetch_market_info_and_pool_data(config, market_props.clone(), prices.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            market = %self.market_token,
+                            attempt = attempt,
+                            error = %last_error.as_ref().unwrap(),
+                            "Failed to fetch market info and pool data, retrying"
+                        );
+                    }
+                }
+            }
+        }
+
+        error!(
+            market = %self.market_token,
+            attempts = MAX_RETRIES,
+            error = %last_error.as_ref().unwrap(),
+            "Failed to fetch market info and pool data after all retries"
+        );
+        Err(last_error.unwrap())
+    }
+
+    // Internal method that performs the actual market info and pool data fetch
+    async fn try_fetch_market_info_and_pool_data(
+        &self,
+        config: &Config,
+        market_props: MarketProps,
+        prices: MarketPrices,
+    ) -> Result<(MarketInfo, I256, MarketPoolValueInfoProps, I256, MarketPoolValueInfoProps)> {
+        let market_info = reader::get_market_info(config, self.market_token, prices.clone()).await?;
+        let (gm_price_min, pool_info_min) = reader::get_market_token_price(
+            config, market_props.clone(), prices.clone(), reader::PnlFactorType::Deposit, false
+        ).await?;
+        let (gm_price_max, pool_info_max) = reader::get_market_token_price(
+            config, market_props.clone(), prices.clone(), reader::PnlFactorType::Deposit, true
+        ).await?;
+
+        Ok((market_info, gm_price_min, pool_info_min, gm_price_max, pool_info_max))
+    }
+
+    // Helper method to fetch open interest data with retry logic
+    async fn fetch_open_interest_data(
+        &self,
+        config: &Config,
+        market_props: MarketProps,
+    ) -> Result<(U256, U256, U256, U256)> {
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.try_fetch_open_interest_data(config, market_props.clone()).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            market = %self.market_token,
+                            attempt = attempt,
+                            error = %last_error.as_ref().unwrap(),
+                            "Failed to fetch open interest data, retrying"
+                        );
+                    }
+                }
+            }
+        }
+
+        error!(
+            market = %self.market_token,
+            attempts = MAX_RETRIES,
+            error = %last_error.as_ref().unwrap(),
+            "Failed to fetch open interest data after all retries"
+        );
+        Err(last_error.unwrap())
+    }
+
+    // Internal method that performs the actual open interest data fetch
+    async fn try_fetch_open_interest_data(
+        &self,
+        config: &Config,
+        market_props: MarketProps,
+    ) -> Result<(U256, U256, U256, U256)> {
+        let long_open_interest = datastore::get_open_interest(config, market_props.clone(), true).await?;
+        let short_open_interest = datastore::get_open_interest(config, market_props.clone(), false).await?;
+        let long_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, market_props.clone(), true).await?;
+        let short_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, market_props.clone(), false).await?;
+
+        Ok((long_open_interest, short_open_interest, long_open_interest_in_tokens, short_open_interest_in_tokens))
     }
 }

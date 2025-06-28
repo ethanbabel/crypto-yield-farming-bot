@@ -306,7 +306,7 @@ impl AssetTokenRegistry {
                         warn!(
                             symbol = %token.symbol,
                             address = %token.address,
-                            error = %e,
+                            error = ?e,
                             "Failed to update oracle price"
                         );
                     } else {

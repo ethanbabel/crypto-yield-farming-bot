@@ -39,8 +39,8 @@ async fn process_stream_entries(
                     "token_prices" => {
                         if let Ok(token_price_model) = serde_json::from_str::<NewTokenPriceModel>(text) {
                             debug!(token_id = token_price_model.token_id, "Deserialized token price");
-                            if let Err(_) = token_tx.send(token_price_model).await {
-                                error!("Token price channel closed");
+                            if let Err(e) = token_tx.send(token_price_model).await {
+                                error!(error = ?e, "Token price channel closed");
                                 return Err(eyre::eyre!("Token price channel closed"));
                             }
                         } else {
@@ -50,8 +50,8 @@ async fn process_stream_entries(
                     "market_states" => {
                         if let Ok(market_state_model) = serde_json::from_str::<NewMarketStateModel>(text) {
                             debug!(market_id = market_state_model.market_id, "Deserialized market state");
-                            if let Err(_) = market_tx.send(market_state_model).await {
-                                error!("Market state channel closed");
+                            if let Err(e) = market_tx.send(market_state_model).await {
+                                error!(error = ?e, "Market state channel closed");
                                 return Err(eyre::eyre!("Market state channel closed"));
                             }
                         } else {
@@ -127,7 +127,7 @@ async fn main() -> eyre::Result<()> {
                     // Safety flush if batch gets large
                     if token_batch.len() >= 200 {
                         if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_batch)).await {
-                            error!(error = %e, "Failed to insert token prices batch");
+                            error!(error = ?e, "Failed to insert token prices batch");
                         } else {
                             info!("Flushed large token prices batch to database (safety flush)");
                         }
@@ -141,7 +141,7 @@ async fn main() -> eyre::Result<()> {
                     // Safety flush if batch gets large
                     if market_batch.len() >= 200 {
                         if let Err(e) = db.insert_market_states(std::mem::take(&mut market_batch)).await {
-                            error!(error = %e, "Failed to insert market states batch");
+                            error!(error = ?e, "Failed to insert market states batch");
                         } else {
                             info!("Flushed large market states batch to database (safety flush)");
                         }
@@ -188,7 +188,7 @@ async fn main() -> eyre::Result<()> {
                     if !token_batch.is_empty() {
                         let count = token_batch.len();
                         if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_batch)).await {
-                            error!(error = %e, "Failed to insert token prices");
+                            error!(error = ?e, "Failed to insert token prices");
                         } else {
                             info!(count, "Coordination flush: inserted token prices");
                         }
@@ -196,7 +196,7 @@ async fn main() -> eyre::Result<()> {
                     if !market_batch.is_empty() {
                         let count = market_batch.len();
                         if let Err(e) = db.insert_market_states(std::mem::take(&mut market_batch)).await {
-                            error!(error = %e, "Failed to insert market states");
+                            error!(error = ?e, "Failed to insert market states");
                         } else {
                             info!(count, "Coordination flush: inserted market states");
                         }
@@ -245,7 +245,7 @@ async fn main() -> eyre::Result<()> {
                 &market_tx,
                 &mut last_ids,
             ).await {
-                error!(error = %e, stream_name = %stream_name, "Failed to process stream entries");
+                error!(error = ?e, stream_name = %stream_name, "Failed to process stream entries");
                 return Err(e);
             }
         }

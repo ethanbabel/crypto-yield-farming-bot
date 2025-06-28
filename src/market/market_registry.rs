@@ -207,7 +207,7 @@ impl MarketRegistry {
                     if let Err(e) = market.fetch_market_data(&config, market_fees).await {
                         error!(
                             market = %market.market_token,
-                            error = %e,
+                            error = ?e,
                             "Failed to fetch market data"
                         );
                     } else {

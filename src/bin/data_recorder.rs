@@ -92,6 +92,9 @@ async fn main() -> eyre::Result<()> {
     // Create Redis client
     let redis_client = redis::Client::open("redis://redis:6379")?;
     let mut redis_connection = redis_client.get_multiplexed_async_connection().await?;
+
+    // Clone Redis client for the spawned task
+    let redis_client_for_task = redis_client.clone();
     
     // Create channels for batching
     let (token_tx, mut token_rx) = mpsc::channel::<NewTokenPriceModel>(1000);
@@ -102,10 +105,14 @@ async fn main() -> eyre::Result<()> {
     // Spawn database writer task
     tokio::spawn(async move {
         // Create PubSub connection inside the task
-        let pubsub_client = redis::Client::open("redis://redis:6379").unwrap();
+        let pubsub_client = redis_client_for_task.clone();
         let mut pubsub = pubsub_client.get_async_pubsub().await.unwrap();
         pubsub.subscribe("data_collection_starting").await.unwrap();
-        info!("Subscribed to data_collection_starting channel");        
+        info!("Subscribed to data_collection_starting channel");
+        
+        // Create publish connection for completion signals
+        let mut publish_connection = redis_client_for_task.get_multiplexed_async_connection().await.unwrap();
+        
         let mut token_batch = Vec::new();
         let mut market_batch = Vec::new();
         let mut message_stream = pubsub.on_message();
@@ -201,6 +208,14 @@ async fn main() -> eyre::Result<()> {
                             info!(count, "Coordination flush: inserted market states");
                         }
                     }
+                    
+                    // Publish completion signal for downstream modules
+                    let completion_message = format!("completed:{}:{}", 
+                        tokens_processed_since_signal, 
+                        markets_processed_since_signal
+                    );
+                    let _: Result<(), _> = publish_connection.publish("data_collection_completed", completion_message).await;
+                    debug!("Published data collection completed signal");
                     
                     // Reset coordination state after successful flush
                     waiting_for_flush = false;

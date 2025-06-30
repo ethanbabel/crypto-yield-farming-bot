@@ -22,7 +22,7 @@ path = "src/bin/main.rs"
 
 [dependencies]
 dotenvy = "0.15"    # Load environment variables from .env file
-ethers = { version = "2", features = ["ws"] } # Ethereum with WebSocket support
+ethers = { version = "2", features = ["ws", "rustls"] } # Ethereum with WebSocket support
 serde = { version = "1.0", features = ["derive"] } # Serialization/deserialization
 tokio = { version = "1", features = ["full"] } # Async runtime
 eyre = "0.6" # East error handling

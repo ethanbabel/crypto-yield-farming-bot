@@ -2,6 +2,7 @@ use ethers::{
     types::{Address, U256, H256},
     providers::{Provider, Ws, StreamExt},
     contract::abigen,
+    middleware::Middleware,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,6 +48,20 @@ impl GmxEventListener {
     pub async fn start_listening(&self) -> Result<()> {
         info!("Starting GMX event listener");
 
+        // Spawn periodic ping task to keep WebSocket alive
+        let provider_clone = self.provider.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // every 5 minutes
+            loop {
+                interval.tick().await;
+                if let Err(e) = provider_clone.get_block_number().await {
+                    warn!(?e, "Ping to keep WS alive failed");
+                } else {
+                    debug!("Ping to WS succeeded");
+                }
+            }
+        });
+
         // Filter for PositionFeesCollected and SwapFeesCollected events
         let position_fees_collected_hash = string_to_bytes32("PositionFeesCollected");
         let swap_fees_collected_hash = string_to_bytes32("SwapFeesCollected");
@@ -65,31 +80,46 @@ impl GmxEventListener {
                 Ok(mut stream) => {
                     info!("Event stream subscribed, processing events");
                     let mut events_processed = 0u64;
-                    while let Some(event_result) = stream.next().await {
-                        match event_result {
-                            Ok(event) => {
-                                let event_name = event.event_name.as_str();
-                                match event_name {
-                                    "PositionFeesCollected" => { 
-                                        self.process_position_fees_event(event).await; 
-                                        events_processed += 1;
-                                    },
-                                    "SwapFeesCollected" => { 
-                                        self.process_swap_fees_event(event).await; 
-                                        events_processed += 1;
-                                    },
-                                    _ => {
-                                        warn!(event_name = event_name, "Unknown event type received");
+                    loop {
+                        // Wait for the next event or timeout after 180 seconds, preventing indefinite blocking
+                        let event_result = match tokio::time::timeout(std::time::Duration::from_secs(180), stream.next()).await {
+                            Ok(Some(evt)) => Some(evt),
+                            Ok(None) => {
+                                warn!("Stream closed — reconnecting...");
+                                break;
+                            }
+                            Err(_) => {
+                                warn!("No events received in 180s — stream timeout hit, reconnecting...");
+                                break;
+                            }
+                        };
+
+                        if let Some(event_result) = event_result {
+                            match event_result {
+                                Ok(event) => {
+                                    let event_name = event.event_name.as_str();
+                                    match event_name {
+                                        "PositionFeesCollected" => { 
+                                            self.process_position_fees_event(event).await; 
+                                            events_processed += 1;
+                                        },
+                                        "SwapFeesCollected" => { 
+                                            self.process_swap_fees_event(event).await; 
+                                            events_processed += 1;
+                                        },
+                                        _ => {
+                                            warn!(event_name = event_name, "Unknown event type received");
+                                        }
+                                    }
+
+                                    if events_processed % 100 == 0 {
+                                        debug!(events_processed = events_processed, "Event processing milestone");
                                     }
                                 }
-
-                                if events_processed % 100 == 0 {
-                                    debug!(events_processed = events_processed, "Event processing milestone");
+                                Err(e) => {
+                                    error!(?e, "WebSocket error while processing event stream");
+                                    break;
                                 }
-                            }
-                            Err(e) => {
-                                error!(?e, "WebSocket error while processing event stream");
-                                break;
                             }
                         }
                     }

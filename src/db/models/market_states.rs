@@ -5,7 +5,7 @@ use ethers::types::Address;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
-use crate::market::market::Market;
+use crate::data_ingestion::market::market::Market;
 
 #[derive(Debug, FromRow)]
 pub struct MarketStateModel {

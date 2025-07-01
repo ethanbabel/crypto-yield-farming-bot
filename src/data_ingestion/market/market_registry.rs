@@ -10,7 +10,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::token::{token::AssetToken, token_registry::AssetTokenRegistry};
+use crate::data_ingestion::token::{token::AssetToken, token_registry::AssetTokenRegistry};
 use crate::gmx::{
     reader_utils::{MarketProps},
     reader,
@@ -93,7 +93,7 @@ impl MarketRegistry {
         asset_token_registry: &AssetTokenRegistry, 
     ) -> eyre::Result<()> {
         debug!("Fetching market props from GMX");
-        let market_props_list = reader::get_markets(config).await?;
+        let market_props_list = self.fetch_markets_with_retry(config).await?;
         info!(count = market_props_list.len(), "Fetched market props from GMX");
         
         let mut inserted_count = 0;
@@ -123,7 +123,7 @@ impl MarketRegistry {
         debug!("Repopulating market registry");
         asset_token_registry.update_tracked_tokens().await?;
         
-        let market_props_list = reader::get_markets(config).await?;
+        let market_props_list = self.fetch_markets_with_retry(config).await?;
         let mut new_markets_count = 0;
         
         for props in &market_props_list {
@@ -272,5 +272,42 @@ impl MarketRegistry {
             "Markets saved to file"
         );
         Ok(())
+    }
+
+    /// Helper method to fetch markets with retry logic and backoff
+    async fn fetch_markets_with_retry(&self, config: &Config) -> eyre::Result<Vec<MarketProps>> {
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.try_fetch_markets(config).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES {
+                        let delay_ms = attempt * 500; // Linear backoff: 500ms, 1000ms
+                        warn!(
+                            attempt = attempt,
+                            delay_ms = delay_ms,
+                            error = %last_error.as_ref().unwrap(),
+                            "Failed to fetch markets from GMX, retrying after delay"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
+                    }
+                }
+            }
+        }
+
+        error!(
+            attempts = MAX_RETRIES,
+            error = %last_error.as_ref().unwrap(),
+            "Failed to fetch markets from GMX after all retries"
+        );
+        Err(last_error.unwrap())
+    }
+
+    /// Internal method that performs the actual markets fetch
+    async fn try_fetch_markets(&self, config: &Config) -> eyre::Result<Vec<MarketProps>> {
+        reader::get_markets(config).await
     }
 }

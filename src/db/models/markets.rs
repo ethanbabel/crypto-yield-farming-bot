@@ -3,7 +3,7 @@ use ethers::types::Address;
 use ethers::utils::to_checksum;
 use std::collections::HashMap;
 
-use crate::market::market::Market;
+use crate::data_ingestion::market::market::Market;
 
 #[derive(Debug, FromRow)]
 pub struct MarketModel {

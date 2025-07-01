@@ -10,7 +10,7 @@ use ethers::utils;
 use eyre::{Result, eyre};
 use serde_json::Value;
 use reqwest::Client;
-use tracing::{instrument, info, warn, debug};
+use tracing::{instrument, info, warn, debug, error};
 
 use super::token::AssetToken;
 use super::oracle::Oracle;
@@ -128,13 +128,7 @@ impl AssetTokenRegistry {
         }
 
         debug!("Fetching supported tokens from GMX API");
-        let client = Client::new();
-        let res = client
-            .get(GMX_SUPPORTED_TOKENS_ENDPOINT)
-            .send()
-            .await?
-            .error_for_status()?;
-        let res_json: Value = res.json().await?;
+        let res_json = self.fetch_supported_tokens_with_retry().await?;
         let tokens_arr = res_json["tokens"].as_array().ok_or_else(|| 
             eyre!("Error parsing the 'tokens' field from API response")
         )?;
@@ -206,13 +200,7 @@ impl AssetTokenRegistry {
     #[instrument(skip(self), fields(on_close = true))]
     pub async fn update_all_gmx_prices(&mut self) -> Result<()> {
         debug!("Fetching token prices from GMX API");
-        let client = Client::new();
-        let res = client
-            .get(GMX_API_PRICES_ENDPOINT)
-            .send()
-            .await?
-            .error_for_status()?;
-        let prices: Vec<Value> = res.json().await?;
+        let prices = self.fetch_token_prices_with_retry().await?;
 
         let mut updated_count = 0;
         for entry in prices.iter() {
@@ -345,5 +333,91 @@ impl AssetTokenRegistry {
         }
         debug!("All tokens have price data");
         true
+    }
+
+    /// Helper method to fetch supported tokens with retry logic and backoff
+    async fn fetch_supported_tokens_with_retry(&self) -> Result<Value> {
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.try_fetch_supported_tokens().await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES {
+                        let delay_ms = attempt * 500; // Linear backoff: 500ms, 1000ms
+                        warn!(
+                            attempt = attempt,
+                            delay_ms = delay_ms,
+                            error = %last_error.as_ref().unwrap(),
+                            "Failed to fetch supported tokens from GMX API, retrying after delay"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
+                    }
+                }
+            }
+        }
+
+        error!(
+            attempts = MAX_RETRIES,
+            error = %last_error.as_ref().unwrap(),
+            "Failed to fetch supported tokens from GMX API after all retries"
+        );
+        Err(last_error.unwrap())
+    }
+
+    /// Internal method that performs the actual supported tokens fetch
+    async fn try_fetch_supported_tokens(&self) -> Result<Value> {
+        let client = Client::new();
+        let res = client
+            .get(GMX_SUPPORTED_TOKENS_ENDPOINT)
+            .send()
+            .await?
+            .error_for_status()?;
+        res.json().await.map_err(Into::into)
+    }
+
+    /// Helper method to fetch token prices with retry logic and backoff
+    async fn fetch_token_prices_with_retry(&self) -> Result<Vec<Value>> {
+        const MAX_RETRIES: u32 = 3;
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.try_fetch_token_prices().await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES {
+                        let delay_ms = attempt * 500; // Linear backoff: 500ms, 1000ms
+                        warn!(
+                            attempt = attempt,
+                            delay_ms = delay_ms,
+                            error = %last_error.as_ref().unwrap(),
+                            "Failed to fetch token prices from GMX API, retrying after delay"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
+                    }
+                }
+            }
+        }
+
+        error!(
+            attempts = MAX_RETRIES,
+            error = %last_error.as_ref().unwrap(),
+            "Failed to fetch token prices from GMX API after all retries"
+        );
+        Err(last_error.unwrap())
+    }
+
+    /// Internal method that performs the actual token prices fetch
+    async fn try_fetch_token_prices(&self) -> Result<Vec<Value>> {
+        let client = Client::new();
+        let res = client
+            .get(GMX_API_PRICES_ENDPOINT)
+            .send()
+            .await?
+            .error_for_status()?;
+        res.json().await.map_err(Into::into)
     }
 }

@@ -16,7 +16,7 @@ use crate::gmx::{
     datastore,
     event_listener_utils::MarketFees,
 };
-use crate::token::token::AssetToken;
+use crate::data_ingestion::token::token::AssetToken;
 use super::market_utils::{
     self,
     i256_to_decimal_scaled, 
@@ -274,12 +274,15 @@ impl Market {
                 Err(e) => {
                     last_error = Some(e);
                     if attempt < MAX_RETRIES {
+                        let delay_ms = attempt * 500; // Linear backoff: 500ms, 1000ms
                         warn!(
                             market = %self.market_token,
                             attempt = attempt,
+                            delay_ms = delay_ms,
                             error = %last_error.as_ref().unwrap(),
-                            "Failed to fetch market info and pool data, retrying"
+                            "Failed to fetch market info and pool data, retrying after delay"
                         );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
                     }
                 }
             }
@@ -327,12 +330,15 @@ impl Market {
                 Err(e) => {
                     last_error = Some(e);
                     if attempt < MAX_RETRIES {
+                        let delay_ms = attempt * 500; // Linear backoff: 500ms, 1000ms
                         warn!(
                             market = %self.market_token,
                             attempt = attempt,
+                            delay_ms = delay_ms,
                             error = %last_error.as_ref().unwrap(),
-                            "Failed to fetch open interest data, retrying"
+                            "Failed to fetch open interest data, retrying after delay"
                         );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
                     }
                 }
             }

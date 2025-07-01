@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use sqlx::FromRow;
 use serde::{Serialize, Deserialize};
 
-use crate::token::token::AssetToken;
+use crate::data_ingestion::token::token::AssetToken;
 
 #[derive(Debug, FromRow)]
 pub struct TokenPriceModel {

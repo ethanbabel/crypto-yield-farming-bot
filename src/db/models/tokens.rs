@@ -1,7 +1,7 @@
 use sqlx::FromRow;
 use ethers::utils::to_checksum;
 
-use crate::token::token::AssetToken;
+use crate::data_ingestion::token::token::AssetToken;
 
 #[derive(Debug, FromRow)]
 pub struct TokenModel {

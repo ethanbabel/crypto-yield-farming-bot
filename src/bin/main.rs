@@ -2,8 +2,8 @@ use dotenvy::dotenv;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::token::token_registry;
-use crypto_yield_farming_bot::market::market_registry;
+use crypto_yield_farming_bot::data_ingestion::token::token_registry;
+use crypto_yield_farming_bot::data_ingestion::market::market_registry;
 
 use tracing::{info, error};
 use std::collections::HashMap;

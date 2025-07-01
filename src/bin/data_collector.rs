@@ -70,7 +70,7 @@ async fn main() -> eyre::Result<()> {
 
     // Initialize the GMX event listener
     let event_listener = GmxEventListener::init(
-        cfg.alchemy_ws_provider.clone(),
+        cfg.alchemy_ws_url.clone(),
         cfg.gmx_eventemitter,
     );
     let fees_map = Arc::clone(&event_listener.fees);

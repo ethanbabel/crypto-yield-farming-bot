@@ -1,6 +1,6 @@
 use std::env;
 use std::sync::Arc;
-use ethers::providers::{Provider, Http, Ws};
+use ethers::providers::{Provider, Http};
 use ethers::types::Address;
 
 use crate::constants;
@@ -8,7 +8,7 @@ use crate::constants;
 #[derive(Debug)]
 pub struct Config {
     pub alchemy_provider: Arc<Provider<Http>>,
-    pub alchemy_ws_provider: Arc<Provider<Ws>>,
+    pub alchemy_ws_url: String,
     pub wallet_private_key: String,
     pub network_mode: String,
     pub chain_id: u64,
@@ -44,9 +44,6 @@ impl Config {
             "prod" => env::var("ALCHEMY_WS_URL_PROD").expect("Missing ALCHEMY_WS_URL_PROD"),
             _ => panic!("Invalid NETWORK_MODE"),
         };
-
-        let ws_provider = Provider::<Ws>::connect(alchemy_ws_url).await
-            .expect("Failed to create Alchemy WebSocket provider");
 
         // Load wallet private key based on network mode
         let wallet_private_key = match network_mode.as_str() {
@@ -88,7 +85,7 @@ impl Config {
 
         let config = Config {
             alchemy_provider: Arc::new(provider),
-            alchemy_ws_provider: Arc::new(ws_provider),
+            alchemy_ws_url,
             wallet_private_key,
             network_mode,
             chain_id,

@@ -27,18 +27,18 @@ abigen!(
 // --- GMX Event Listener ---
 pub struct GmxEventListener {
     pub fees: CumulativeFeesMap,
-    provider: Arc<Provider<Ws>>,
+    ws_url: String,
     event_emitter_address: Address,
 }
 
 impl GmxEventListener {
     // Initialize the cumulative fees data structure and return the listener
-    #[instrument(skip(provider))]
-    pub fn init(provider: Arc<Provider<Ws>>, event_emitter_address: Address) -> Self {
+    #[instrument(skip(ws_url))]
+    pub fn init(ws_url: String, event_emitter_address: Address) -> Self {
         info!("Initializing GMX event listener");
         GmxEventListener {
             fees: Arc::new(Mutex::new(HashMap::new())),
-            provider,
+            ws_url,
             event_emitter_address,
         }
     }
@@ -47,20 +47,6 @@ impl GmxEventListener {
     #[instrument(skip(self), fields(event_emitter = %self.event_emitter_address))]
     pub async fn start_listening(&self) -> Result<()> {
         info!("Starting GMX event listener");
-
-        // Spawn periodic ping task to keep WebSocket alive
-        let provider_clone = self.provider.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // every 5 minutes
-            loop {
-                interval.tick().await;
-                if let Err(e) = provider_clone.get_block_number().await {
-                    warn!(?e, "Ping to keep WS alive failed");
-                } else {
-                    debug!("Ping to WS succeeded");
-                }
-            }
-        });
 
         // Filter for PositionFeesCollected and SwapFeesCollected events
         let position_fees_collected_hash = string_to_bytes32("PositionFeesCollected");
@@ -71,7 +57,31 @@ impl GmxEventListener {
         ];
 
         loop {
-            let event_emitter = EventEmitter::new(self.event_emitter_address, self.provider.clone());
+            // Create a new provider and event emitter on each reconnect
+            let provider = match Provider::<Ws>::connect(&self.ws_url).await {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    error!(?e, "Failed to connect to WebSocket provider");
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    continue;
+                }
+            };
+
+            // Start a scoped ping task for this provider instance
+            let ping_provider = provider.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = ping_provider.get_block_number().await {
+                        warn!(?e, "Ping to keep WS alive failed");
+                    } else {
+                        debug!("Ping to WS succeeded");
+                    }
+                }
+            });
+
+            let event_emitter = EventEmitter::new(self.event_emitter_address, provider.clone());
             let event_watcher = event_emitter
                 .event::<event_emitter::EventLog1Filter>()
                 .topic1(topic1_vec.clone());
@@ -81,15 +91,14 @@ impl GmxEventListener {
                     info!("Event stream subscribed, processing events");
                     let mut events_processed = 0u64;
                     loop {
-                        // Wait for the next event or timeout after 180 seconds, preventing indefinite blocking
-                        let event_result = match tokio::time::timeout(std::time::Duration::from_secs(180), stream.next()).await {
+                        let event_result = match tokio::time::timeout(std::time::Duration::from_secs(300), stream.next()).await {
                             Ok(Some(evt)) => Some(evt),
                             Ok(None) => {
                                 warn!("Stream closed — reconnecting...");
                                 break;
                             }
                             Err(_) => {
-                                warn!("No events received in 180s — stream timeout hit, reconnecting...");
+                                warn!("No events received in 300s — stream timeout hit, reconnecting...");
                                 break;
                             }
                         };
@@ -99,12 +108,12 @@ impl GmxEventListener {
                                 Ok(event) => {
                                     let event_name = event.event_name.as_str();
                                     match event_name {
-                                        "PositionFeesCollected" => { 
-                                            self.process_position_fees_event(event).await; 
+                                        "PositionFeesCollected" => {
+                                            self.process_position_fees_event(event).await;
                                             events_processed += 1;
                                         },
-                                        "SwapFeesCollected" => { 
-                                            self.process_swap_fees_event(event).await; 
+                                        "SwapFeesCollected" => {
+                                            self.process_swap_fees_event(event).await;
                                             events_processed += 1;
                                         },
                                         _ => {

@@ -37,4 +37,6 @@ rust_decimal = { version = "1.37.1", features = ["macros", "maths"] } # Decimal 
 chrono = { version = "0.4", features = ["serde"] } # Date and time handling
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "chrono", "rust_decimal"] } # Database interaction
 redis = { version = "0.27", features = ["tokio-comp"] } # Redis client 
+rand = "0.9" # Random number generation
+rand_distr = "0.5" # Statistical distributions for random sampling
 

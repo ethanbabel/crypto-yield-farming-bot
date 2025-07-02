@@ -6,6 +6,7 @@ use ethers::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use eyre::Result;
 use tracing::{info, error, warn, debug, instrument};
@@ -56,30 +57,57 @@ impl GmxEventListener {
             swap_fees_collected_hash,
         ];
 
+        // Track ping task handle for cleanup
+        let mut ping_handle: Option<tokio::task::JoinHandle<()>> = None;
+
         loop {
+            // Clean up previous ping task if it exists
+            if let Some(handle) = ping_handle.take() {
+                handle.abort();
+                debug!("Aborted previous ping task");
+            }
+
             // Create a new provider and event emitter on each reconnect
             let provider = match Provider::<Ws>::connect(&self.ws_url).await {
                 Ok(p) => Arc::new(p),
                 Err(e) => {
                     error!(?e, "Failed to connect to WebSocket provider");
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                     continue;
                 }
             };
 
-            // Start a scoped ping task for this provider instance
+            // Create health signaling channel
+            let (health_tx, mut health_rx) = tokio::sync::mpsc::channel(1);
+
+            // Start connection health monitor
             let ping_provider = provider.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            ping_handle = Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
+                let mut consecutive_failures = 0;
+
                 loop {
                     interval.tick().await;
-                    if let Err(e) = ping_provider.get_block_number().await {
-                        warn!(?e, "Ping to keep WS alive failed");
-                    } else {
-                        debug!("Ping to WS succeeded");
+                    match ping_provider.get_block_number().await {
+                        Ok(_) => {
+                            debug!("Connection healthy");
+                            consecutive_failures = 0;
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            warn!(?e, consecutive_failures, "Connection ping failed");
+                            
+                            // After 2 consecutive failures, declare connection dead
+                            if consecutive_failures >= 2 {
+                                warn!("Connection declared unhealthy - signaling reconnect");
+                                let _ = health_tx.send(()).await;
+                                break; // Exit ping task cleanly
+                            }
+                        }
                     }
                 }
-            });
+                debug!("Health monitor task exiting");
+            }));
 
             let event_emitter = EventEmitter::new(self.event_emitter_address, provider.clone());
             let event_watcher = event_emitter
@@ -90,55 +118,63 @@ impl GmxEventListener {
                 Ok(mut stream) => {
                     info!("Event stream subscribed, processing events");
                     let mut events_processed = 0u64;
+                    
                     loop {
-                        let event_result = match tokio::time::timeout(std::time::Duration::from_secs(300), stream.next()).await {
-                            Ok(Some(evt)) => Some(evt),
-                            Ok(None) => {
-                                warn!("Stream closed — reconnecting...");
-                                break;
-                            }
-                            Err(_) => {
-                                warn!("No events received in 300s — stream timeout hit, reconnecting...");
-                                break;
-                            }
-                        };
-
-                        if let Some(event_result) = event_result {
-                            match event_result {
-                                Ok(event) => {
-                                    let event_name = event.event_name.as_str();
-                                    match event_name {
-                                        "PositionFeesCollected" => {
-                                            self.process_position_fees_event(event).await;
-                                            events_processed += 1;
-                                        },
-                                        "SwapFeesCollected" => {
-                                            self.process_swap_fees_event(event).await;
-                                            events_processed += 1;
-                                        },
-                                        _ => {
-                                            warn!(event_name = event_name, "Unknown event type received");
+                        tokio::select! {
+                            // Process events with timeout
+                            event_result = tokio::time::timeout(Duration::from_secs(300), stream.next()) => {
+                                match event_result {
+                                    Ok(Some(Ok(event))) => {
+                                        let event_name = event.event_name.as_str();
+                                        match event_name {
+                                            "PositionFeesCollected" => {
+                                                self.process_position_fees_event(event).await;
+                                                events_processed += 1;
+                                            },
+                                            "SwapFeesCollected" => {
+                                                self.process_swap_fees_event(event).await;
+                                                events_processed += 1;
+                                            },
+                                            _ => {
+                                                warn!(event_name = event_name, "Unknown event type received");
+                                            }
                                         }
-                                    }
 
-                                    if events_processed % 100 == 0 {
-                                        debug!(events_processed = events_processed, "Event processing milestone");
+                                        if events_processed % 100 == 0 {
+                                            debug!(events_processed = events_processed, "Event processing milestone");
+                                        }
+                                    },
+                                    Ok(Some(Err(e))) => {
+                                        error!(?e, "Stream error - reconnecting immediately");
+                                        break; // Exit to reconnection loop
+                                    },
+                                    Ok(None) => {
+                                        warn!("Stream ended - reconnecting");
+                                        break; // Exit to reconnection loop
+                                    },
+                                    Err(_) => {
+                                        debug!("No events in 300s - continuing");
+                                        // Continue - let health monitor decide if connection is dead
                                     }
                                 }
-                                Err(e) => {
-                                    error!(?e, "WebSocket error while processing event stream");
-                                    break;
-                                }
+                            }
+                            // Listen for health monitor signals
+                            _ = health_rx.recv() => {
+                                warn!("Health monitor signaled connection failure - reconnecting");
+                                break; // Exit to reconnection loop
                             }
                         }
                     }
-                    warn!("Event stream ended unexpectedly, reconnecting...");
+                    warn!("Event stream ended, reconnecting...");
                 }
                 Err(e) => {
                     error!(?e, "Failed to subscribe to GMX event stream, retrying in 10s...");
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    tokio::time::sleep(Duration::from_secs(10)).await;
                 }
             }
+
+            // Brief pause before reconnecting
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 

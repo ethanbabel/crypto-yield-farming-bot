@@ -1,5 +1,6 @@
 use sqlx::FromRow;
 use ethers::utils::to_checksum;
+use serde::{Serialize, Deserialize};
 
 use crate::data_ingestion::token::token::AssetToken;
 
@@ -11,7 +12,7 @@ pub struct TokenModel {
     pub decimals: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NewTokenModel {
     pub address: String,
     pub symbol: String,

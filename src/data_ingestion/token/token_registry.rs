@@ -120,11 +120,11 @@ impl AssetTokenRegistry {
     }
 
     #[instrument(skip(self), fields(on_close = true))]
-    pub async fn update_tracked_tokens(&mut self) -> Result<()> {
+    pub async fn update_tracked_tokens(&mut self) -> Result<Vec<AssetToken>> {
         // If the network mode is test, we don't update tracked tokens
         if self.network_mode == "test" {
             debug!("Skipping tracked tokens update in test mode");
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         debug!("Fetching supported tokens from GMX API");
@@ -169,7 +169,7 @@ impl AssetTokenRegistry {
         // If no new tokens were found, return early
         if new_tokens.is_empty() {
             info!("No new supported tokens found");
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // Write the new tokens to json file
@@ -194,7 +194,7 @@ impl AssetTokenRegistry {
             new_tokens = ?new_tokens.iter().map(|t| &t.symbol).collect::<Vec<_>>(),
             "Added new tokens to registry and updated data file"
         );
-        Ok(())
+        Ok(new_tokens)
     }                  
 
     #[instrument(skip(self), fields(on_close = true))]

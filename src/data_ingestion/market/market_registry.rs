@@ -119,27 +119,30 @@ impl MarketRegistry {
         &mut self,
         config: &Config,
         asset_token_registry: &mut AssetTokenRegistry, 
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<(Vec<AssetToken>, Vec<Address>)> {
         debug!("Repopulating market registry");
-        asset_token_registry.update_tracked_tokens().await?;
+        let new_tokens = asset_token_registry.update_tracked_tokens().await?;
         
         let market_props_list = self.fetch_markets_with_retry(config).await?;
-        let mut new_markets_count = 0;
+        let mut new_market_addresses = Vec::new();
         
         for props in &market_props_list {
             let initial_count = self.markets.len();
+            let market_token = props.market_token;
+            
             self.insert_market_if_possible(props, asset_token_registry, true);
             if self.markets.len() > initial_count {
-                new_markets_count += 1;
+                new_market_addresses.push(market_token);
             }
         }
         
         debug!(
             total_markets = self.markets.len(),
-            new_markets = new_markets_count,
+            new_markets = new_market_addresses.len(),
+            new_tokens = new_tokens.len(),
             "Market registry repopulation completed"
         );
-        Ok(())
+        Ok((new_tokens, new_market_addresses))
     }
 
     #[instrument(skip(self), ret)]

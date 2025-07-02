@@ -1,5 +1,7 @@
 use sqlx::PgPool;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use ethers::types::Address;
 
 use crate::db::models::market_states::{NewMarketStateModel, MarketStateModel};
 
@@ -157,4 +159,38 @@ pub async fn get_market_state_history_in_range(
     )
     .fetch_all(pool)
     .await
+}
+
+/// Get market display names by joining markets and tokens tables
+pub async fn get_market_display_names(pool: &PgPool) -> Result<HashMap<Address, String>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT 
+            m.address as market_address,
+            it.symbol as index_token_symbol,
+            lt.symbol as long_token_symbol,
+            st.symbol as short_token_symbol
+        FROM markets m
+        JOIN tokens it ON m.index_token_id = it.id
+        JOIN tokens lt ON m.long_token_id = lt.id
+        JOIN tokens st ON m.short_token_id = st.id
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let display_names = rows.into_iter()
+        .filter_map(|row| {
+            let addr = row.market_address.parse::<Address>().ok()?;
+            let display_name = format!(
+                "{}/USD [{} - {}]", 
+                row.index_token_symbol, 
+                row.long_token_symbol, 
+                row.short_token_symbol
+            );
+            Some((addr, display_name))
+        })
+        .collect();
+
+    Ok(display_names)
 }

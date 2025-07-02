@@ -4,6 +4,8 @@ use ethers::types::Address;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug, instrument};
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 
 use super::connection;
 use super::schema;
@@ -14,14 +16,15 @@ use super::queries::{
     market_states as market_states_queries,
 };
 use super::models::{
-    tokens::{NewTokenModel, TokenModel},
-    markets::{NewMarketModel, MarketModel},
-    token_prices::{NewTokenPriceModel, TokenPriceModel},
-    market_states::{NewMarketStateModel, MarketStateModel},
+    tokens::NewTokenModel,
+    markets::NewMarketModel,
+    token_prices::NewTokenPriceModel,
+    market_states::NewMarketStateModel,
 };
 use crate::config::Config;
 use crate::data_ingestion::token::token::AssetToken;
 use crate::data_ingestion::market::market::Market;
+use crate::strategy::types::MarketStateSlice;
 
 pub struct DbManager {
     pub pool: PgPool,
@@ -134,6 +137,31 @@ impl DbManager {
         Ok(())
     }
 
+    /// Internal method to refresh ID maps from the database
+    #[instrument(skip(self))]
+    async fn refresh_id_maps(&mut self) -> Result<(), sqlx::Error> {
+        debug!("Refreshing ID maps from database");
+        
+        let token_id_map = tokens_queries::get_token_id_map(&self.pool).await?;
+        let market_id_map = markets_queries::get_market_id_map(&self.pool).await?;
+        
+        let token_count_diff = token_id_map.len() as i32 - self.token_id_map.len() as i32;
+        let market_count_diff = market_id_map.len() as i32 - self.market_id_map.len() as i32;
+        
+        self.token_id_map = token_id_map;
+        self.market_id_map = market_id_map;
+        
+        debug!(
+            token_count = self.token_id_map.len(),
+            market_count = self.market_id_map.len(),
+            token_diff = token_count_diff,
+            market_diff = market_count_diff,
+            "ID maps refreshed from database"
+        );
+        
+        Ok(())
+    }
+
     #[instrument(skip(self, tokens_iter))]
     pub async fn prepare_token_prices<I>(&self, tokens_iter: I) -> Vec<NewTokenPriceModel>
     where
@@ -193,5 +221,227 @@ impl DbManager {
         }
         debug!("Market states insertion completed");
         Ok(())
+    }
+
+    #[instrument(skip(self, tokens))]
+    pub fn prepare_new_tokens(&self, tokens: &[AssetToken]) -> Vec<NewTokenModel> {
+        debug!("Preparing new token models");
+        let new_tokens: Vec<NewTokenModel> = tokens
+            .iter()
+            .map(|token| NewTokenModel::from(token))
+            .collect();
+        debug!(count = new_tokens.len(), "New token models prepared");
+        new_tokens
+    }
+
+    #[instrument(skip(self, markets))]
+    pub async fn prepare_new_markets(&self, markets: &[&Market]) -> Vec<NewMarketModel> {
+        debug!("Preparing new market models");
+        let mut new_markets = Vec::new();
+        for market in markets {
+            let new_market = NewMarketModel::from_async(market, &self.token_id_map).await;
+            new_markets.push(new_market);
+        }
+        debug!(count = new_markets.len(), "New market models prepared");
+        new_markets
+    }
+
+    #[instrument(skip(self, tokens), fields(batch_size = tokens.len(), on_close = true))]
+    pub async fn insert_tokens(&mut self, tokens: Vec<NewTokenModel>) -> Result<(), sqlx::Error> {
+        if tokens.is_empty() {
+            debug!("No tokens to insert");
+            return Ok(());
+        }
+        
+        // Refresh ID maps to ensure we have the latest state
+        self.refresh_id_maps().await?;
+        
+        debug!(batch_size = tokens.len(), "Inserting tokens");
+        let mut inserted_count = 0;
+        let mut skipped_count = 0;
+        
+        for new_token in tokens {
+            // Parse the address to check if it already exists
+            if let Ok(address) = new_token.address.parse::<Address>() {
+                if self.token_id_map.contains_key(&address) {
+                    skipped_count += 1;
+                    debug!(
+                        symbol = %new_token.symbol,
+                        address = %new_token.address,
+                        "Token already exists in ID map, skipping insertion"
+                    );
+                    continue;
+                }
+                
+                let id = tokens_queries::insert_token(&self.pool, &new_token).await?;
+                self.token_id_map.insert(address, id);
+                inserted_count += 1;
+                debug!(
+                    symbol = %new_token.symbol,
+                    address = %new_token.address,
+                    id = id,
+                    "Token inserted in db and added to ID map"
+                );
+            } else {
+                debug!(
+                    symbol = %new_token.symbol,
+                    address = %new_token.address,
+                    "Failed to parse address, skipping token insertion"
+                );
+                skipped_count += 1;
+            }
+        }
+        debug!(
+            inserted = inserted_count,
+            skipped = skipped_count,
+            "Token insertion completed"
+        );
+        Ok(())
+    }
+
+    #[instrument(skip(self, markets), fields(batch_size = markets.len(), on_close = true))]
+    pub async fn insert_markets(&mut self, markets: Vec<NewMarketModel>) -> Result<(), sqlx::Error> {
+        if markets.is_empty() {
+            debug!("No markets to insert");
+            return Ok(());
+        }
+        
+        // Refresh ID maps to ensure we have the latest state
+        self.refresh_id_maps().await?;
+        
+        debug!(batch_size = markets.len(), "Inserting markets");
+        let mut inserted_count = 0;
+        let mut skipped_count = 0;
+        
+        for new_market in markets {
+            // Parse the address to check if it already exists
+            if let Ok(address) = new_market.address.parse::<Address>() {
+                if self.market_id_map.contains_key(&address) {
+                    skipped_count += 1;
+                    debug!(
+                        market_address = %new_market.address,
+                        "Market already exists in ID map, skipping insertion"
+                    );
+                    continue;
+                }
+                
+                let id = markets_queries::insert_market(&self.pool, &new_market).await?;
+                self.market_id_map.insert(address, id);
+                inserted_count += 1;
+                debug!(
+                    market_address = %new_market.address,
+                    id = id,
+                    "Market inserted in db and added to ID map"
+                );
+            } else {
+                debug!(
+                    market_address = %new_market.address,
+                    "Failed to parse address, skipping market insertion"
+                );
+                skipped_count += 1;
+            }
+        }
+        debug!(
+            inserted = inserted_count,
+            skipped = skipped_count,
+            "Market insertion completed"
+        );
+        Ok(())
+    }
+
+    /// Get display names for all markets by joining with token information
+    #[instrument(skip(self), fields(on_close = true))]
+    pub async fn get_market_display_names(&self) -> Result<HashMap<Address, String>, sqlx::Error> {
+        debug!("Fetching market display names");
+        let display_names = market_states_queries::get_market_display_names(&self.pool).await?;
+        debug!(count = display_names.len(), "Market display names fetched");
+        Ok(display_names)
+    }
+
+    /// Fetch full history for each market and construct MarketStateSlice objects
+    pub async fn get_market_state_slices(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<MarketStateSlice>, sqlx::Error> {
+        let mut slices = Vec::new();
+
+        // Get display names for all markets upfront
+        let display_names = self.get_market_display_names().await?;
+
+        for (address, market_id) in &self.market_id_map {
+            let history = market_states_queries::get_market_state_history_in_range(
+                &self.pool, *market_id, start, end
+            ).await?;
+
+            // Get index token prices for this market
+            let (index_token_timestamps, index_prices) = self.get_index_token_prices_for_market(
+                *market_id, start, end
+            ).await?;
+
+            // Get the proper display name or fallback to address
+            let display_name = display_names.get(address)
+                .cloned()
+                .unwrap_or_else(|| format!("{}/USD [Unknown]", address));
+            let timestamps = history.iter().map(|x| x.timestamp).collect();
+            let fees_usd = history.iter().map(|x| x.fees_total.unwrap_or_default()).collect();
+            let pnl_long = history.iter().map(|x| x.pnl_long.unwrap_or_default()).collect();
+            let pnl_short = history.iter().map(|x| x.pnl_short.unwrap_or_default()).collect();
+            let pnl_net = history.iter().map(|x| x.pnl_net.unwrap_or_default()).collect();
+            let oi_long = history.last().map_or(Decimal::ZERO, |x| x.open_interest_long.unwrap_or_default());
+            let oi_short = history.last().map_or(Decimal::ZERO, |x| x.open_interest_short.unwrap_or_default());
+            let oi_long_via_tokens = history.last().map_or(Decimal::ZERO, |x| x.open_interest_long_via_tokens.unwrap_or_default());
+            let oi_short_via_tokens = history.last().map_or(Decimal::ZERO, |x| x.open_interest_short_via_tokens.unwrap_or_default());
+            let last_index_price = index_prices.last().cloned().unwrap_or(Decimal::ZERO);
+            let oi_long_token_amount = oi_long_via_tokens / last_index_price;
+            let oi_short_token_amount = oi_short_via_tokens / last_index_price;
+
+            slices.push(MarketStateSlice {
+                market_address: *address,
+                display_name,
+                timestamps,
+                index_prices,
+                index_token_timestamps,
+                fees_usd,
+                pnl_long,
+                pnl_short,
+                pnl_net,
+                oi_long,
+                oi_short,
+                oi_long_via_tokens,
+                oi_short_via_tokens,
+                oi_long_token_amount,
+                oi_short_token_amount,
+            });
+        }
+
+        Ok(slices)
+    }
+
+    /// Get index token prices for a specific market within a time range
+    pub async fn get_index_token_prices_for_market(
+        &self,
+        market_id: i32,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<(Vec<DateTime<Utc>>, Vec<Decimal>), sqlx::Error> {
+        // Get the index token ID for this market
+        let index_token_id = markets_queries::get_market_index_token_id(&self.pool, market_id)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound)?;
+
+        // Fetch the token price history
+        let price_history = token_prices_queries::get_token_price_history_in_range(
+            &self.pool, 
+            index_token_id, 
+            start, 
+            end
+        ).await?;
+
+        // Extract timestamps and mid prices
+        let timestamps = price_history.iter().map(|p| p.timestamp).collect();
+        let prices = price_history.iter().map(|p| p.mid_price).collect();
+
+        Ok((timestamps, prices))
     }
 }

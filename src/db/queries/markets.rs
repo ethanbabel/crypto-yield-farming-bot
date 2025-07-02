@@ -62,3 +62,15 @@ pub async fn get_market_id_map(pool: &PgPool) -> Result<HashMap<Address, i32>, E
 
     Ok(map)
 }
+
+/// Get the index token ID for a market
+pub async fn get_market_index_token_id(pool: &PgPool, market_id: i32) -> Result<Option<i32>, Error> {
+    let row = sqlx::query!(
+        "SELECT index_token_id FROM markets WHERE id = $1",
+        market_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| r.index_token_id))
+}

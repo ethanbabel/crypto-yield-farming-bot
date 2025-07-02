@@ -91,12 +91,59 @@ async fn main() -> eyre::Result<()> {
         ticker.tick().await;
         debug!("Data collection cycle started");
         
-        // Repopulate the market registry 
-        if let Err(e) = market_registry.repopulate(&cfg, &mut token_registry).await {
-            error!(?e, "Failed to repopulate market registry");
-            return Err(e);
-        }
+        // Repopulate the market registry and get new tokens/markets
+        let (new_tokens, new_market_addresses) = match market_registry.repopulate(&cfg, &mut token_registry).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!(?e, "Failed to repopulate market registry");
+                return Err(e);
+            }
+        };
         debug!("Market registry repopulated");
+
+        // If we found new tokens or markets, send them to Redis streams
+        if !new_tokens.is_empty() || !new_market_addresses.is_empty() {
+            info!(
+                new_token_count = new_tokens.len(),
+                new_market_count = new_market_addresses.len(),
+                "Detected new tokens/markets, sending to data recorder"
+            );
+            
+            // Prepare and serialize new tokens using db_manager
+            if !new_tokens.is_empty() {
+                let new_token_models = db.prepare_new_tokens(&new_tokens);
+                for token_model in &new_token_models {
+                    if let Ok(serialized) = serde_json::to_string(token_model) {
+                        let _: () = redis_connection.xadd("new_tokens", "*", &[("data", serialized)]).await?;
+                    }
+                }
+            }
+            
+            // Get full market data for new market addresses and prepare models
+            if !new_market_addresses.is_empty() {
+                let mut new_markets = Vec::new();
+                for &market_address in &new_market_addresses {
+                    if let Some(market) = market_registry.get_market(&market_address) {
+                        new_markets.push(market);
+                    }
+                }
+                
+                if !new_markets.is_empty() {
+                    let new_market_models = db.prepare_new_markets(&new_markets).await;
+                    for market_model in &new_market_models {
+                        if let Ok(serialized) = serde_json::to_string(market_model) {
+                            let _: () = redis_connection.xadd("new_markets", "*", &[("data", serialized)]).await?;
+                        }
+                    }
+                }
+            }
+            
+            debug!(
+                new_tokens_sent = new_tokens.len(),
+                new_markets_sent = new_market_addresses.len(),
+                "New tokens and markets sent to Redis streams"
+            );
+        }
 
         // Fetch Asset Token price data from GMX
         if let Err(e) = token_registry.update_all_gmx_prices().await {

@@ -6,3 +6,4 @@ pub mod abi_fetcher;
 pub mod data_ingestion;
 pub mod logging;
 pub mod db;
+pub mod strategy;

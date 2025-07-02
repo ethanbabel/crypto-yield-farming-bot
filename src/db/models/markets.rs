@@ -2,6 +2,7 @@ use sqlx::FromRow;
 use ethers::types::Address;
 use ethers::utils::to_checksum;
 use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
 
 use crate::data_ingestion::market::market::Market;
 
@@ -14,7 +15,7 @@ pub struct MarketModel {
     pub short_token_id: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NewMarketModel {
     pub address: String,
     pub index_token_id: i32,

@@ -2,12 +2,11 @@ use dotenvy::dotenv;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::data_ingestion::token::token_registry;
-use crypto_yield_farming_bot::data_ingestion::market::market_registry;
+use crypto_yield_farming_bot::db::db_manager::DbManager;
+use crypto_yield_farming_bot::strategy::engine;
 
-use tracing::{info, error};
-use std::collections::HashMap;
-use std::sync::Arc;
+
+use tracing::{info};
 
 
 #[tokio::main]
@@ -25,39 +24,28 @@ async fn main() -> eyre::Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Initialize and populate token registry
-    let mut token_registry = token_registry::AssetTokenRegistry::new(&cfg);
-    if let Err(err) = token_registry.load_from_file() {
-        error!(?err, "Failed to load asset tokens from file");
-        return Err(err);
-    }
-    info!(count = token_registry.num_asset_tokens(), "Asset token registry initialized");
+    // Initialize db manager
+    let db = DbManager::init(&cfg).await?;
+    info!("Database manager initialized");
 
-    if let Err(e) = token_registry.update_all_gmx_prices().await {
-        error!(?e, "Failed to update GMX prices");
-        return Err(e.into());
-    }
-
-    // Initialize and populate market registry
-    let mut market_registry = market_registry::MarketRegistry::new(&cfg);
-    if let Err(err) = market_registry.populate(&cfg, &token_registry).await {
-        error!(?err, "Failed to populate market registry");
-        return Err(err);
-    }
-    info!(
-        total_markets = market_registry.num_markets(),
-        relevant_markets = market_registry.num_relevant_markets(),
-        "Market registry populated"
-    );
-
-    let fee_map = HashMap::new();
-
-    if let Err(err) = market_registry.update_all_market_data(Arc::clone(&cfg), &fee_map).await {
-        error!(?err, "Failed to update market data");
-        return Err(err);
-    }
-
-    market_registry.print_relevant_markets();
+    // Run strategy engine
+    let allocation_plan = engine::run_strategy_engine(&db).await;
+    let mut diagnostics_vec: Vec<_> = allocation_plan.diagnostics
+        .iter()
+        .collect();
+    diagnostics_vec.sort_by(|a, b| b.1.expected_return.partial_cmp(&a.1.expected_return).unwrap());
+    
+    let output = diagnostics_vec
+        .iter()
+        .map(|(address, diagnostics)| {
+            format!(
+                "Market: {:?}, Expected Return: {}, Variance: {}",
+                address, diagnostics.expected_return, diagnostics.variance
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    info!("Strategy engine completed. Allocation plan:\n{}", output);
 
     Ok(())
 }

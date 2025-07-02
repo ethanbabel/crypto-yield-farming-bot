@@ -23,6 +23,11 @@ pub struct MarketStateSlice {
     pub oi_short_via_tokens: Decimal, // Most recent value of open short positions (USD)
     pub oi_long_token_amount: Decimal, // Most recent long OI in index token
     pub oi_short_token_amount: Decimal, // Most recent short OI in index token
+
+    pub pool_long_collateral_usd: Decimal, // Total value of long collateral token (USD)
+    pub pool_short_collateral_usd: Decimal, // Total value of short collateral token (USD)
+    pub pool_long_collateral_token_amount: Decimal, // Total amount of long collateral token
+    pub pool_short_collateral_token_amount: Decimal, // Total amount of short collateral token
 }
 
 /// Return + risk breakdown for a single market

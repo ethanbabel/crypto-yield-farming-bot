@@ -1,4 +1,5 @@
 use dotenvy::dotenv;
+use rust_decimal::Decimal;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
@@ -39,13 +40,17 @@ async fn main() -> eyre::Result<()> {
         .iter()
         .map(|(address, diagnostics)| {
             format!(
-                "Market: {:?}, Expected Return: {}, Variance: {}",
-                address, diagnostics.expected_return, diagnostics.variance
+                "Market: {:?}, Expected Return: {:.3}%, Variance: {:.3}%",
+                address,
+                diagnostics.expected_return * Decimal::from(100),
+                diagnostics.variance * Decimal::from(100)
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
     info!("Strategy engine completed. Allocation plan:\n{}", output);
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
 
     Ok(())
 }

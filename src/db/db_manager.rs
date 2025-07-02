@@ -162,6 +162,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Prepare token price models from a list of AssetToken objects
     #[instrument(skip(self, tokens_iter))]
     pub async fn prepare_token_prices<I>(&self, tokens_iter: I) -> Vec<NewTokenPriceModel>
     where
@@ -178,6 +179,7 @@ impl DbManager {
         token_prices
     }
 
+    /// Insert a batch of token price models into the database
     #[instrument(skip(self, token_prices), fields(batch_size = token_prices.len(), on_close = true))]
     pub async fn insert_token_prices(&self, token_prices: Vec<NewTokenPriceModel>) -> Result<(), sqlx::Error> {
         if token_prices.is_empty() {
@@ -193,6 +195,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Prepare market state models from a list of Market objects
     #[instrument(skip(self, markets_iter))]
     pub fn prepare_market_states<'a, I>(&self, markets_iter: I) -> Vec<NewMarketStateModel>
     where
@@ -208,6 +211,7 @@ impl DbManager {
         market_states
     }
 
+    /// Insert a batch of market state models into the database
     #[instrument(skip(self, market_states), fields(batch_size = market_states.len(), on_close = true))]
     pub async fn insert_market_states(&self, market_states: Vec<NewMarketStateModel>) -> Result<(), sqlx::Error> {
         if market_states.is_empty() {
@@ -223,6 +227,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Prepare new token models from a list of AssetToken objects
     #[instrument(skip(self, tokens))]
     pub fn prepare_new_tokens(&self, tokens: &[AssetToken]) -> Vec<NewTokenModel> {
         debug!("Preparing new token models");
@@ -234,6 +239,7 @@ impl DbManager {
         new_tokens
     }
 
+    /// Prepare new market models from a list of Market objects
     #[instrument(skip(self, markets))]
     pub async fn prepare_new_markets(&self, markets: &[&Market]) -> Vec<NewMarketModel> {
         debug!("Preparing new market models");
@@ -246,6 +252,7 @@ impl DbManager {
         new_markets
     }
 
+    /// Insert a batch of new token models into the database
     #[instrument(skip(self, tokens), fields(batch_size = tokens.len(), on_close = true))]
     pub async fn insert_tokens(&mut self, tokens: Vec<NewTokenModel>) -> Result<(), sqlx::Error> {
         if tokens.is_empty() {
@@ -299,6 +306,7 @@ impl DbManager {
         Ok(())
     }
 
+    /// Insert a batch of new market models into the database
     #[instrument(skip(self, markets), fields(batch_size = markets.len(), on_close = true))]
     pub async fn insert_markets(&mut self, markets: Vec<NewMarketModel>) -> Result<(), sqlx::Error> {
         if markets.is_empty() {
@@ -374,27 +382,64 @@ impl DbManager {
                 &self.pool, *market_id, start, end
             ).await?;
 
+            // Skip markets with no historical data
+            if history.is_empty() {
+                continue;
+            }
+
             // Get index token prices for this market
-            let (index_token_timestamps, index_prices) = self.get_index_token_prices_for_market(
+            let (index_token_timestamps, index_prices) = match self.get_index_token_prices_for_market(
                 *market_id, start, end
-            ).await?;
+            ).await {
+                Ok(prices) => prices,
+                Err(e) => {
+                    tracing::warn!(
+                        market_id = *market_id,
+                        address = ?address,
+                        error = ?e,
+                        "Failed to get index token prices for market, skipping"
+                    );
+                    continue;
+                }
+            };
 
             // Get the proper display name or fallback to address
-            let display_name = display_names.get(address)
-                .cloned()
-                .unwrap_or_else(|| format!("{}/USD [Unknown]", address));
+            let display_name = display_names.get(address).cloned().unwrap_or_else(|| format!("{}/USD [Unknown]", address));
+            
+            // --- HISTORICAL DATA ---
             let timestamps = history.iter().map(|x| x.timestamp).collect();
             let fees_usd = history.iter().map(|x| x.fees_total.unwrap_or_default()).collect();
             let pnl_long = history.iter().map(|x| x.pnl_long.unwrap_or_default()).collect();
             let pnl_short = history.iter().map(|x| x.pnl_short.unwrap_or_default()).collect();
             let pnl_net = history.iter().map(|x| x.pnl_net.unwrap_or_default()).collect();
-            let oi_long = history.last().map_or(Decimal::ZERO, |x| x.open_interest_long.unwrap_or_default());
-            let oi_short = history.last().map_or(Decimal::ZERO, |x| x.open_interest_short.unwrap_or_default());
-            let oi_long_via_tokens = history.last().map_or(Decimal::ZERO, |x| x.open_interest_long_via_tokens.unwrap_or_default());
-            let oi_short_via_tokens = history.last().map_or(Decimal::ZERO, |x| x.open_interest_short_via_tokens.unwrap_or_default());
-            let last_index_price = index_prices.last().cloned().unwrap_or(Decimal::ZERO);
+
+            // --- CURRENT STATE ---
+            let last_state = history.last().unwrap(); // Safe since is_empty() was checked above
+
+            // Open interest data
+            let oi_long = last_state.open_interest_long.unwrap_or_default();
+            let oi_short = last_state.open_interest_short.unwrap_or_default();
+            let oi_long_via_tokens = last_state.open_interest_long_via_tokens.unwrap_or_default();
+            let oi_short_via_tokens = last_state.open_interest_short_via_tokens.unwrap_or_default();
+            let last_index_price = match index_prices.last().cloned() {
+                Some(price) => price,
+                None => {
+                    tracing::warn!(
+                        market_id = *market_id,
+                        address = ?address,
+                        "No index prices available for market, skipping"
+                    );
+                    continue;
+                }
+            };
             let oi_long_token_amount = oi_long_via_tokens / last_index_price;
             let oi_short_token_amount = oi_short_via_tokens / last_index_price;
+
+            // Pool composition data
+            let pool_long_collateral_usd = last_state.pool_long_token_usd.unwrap_or_default();
+            let pool_short_collateral_usd = last_state.pool_short_token_usd.unwrap_or_default();
+            let pool_long_collateral_token_amount = last_state.pool_long_amount.unwrap_or_default();
+            let pool_short_collateral_token_amount = last_state.pool_short_amount.unwrap_or_default();
 
             slices.push(MarketStateSlice {
                 market_address: *address,
@@ -412,6 +457,10 @@ impl DbManager {
                 oi_short_via_tokens,
                 oi_long_token_amount,
                 oi_short_token_amount,
+                pool_long_collateral_usd,
+                pool_short_collateral_usd,
+                pool_long_collateral_token_amount,
+                pool_short_collateral_token_amount,
             });
         }
 

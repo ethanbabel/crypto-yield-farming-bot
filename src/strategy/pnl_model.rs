@@ -32,29 +32,44 @@ pub fn simulate_trader_pnl(
     let final_prices = simulate_paths(config.n_simulations, config.time_horizon_hrs, s0, mu, sigma, lambda, alpha, beta);
 
     // Get trader-side PnL
-    let trader_pnl_delta_long_samples = final_prices
+    let trader_total_pnl_long_samples = final_prices
         .iter()
         .map(|final_price| (Decimal::from_f64(*final_price).unwrap() * slice.oi_long_token_amount) - slice.oi_long)
         .collect::<Vec<Decimal>>();
-    let trader_pnl_delta_short_samples = final_prices
+    let trader_total_pnl_short_samples = final_prices
         .iter()
         .map(|final_price| slice.oi_short - (Decimal::from_f64(*final_price).unwrap() * slice.oi_short_token_amount))
         .collect::<Vec<Decimal>>();
+
+    // Get current PnL and pool composition for return calculations
     let cur_net_pnl = slice.pnl_net.last()?;
+    let cur_pool_value = slice.pool_long_collateral_usd + slice.pool_short_collateral_usd;
     
     // Get LP-side net PnL
-    let lp_pnl_samples = trader_pnl_delta_long_samples
+    let lp_net_pnl_delta_samples = trader_total_pnl_long_samples
         .iter()
-        .zip(trader_pnl_delta_short_samples.iter())
-        .map(|(long, short)| -((*long + *short) / cur_net_pnl))
+        .zip(trader_total_pnl_short_samples.iter())
+        .map(|(long, short)| 
+            -((*long + *short) - cur_net_pnl) 
+        )
+        .collect::<Vec<Decimal>>();
+    let lp_pnl_return_samples = lp_net_pnl_delta_samples
+        .iter()
+        .map(|dollar_return| {
+            if cur_pool_value > Decimal::ZERO {
+                dollar_return / cur_pool_value
+            } else {
+                Decimal::ZERO
+            }
+        })
         .collect::<Vec<Decimal>>();
 
     // Calculate expected return and variance for LP-side PnL
-    let n = lp_pnl_samples.len() as f64;
-    let expected_return = lp_pnl_samples.iter().cloned().sum::<Decimal>() / Decimal::from_f64(n).unwrap();
-    let variance = lp_pnl_samples.iter()
+    let n = lp_pnl_return_samples.len() as f64;
+    let expected_return = lp_pnl_return_samples.iter().cloned().sum::<Decimal>() / Decimal::from_f64(n).unwrap();
+    let variance = lp_pnl_return_samples.iter()
         .map(|x| (*x - expected_return).powi(2))
-        .sum::<Decimal>() / Decimal::from_f64(n).unwrap();
+        .sum::<Decimal>() / Decimal::from_f64(n - 1.0).unwrap(); // Divide by n-1 for sample variance
 
     Some((expected_return, variance))
 }

@@ -26,7 +26,7 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> AllocationPlan {
     for slice in &market_slices {
         let config = PnLSimulationConfig {
             time_horizon_hrs: 72,
-            n_simulations: 1000,
+            n_simulations: 10000,
             token_category: TokenCategory::BlueChip,
         };
 
@@ -66,7 +66,7 @@ async fn fetch_market_state_slices(db_manager: &DbManager) -> Vec<MarketStateSli
     match db_manager.get_market_state_slices(start, end).await {
         Ok(slices) => slices,
         Err(e) => {
-            tracing::error!("Failed to fetch market state slices: {}", e);
+            tracing::error!(err = ?e, "Failed to fetch market state slices");
             Vec::new()
         }
     }

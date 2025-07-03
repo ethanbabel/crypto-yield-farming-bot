@@ -55,8 +55,10 @@ pub struct Pnl {
 pub struct TokenPool {
     pub long_token_amount: Decimal,
     pub short_token_amount: Decimal,
+    pub impact_token_amount: Decimal,
     pub long_token_usd: Decimal,
     pub short_token_usd: Decimal,
+    pub impact_token_usd: Decimal,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +72,8 @@ pub struct GmTokenPrice {
 pub struct OpenInterest {
     pub long: Decimal,
     pub short: Decimal,
+    pub long_amount: Decimal,
+    pub short_amount: Decimal,
     pub long_via_tokens: Decimal,
     pub short_via_tokens: Decimal,
 }

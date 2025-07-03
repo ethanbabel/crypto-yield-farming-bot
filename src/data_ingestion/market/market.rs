@@ -157,8 +157,10 @@ impl Market {
                 market_utils::TokenPool {
                     long_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.long_token_amount, long_token.decimals),
                     short_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.short_token_amount, short_token.decimals),
+                    impact_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.impact_pool_amount, index_token.decimals),
                     long_token_usd: u256_to_decimal_scaled(pool_info_min.long_token_usd + pool_info_max.long_token_usd) / Decimal::from(2),
                     short_token_usd: u256_to_decimal_scaled(pool_info_min.short_token_usd + pool_info_max.short_token_usd) / Decimal::from(2),
+                    impact_token_usd: u256_to_decimal_scaled_decimals(pool_info_min.impact_pool_amount, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
                 }
             );
 
@@ -171,6 +173,8 @@ impl Market {
                 market_utils::OpenInterest {
                     long: u256_to_decimal_scaled(long_open_interest),
                     short: u256_to_decimal_scaled(short_open_interest),
+                    long_amount: u256_to_decimal_scaled_decimals(long_open_interest_in_tokens, index_token.decimals),
+                    short_amount: u256_to_decimal_scaled_decimals(short_open_interest_in_tokens, index_token.decimals),
                     long_via_tokens: u256_to_decimal_scaled_decimals(long_open_interest_in_tokens, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
                     short_via_tokens: u256_to_decimal_scaled_decimals(short_open_interest_in_tokens, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
                 }

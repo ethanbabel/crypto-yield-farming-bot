@@ -25,10 +25,14 @@ pub async fn insert_market_state(
             gm_price_mid,
             pool_long_amount,
             pool_short_amount,
+            pool_impact_amount,
             pool_long_token_usd,
             pool_short_token_usd,
+            pool_impact_token_usd,
             open_interest_long,
             open_interest_short,
+            open_interest_long_amount,
+            open_interest_short_amount,
             open_interest_long_via_tokens,
             open_interest_short_via_tokens,
             utilization,
@@ -42,7 +46,8 @@ pub async fn insert_market_state(
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 
-            $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+            $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, 
+            $25, $26, $27, $28, $29, $30
         )
         "#,
         new_state.market_id,
@@ -57,10 +62,14 @@ pub async fn insert_market_state(
         new_state.gm_price_mid,
         new_state.pool_long_amount,
         new_state.pool_short_amount,
+        new_state.pool_impact_amount,
         new_state.pool_long_token_usd,
         new_state.pool_short_token_usd,
+        new_state.pool_impact_token_usd,
         new_state.open_interest_long,
         new_state.open_interest_short,
+        new_state.open_interest_long_amount,
+        new_state.open_interest_short_amount,
         new_state.open_interest_long_via_tokens,
         new_state.open_interest_short_via_tokens,
         new_state.utilization,
@@ -90,9 +99,10 @@ pub async fn get_market_state_at_timestamp(
         SELECT 
             id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
             pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
-            pool_short_amount, pool_long_token_usd, pool_short_token_usd, open_interest_long,
-            open_interest_short, open_interest_long_via_tokens, open_interest_short_via_tokens,
-            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap,
+            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
             fees_borrowing, fees_total
         FROM market_states
         WHERE market_id = $1 AND timestamp = $2
@@ -116,9 +126,10 @@ pub async fn get_market_state_after_timestamp(
         SELECT 
             id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
             pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
-            pool_short_amount, pool_long_token_usd, pool_short_token_usd, open_interest_long,
-            open_interest_short, open_interest_long_via_tokens, open_interest_short_via_tokens,
-            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap,
+            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
             fees_borrowing, fees_total
         FROM market_states
         WHERE market_id = $1 AND timestamp > $2
@@ -143,12 +154,13 @@ pub async fn get_market_state_history_in_range(
         MarketStateModel,
         r#"
         SELECT 
-            id, market_id, borrowing_factor_long, borrowing_factor_short, pnl_long,
+            id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
             pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
-            pool_short_amount, pool_long_token_usd, pool_short_token_usd, open_interest_long,
-            open_interest_short, open_interest_long_via_tokens, open_interest_short_via_tokens,
-            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap,
-            fees_borrowing, fees_total, timestamp
+            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
+            fees_borrowing, fees_total
         FROM market_states
         WHERE market_id = $1 AND timestamp >= $2 AND timestamp <= $3
         ORDER BY timestamp ASC

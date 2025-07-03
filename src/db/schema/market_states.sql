@@ -16,11 +16,15 @@ CREATE TABLE IF NOT EXISTS market_states (
 
     pool_long_amount NUMERIC,
     pool_short_amount NUMERIC,
+    pool_impact_amount NUMERIC,
     pool_long_token_usd NUMERIC,
     pool_short_token_usd NUMERIC,
+    pool_impact_token_usd NUMERIC,
 
     open_interest_long NUMERIC,
     open_interest_short NUMERIC,
+    open_interest_long_amount NUMERIC,
+    open_interest_short_amount NUMERIC,
     open_interest_long_via_tokens NUMERIC,
     open_interest_short_via_tokens NUMERIC,
 

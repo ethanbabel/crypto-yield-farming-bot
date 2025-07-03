@@ -42,8 +42,8 @@ pub fn simulate_trader_pnl(
         .collect::<Vec<Decimal>>();
 
     // Get current PnL and pool composition for return calculations
-    let cur_net_pnl = slice.pnl_net.last()?;
-    let cur_pool_value = slice.pool_long_collateral_usd + slice.pool_short_collateral_usd;
+    let cur_net_pnl = slice.pnl_net;
+    let cur_pool_value = slice.pool_long_collateral_usd + slice.pool_short_collateral_usd - slice.impact_pool_usd;
     
     // Get LP-side net PnL
     let lp_net_pnl_delta_samples = trader_total_pnl_long_samples

@@ -409,12 +409,14 @@ impl DbManager {
             // --- HISTORICAL DATA ---
             let timestamps = history.iter().map(|x| x.timestamp).collect();
             let fees_usd = history.iter().map(|x| x.fees_total.unwrap_or_default()).collect();
-            let pnl_long = history.iter().map(|x| x.pnl_long.unwrap_or_default()).collect();
-            let pnl_short = history.iter().map(|x| x.pnl_short.unwrap_or_default()).collect();
-            let pnl_net = history.iter().map(|x| x.pnl_net.unwrap_or_default()).collect();
 
             // --- CURRENT STATE ---
             let last_state = history.last().unwrap(); // Safe since is_empty() was checked above
+
+            // PnL data
+            let pnl_long = last_state.pnl_long.unwrap_or_default();
+            let pnl_short = last_state.pnl_short.unwrap_or_default();
+            let pnl_net = last_state.pnl_net.unwrap_or_default();
 
             // Open interest data
             let oi_long = last_state.open_interest_long.unwrap_or_default();
@@ -440,6 +442,8 @@ impl DbManager {
             let pool_short_collateral_usd = last_state.pool_short_token_usd.unwrap_or_default();
             let pool_long_collateral_token_amount = last_state.pool_long_amount.unwrap_or_default();
             let pool_short_collateral_token_amount = last_state.pool_short_amount.unwrap_or_default();
+            let impact_pool_usd = last_state.pool_impact_token_usd.unwrap_or_default();
+            let impact_pool_token_amount = last_state.pool_impact_amount.unwrap_or_default();
 
             slices.push(MarketStateSlice {
                 market_address: *address,
@@ -461,6 +465,8 @@ impl DbManager {
                 pool_short_collateral_usd,
                 pool_long_collateral_token_amount,
                 pool_short_collateral_token_amount,
+                impact_pool_usd,
+                impact_pool_token_amount,
             });
         }
 

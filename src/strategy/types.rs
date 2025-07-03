@@ -9,14 +9,19 @@ pub struct MarketStateSlice {
     pub market_address: Address,
     pub display_name: String, // e.g. "ETH/USD [WETH - USDC]"
 
+    // --- Historical data ---
     pub timestamps: Vec<DateTime<Utc>>,
     pub index_prices: Vec<Decimal>,   // Index token prices from token_prices table
     pub index_token_timestamps: Vec<DateTime<Utc>>, // Timestamps corresponding to index token prices
     pub fees_usd: Vec<Decimal>,       // Total fees collected per timestep
-    pub pnl_long: Vec<Decimal>,       // PnL from long positions (USD)
-    pub pnl_short: Vec<Decimal>,      // PnL from short positions (USD)
-    pub pnl_net: Vec<Decimal>,        // Total net PnL (USD)
 
+    // --- Current state ---
+    // PnL
+    pub pnl_net: Decimal, // Most recent net PnL (USD)
+    pub pnl_long: Decimal, // Most recent PnL from long positions (USD)
+    pub pnl_short: Decimal, // Most recent PnL from short positions (USD)
+
+    // Open interest
     pub oi_long: Decimal, // Most recent cost of open long positions (USD)
     pub oi_short: Decimal, // Most recent cost of open short positions (USD)
     pub oi_long_via_tokens: Decimal, // Most recent value of open long positions (USD)
@@ -24,10 +29,13 @@ pub struct MarketStateSlice {
     pub oi_long_token_amount: Decimal, // Most recent long OI in index token
     pub oi_short_token_amount: Decimal, // Most recent short OI in index token
 
+    // Pool composition
     pub pool_long_collateral_usd: Decimal, // Total value of long collateral token (USD)
     pub pool_short_collateral_usd: Decimal, // Total value of short collateral token (USD)
     pub pool_long_collateral_token_amount: Decimal, // Total amount of long collateral token
     pub pool_short_collateral_token_amount: Decimal, // Total amount of short collateral token
+    pub impact_pool_usd: Decimal, // Total impact pool value (USD)
+    pub impact_pool_token_amount: Decimal, // Total impact pool value in index token
 }
 
 /// Return + risk breakdown for a single market

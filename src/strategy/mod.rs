@@ -3,3 +3,4 @@ pub mod types;
 pub mod pnl_model;
 pub mod fee_model;
 pub mod allocator;
+pub mod strategy_constants;

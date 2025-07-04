@@ -8,6 +8,10 @@ use super::{
         AllocationPlan,
         PnLSimulationConfig,
         TokenCategory,
+    },
+    strategy_constants::{
+        BLUE_CHIP_MARKETS,
+        MID_CAP_MARKETS,
     }
 };
 use crate::db::db_manager::DbManager;
@@ -24,10 +28,12 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> AllocationPlan {
     let mut diagnostics: HashMap<Address, MarketDiagnostics> = HashMap::new();
 
     for slice in &market_slices {
+        let token_category = get_token_category(slice);
+
         let config = PnLSimulationConfig {
             time_horizon_hrs: 72,
             n_simulations: 10000,
-            token_category: TokenCategory::BlueChip,
+            token_category,
         };
 
         let Some((pnl_return, pnl_var)) = pnl_model::simulate_trader_pnl(slice, &config) else { continue };
@@ -37,6 +43,8 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> AllocationPlan {
         let variance = pnl_var + fee_var;
 
         diagnostics.insert(slice.market_address, MarketDiagnostics {
+            market_address: slice.market_address,
+            display_name: slice.display_name.clone(),
             expected_return,
             variance,
             pnl_return,
@@ -69,5 +77,17 @@ async fn fetch_market_state_slices(db_manager: &DbManager) -> Vec<MarketStateSli
             tracing::error!(err = ?e, "Failed to fetch market state slices");
             Vec::new()
         }
+    }
+}
+
+fn get_token_category(slice: &MarketStateSlice) -> TokenCategory {
+    let address_str = slice.market_address.to_string();
+
+    if BLUE_CHIP_MARKETS.contains(&address_str.as_str()) {
+        TokenCategory::BlueChip
+    } else if MID_CAP_MARKETS.contains(&address_str.as_str()) {
+        TokenCategory::MidCap
+    } else {
+        TokenCategory::Unreliable
     }
 }

@@ -41,6 +41,9 @@ pub struct MarketStateSlice {
 /// Return + risk breakdown for a single market
 #[derive(Debug, Clone)]
 pub struct MarketDiagnostics {
+    pub market_address: Address,
+    pub display_name: String, // e.g. "ETH/USD [WETH - USDC]"
+
     pub expected_return: Decimal,
     pub variance: Decimal,
 
@@ -58,7 +61,7 @@ pub struct AllocationPlan {
     pub diagnostics: HashMap<Address, MarketDiagnostics>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TokenCategory {
     BlueChip,     // e.g. BTC, ETH
     MidCap,       // e.g. LINK, UNI

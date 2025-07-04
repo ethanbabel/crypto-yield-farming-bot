@@ -3,6 +3,7 @@ use super::types::{
     TokenCategory, 
     PnLSimulationConfig, 
 };
+use super::strategy_constants::JUMP_PARAMETERS;
 
 use rust_decimal::prelude::*;
 use rand::{Rng, rng};
@@ -28,7 +29,7 @@ pub fn simulate_trader_pnl(
     let (lambda_per_hour, alpha, beta) = get_jump_parameters(config.token_category);
     let lambda = lambda_per_hour * (config.time_horizon_hrs as f64);
 
-    // Simulate paths
+    // Simulate paths --> Model token price (rather than pnl directly) to allow for future path dependent sims
     let final_prices = simulate_paths(config.n_simulations, config.time_horizon_hrs, s0, mu, sigma, lambda, alpha, beta);
 
     // Get trader-side PnL
@@ -122,11 +123,11 @@ fn compute_gbm_params(returns: &[f64], timestamps: &[DateTime<Utc>], prices: &[D
 
 /// Get jump frequency and size parameters from token category
 fn get_jump_parameters(tier: TokenCategory) -> (f64, f64, f64) {
-    match tier {
-        TokenCategory::BlueChip => (1.0 / (365.0 * 24.0), 4.0, 1.0),
-        TokenCategory::MidCap =>   (2.0 / (365.0 * 24.0), 5.0, 1.5),
-        TokenCategory::Unreliable => (4.0 / (365.0 * 24.0), 6.0, 2.0),
-    }
+    JUMP_PARAMETERS
+        .iter()
+        .find(|(category, _)| *category == tier)
+        .map(|(_, params)| *params)
+        .expect("Jump parameters not found for token category")
 }
 
 /// Simulate GBM + Poisson jumps per path

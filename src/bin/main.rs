@@ -38,10 +38,10 @@ async fn main() -> eyre::Result<()> {
     
     let output = diagnostics_vec
         .iter()
-        .map(|(address, diagnostics)| {
+        .map(|(_, diagnostics)| {
             format!(
-                "Market: {:?}, Expected Return: {:.3}%, Variance: {:.3}%",
-                address,
+                "Market: {:?}, Expected Return: {:.5}%, Variance: {:.5}%",
+                diagnostics.display_name,
                 diagnostics.expected_return * Decimal::from(100),
                 diagnostics.variance * Decimal::from(100)
             )

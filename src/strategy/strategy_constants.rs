@@ -1,5 +1,8 @@
 use super::types::TokenCategory;
 
+pub const TIME_HORIZON_HRS: u64 = 72;
+
+// --- PNL MODEL CONSTANTS ---
 /// Blue-chip tokens
 pub const BLUE_CHIP_TOKENS: [&str; 5] = [
     "BTC",
@@ -58,3 +61,7 @@ pub const JUMP_PARAMETERS: [(TokenCategory, (f64, f64, f64)); 3] = [
     (TokenCategory::MidCap, (2.0 / (365.0 * 24.0), 5.0, 1.5)),       // ~2 jumps per year
     (TokenCategory::Unreliable, (4.0 / (365.0 * 24.0), 6.0, 2.0)),   // ~4 jumps per year
 ];
+
+// --- FEE MODEL CONSTANTS ---
+/// EWMA smoothing factor
+pub const EWMA_ALPHA: f64 = 0.3;

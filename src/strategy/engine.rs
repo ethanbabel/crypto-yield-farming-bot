@@ -10,6 +10,7 @@ use super::{
         TokenCategory,
     },
     strategy_constants::{
+        TIME_HORIZON_HRS,
         BLUE_CHIP_MARKETS,
         MID_CAP_MARKETS,
     }
@@ -31,26 +32,21 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> AllocationPlan {
         let token_category = get_token_category(slice);
 
         let config = PnLSimulationConfig {
-            time_horizon_hrs: 72,
+            time_horizon_hrs: TIME_HORIZON_HRS,
             n_simulations: 10000,
             token_category,
         };
 
         let Some((pnl_return, pnl_var)) = pnl_model::simulate_trader_pnl(slice, &config) else { continue };
-        let (fee_return, fee_var) = fee_model::analyze_fees(slice);
-
-        let expected_return = pnl_return + fee_return;
-        let variance = pnl_var + fee_var;
+        let Some(fee_return) = fee_model::simulate_fee_return(slice, TIME_HORIZON_HRS) else { continue };
 
         diagnostics.insert(slice.market_address, MarketDiagnostics {
             market_address: slice.market_address,
             display_name: slice.display_name.clone(),
-            expected_return,
-            variance,
+            expected_return: pnl_return + fee_return,
+            variance: pnl_var,
             pnl_return,
-            pnl_variance: pnl_var,
             fee_return,
-            fee_variance: fee_var,
         });
     }
 

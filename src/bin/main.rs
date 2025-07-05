@@ -40,9 +40,11 @@ async fn main() -> eyre::Result<()> {
         .iter()
         .map(|(_, diagnostics)| {
             format!(
-                "Market: {:?}, Expected Return: {:.5}%, Variance: {:.5}%",
+                "Market: {}, Expected Return: {:.5}% (PnL Return: {:.5}%, Fee Return: {:.5}%), Variance: {:.5}%",
                 diagnostics.display_name,
                 diagnostics.expected_return * Decimal::from(100),
+                diagnostics.pnl_return * Decimal::from(100),
+                diagnostics.fee_return * Decimal::from(100),
                 diagnostics.variance * Decimal::from(100)
             )
         })

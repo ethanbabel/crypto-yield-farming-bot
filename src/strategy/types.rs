@@ -48,10 +48,7 @@ pub struct MarketDiagnostics {
     pub variance: Decimal,
 
     pub pnl_return: Decimal,
-    pub pnl_variance: Decimal,
-
-    pub fee_return: Decimal,
-    pub fee_variance: Decimal,
+    pub fee_return: Decimal, 
 }
 
 /// Final allocation decision and diagnostics

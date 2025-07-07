@@ -7,7 +7,7 @@ services:
     env_file:
       - .env
     environment:
-      - STAGE=test  # 'test' for testing, 'prod' for production deployment
+      - STAGE=prod  # 'test' for testing, 'prod' for production deployment
       - DEPLOYMENT=docker  # Explicit deployment type
       - CONTAINER_NAME=data_collector  # Pass the container name for logging
     depends_on:
@@ -15,12 +15,12 @@ services:
         condition: service_started
       alloy:
         condition: service_healthy
-    # restart: unless-stopped   # Comment out during testing
+    restart: unless-stopped   # Comment out during testing
   
   redis:
     container_name: redis
     image: redis:8.0
-    # restart: unless-stopped    # Comment out during testing
+    restart: unless-stopped    # Comment out during testing
 
   data_recorder:
     container_name: data_recorder 
@@ -30,7 +30,7 @@ services:
     env_file:
       - .env
     environment:
-      - STAGE=test  # 'test' for testing, 'prod' for production deployment
+      - STAGE=prod  # 'test' for testing, 'prod' for production deployment
       - DEPLOYMENT=docker  # Explicit deployment type
       - CONTAINER_NAME=data_recorder  # Pass the container name for logging
     depends_on:
@@ -38,7 +38,7 @@ services:
         condition: service_started
       alloy:
         condition: service_healthy
-    # restart: unless-stopped   # Comment out during testing
+    restart: unless-stopped   # Comment out during testing
 
   alloy:
     image: grafana/alloy:latest
@@ -60,4 +60,4 @@ services:
       timeout: 2s
       retries: 3
       start_period: 10s
-    # restart: unless-stopped     # Comment out during testing
+    restart: unless-stopped     # Comment out during testing

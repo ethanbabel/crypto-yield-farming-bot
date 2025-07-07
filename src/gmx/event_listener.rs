@@ -84,25 +84,17 @@ impl GmxEventListener {
             let ping_provider = provider.clone();
             ping_handle = Some(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(300));
-                let mut consecutive_failures = 0;
 
                 loop {
                     interval.tick().await;
                     match ping_provider.get_block_number().await {
                         Ok(_) => {
                             debug!("Connection healthy");
-                            consecutive_failures = 0;
                         }
                         Err(e) => {
-                            consecutive_failures += 1;
-                            warn!(?e, consecutive_failures, "Connection ping failed");
-                            
-                            // After 2 consecutive failures, declare connection dead
-                            if consecutive_failures >= 2 {
-                                warn!("Connection declared unhealthy - signaling reconnect");
-                                let _ = health_tx.send(()).await;
-                                break; // Exit ping task cleanly
-                            }
+                            warn!(?e, "Connection ping failed. Connection declared unhealthy - signaling reconnect");
+                            let _ = health_tx.send(()).await;
+                            break; // Exit ping task cleanly
                         }
                     }
                 }

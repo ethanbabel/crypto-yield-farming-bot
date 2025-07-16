@@ -369,7 +369,9 @@ impl AssetTokenRegistry {
 
     /// Internal method that performs the actual supported tokens fetch
     async fn try_fetch_supported_tokens(&self) -> Result<Value> {
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
         let res = client
             .get(GMX_SUPPORTED_TOKENS_ENDPOINT)
             .send()
@@ -412,7 +414,9 @@ impl AssetTokenRegistry {
 
     /// Internal method that performs the actual token prices fetch
     async fn try_fetch_token_prices(&self) -> Result<Vec<Value>> {
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()?;
         let res = client
             .get(GMX_API_PRICES_ENDPOINT)
             .send()

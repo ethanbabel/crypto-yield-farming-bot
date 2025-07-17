@@ -166,7 +166,6 @@ async fn main() -> eyre::Result<()> {
             error!(?e, "Failed to update market data");
             return Err(e);
         }
-        market_registry.print_relevant_markets();
 
         // Get token_price and market_state models
         let token_prices = db.prepare_token_prices(token_registry.asset_tokens()).await;

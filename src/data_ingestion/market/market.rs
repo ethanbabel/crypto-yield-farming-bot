@@ -15,6 +15,7 @@ use crate::gmx::{
     reader,
     datastore,
     event_listener_utils::MarketFees,
+    multicall::BatchMarketData,
 };
 use crate::data_ingestion::token::token::AssetToken;
 use super::market_utils::{
@@ -53,15 +54,10 @@ impl fmt::Display for Market {
         let short = self.short_token.try_read().map(|t| t.symbol.clone()).unwrap_or("?".to_string());
         write!(
             f,
-            "{}/USD [{} - {}], Total Fees: {}",
+            "{}/USD [{} - {}]",
             index,
             long,
             short,
-            if self.cumulative_fees.total_fees == Decimal::ZERO {
-                "N/A".to_string()
-            } else {
-                format!("${:.5}", self.cumulative_fees.total_fees)
-            }
         )
     }
 }
@@ -97,17 +93,6 @@ impl Market {
             debug!("Market prices available, proceeding with data fetch");
             // Fetch market props for gmx
             let market_props = self.market_props().await;
-            // Get read locks for tokens
-            let index_token = self.index_token.read().await.clone();
-            let long_token = self.long_token.read().await.clone();
-            let short_token = self.short_token.read().await.clone();
-            
-            debug!(
-                index_symbol = %index_token.symbol,
-                long_symbol = %long_token.symbol,
-                short_symbol = %short_token.symbol,
-                "Token information loaded"
-            );
             
             // Fetch market info and pool data
             let (market_info, gm_price_min, pool_info_min, gm_price_max, pool_info_max) = 
@@ -115,144 +100,23 @@ impl Market {
 
             debug!("Market info and pool info fetched successfully");
 
-            // Set borrowing factor per second
-            self.borrowing_factor_per_second = Some(
-                market_utils::BorrowingFactorPerSecond {
-                    longs: u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_longs),
-                    shorts: u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_shorts),
-                }
-            );
-
-            // If pool_supply is zero, set has_supply to false
-            let has_supply =  pool_info_min.pool_value != I256::zero() || pool_info_max.pool_value != I256::zero();
-            self.has_supply = has_supply;
-            
-            debug!(
-                has_supply = has_supply,
-                pool_value_min = %pool_info_min.pool_value,
-                pool_value_max = %pool_info_max.pool_value,
-                "Supply status determined"
-            );
-
-            // Set GM token price
-            self.gm_token_price = Some(
-                market_utils::GmTokenPrice {
-                    min: i256_to_decimal_scaled(gm_price_min),
-                    max: i256_to_decimal_scaled(gm_price_max),
-                    mid: i256_to_decimal_scaled((gm_price_min + gm_price_max) / I256::from(2)),
-                }
-            );
-
-            // Set pnl
-            self.pnl = Some(
-                market_utils::Pnl {
-                    long: i256_to_decimal_scaled(pool_info_min.long_pnl + pool_info_max.long_pnl) / Decimal::from(2),
-                    short: i256_to_decimal_scaled(pool_info_min.short_pnl + pool_info_max.short_pnl) / Decimal::from(2),
-                    net: i256_to_decimal_scaled(pool_info_min.net_pnl + pool_info_max.net_pnl) / Decimal::from(2),
-                }
-            );
-
-            // Set token pool info
-            self.token_pool = Some(
-                market_utils::TokenPool {
-                    long_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.long_token_amount, long_token.decimals),
-                    short_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.short_token_amount, short_token.decimals),
-                    impact_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.impact_pool_amount, index_token.decimals),
-                    long_token_usd: u256_to_decimal_scaled(pool_info_min.long_token_usd + pool_info_max.long_token_usd) / Decimal::from(2),
-                    short_token_usd: u256_to_decimal_scaled(pool_info_min.short_token_usd + pool_info_max.short_token_usd) / Decimal::from(2),
-                    impact_token_usd: u256_to_decimal_scaled_decimals(pool_info_min.impact_pool_amount, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
-                }
-            );
-
             // Fetch open interest data
             let (long_open_interest, short_open_interest, long_open_interest_in_tokens, short_open_interest_in_tokens) = 
                 self.fetch_open_interest_data(config, market_props.clone()).await?;
 
-            // Set open interest
-            self.open_interest = Some(
-                market_utils::OpenInterest {
-                    long: u256_to_decimal_scaled(long_open_interest),
-                    short: u256_to_decimal_scaled(short_open_interest),
-                    long_amount: u256_to_decimal_scaled_decimals(long_open_interest_in_tokens, index_token.decimals),
-                    short_amount: u256_to_decimal_scaled_decimals(short_open_interest_in_tokens, index_token.decimals),
-                    long_via_tokens: u256_to_decimal_scaled_decimals(long_open_interest_in_tokens, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
-                    short_via_tokens: u256_to_decimal_scaled_decimals(short_open_interest_in_tokens, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
-                }
-            );
-
-            // Calculate utilization
-            let total_open_interest = self.open_interest.as_ref().unwrap().long + self.open_interest.as_ref().unwrap().short;
-            let total_pool_liquidity = self.token_pool.as_ref().unwrap().long_token_usd + self.token_pool.as_ref().unwrap().short_token_usd;
-            if total_pool_liquidity > Decimal::ZERO {
-                self.current_utilization = Some(total_open_interest / total_pool_liquidity);
-            } 
-
-            // Build a map from address to token for efficient lookup
-            let token_map: HashMap<Address, Arc<RwLock<AssetToken>>> = [
-                (index_token.address, self.index_token.clone()),
-                (long_token.address, self.long_token.clone()),
-                (short_token.address, self.short_token.clone()),
-            ].into_iter().collect();
-
-            // Set volume and cumulative fees
-            let mut swap_volume_total = Decimal::ZERO;
-            for (token_address, volume) in &market_fees.swap_volume {
-                if let Some(token) = token_map.get(token_address) {
-                    let token = token.read().await;
-                    let volume_usd = u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
-                    self.volume.swap += volume_usd;
-                    swap_volume_total += volume_usd;
-                } else {
-                    warn!(
-                        market = %self.market_token,
-                        token = %to_checksum(token_address, None),
-                        "Market has swap volume for unknown token"
-                    );
-                }
-            }
-            let trading_volume_usd = u256_to_decimal_scaled(market_fees.trading_volume);
-            self.volume.trading += trading_volume_usd;
-
-            debug!(
-                swap_volume = %swap_volume_total,
-                trading_volume = %trading_volume_usd,
-                "Volume data updated"
-            );
-
-            let mut fee_types = [
-                (&market_fees.position_fees, &mut self.cumulative_fees.position_fees),
-                (&market_fees.liquidation_fees, &mut self.cumulative_fees.liquidation_fees),
-                (&market_fees.swap_fees, &mut self.cumulative_fees.swap_fees),
-                (&market_fees.borrowing_fees, &mut self.cumulative_fees.borrowing_fees),
-            ];
-
-            let mut total_fees_added = Decimal::ZERO;
-            for (fee_map, field) in fee_types.iter_mut() {
-                for (token_address, fee) in fee_map.iter() {
-                    if let Some(token) = token_map.get(token_address) {
-                        let token = token.read().await;
-                        let fee_val = u256_to_decimal_scaled_decimals(*fee, token.decimals) * token.last_mid_price_usd.unwrap();
-                        **field += fee_val;
-                        self.cumulative_fees.total_fees += fee_val;
-                        total_fees_added += fee_val;
-                    } else {
-                        warn!(
-                            market = %self.market_token,
-                            token = %to_checksum(token_address, None),
-                            "Market has fee for unknown token"
-                        );
-                    }
-                }
-            }
-
-            debug!(
-                total_fees_added = %total_fees_added,
-                cumulative_total = %self.cumulative_fees.total_fees,
-                "Fee data updated"
-            );
-
-            // Update the timestamp of the last update
-            self.updated_at = Some(SystemTime::now());
+            // Use the shared processing method
+            self.process_market_data(
+                &market_info,
+                gm_price_min,
+                &pool_info_min,
+                gm_price_max,
+                &pool_info_max,
+                long_open_interest,
+                short_open_interest,
+                long_open_interest_in_tokens,
+                short_open_interest_in_tokens,
+                market_fees,
+            ).await?;
 
             debug!("Market data fetch completed successfully");
             Ok(())
@@ -369,6 +233,256 @@ impl Market {
         let short_open_interest_in_tokens = datastore::get_open_interest_in_tokens(config, market_props.clone(), false).await?;
 
         Ok((long_open_interest, short_open_interest, long_open_interest_in_tokens, short_open_interest_in_tokens))
+    }
+
+    /// Update market data from batch results (multicall alternative to fetch_market_data)
+    #[instrument(skip(self, batch_data, market_fees), fields(
+        market_token = %self.market_token
+    ))]
+    pub async fn update_from_batch_data(
+        &mut self,
+        batch_data: &BatchMarketData,
+        market_fees: &MarketFees,
+    ) -> Result<()> {
+        debug!("Updating market data from batch results");
+
+        // Extract data from batch results
+        let market_info = batch_data.market_infos.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("Market info not found in batch data for market {}", self.market_token))?;
+        
+        let (gm_price_min, pool_info_min) = batch_data.gm_prices_min.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("GM price min not found in batch data for market {}", self.market_token))?;
+        
+        let (gm_price_max, pool_info_max) = batch_data.gm_prices_max.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("GM price max not found in batch data for market {}", self.market_token))?;
+        
+        let long_open_interest = batch_data.open_interest_long.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("Long open interest not found in batch data for market {}", self.market_token))?;
+        
+        let short_open_interest = batch_data.open_interest_short.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("Short open interest not found in batch data for market {}", self.market_token))?;
+        
+        let long_open_interest_in_tokens = batch_data.open_interest_tokens_long.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("Long open interest in tokens not found in batch data for market {}", self.market_token))?;
+        
+        let short_open_interest_in_tokens = batch_data.open_interest_tokens_short.get(&self.market_token)
+            .ok_or_else(|| eyre::eyre!("Short open interest in tokens not found in batch data for market {}", self.market_token))?;
+
+        // Use the shared processing method
+        self.process_market_data(
+            market_info,
+            *gm_price_min,
+            pool_info_min,
+            *gm_price_max,
+            pool_info_max,
+            *long_open_interest,
+            *short_open_interest,
+            *long_open_interest_in_tokens,
+            *short_open_interest_in_tokens,
+            market_fees,
+        ).await?;
+
+        debug!("Market data update from batch completed successfully");
+        Ok(())
+    }
+
+    /// Update market data with fallback to individual fetch if not found in batch
+    #[instrument(skip(self, config, batch_data, market_fees), fields(
+        market_token = %self.market_token
+    ))]
+    pub async fn update_from_batch_data_with_fallback(
+        &mut self,
+        config: &Config,
+        batch_data: Option<&BatchMarketData>,
+        market_fees: &MarketFees,
+    ) -> Result<()> {
+        // Try batch data first
+        if let Some(batch_data) = batch_data {
+            match self.update_from_batch_data(batch_data, market_fees).await {
+                Ok(()) => return Ok(()),
+                Err(err) => debug!(?err, "Batch data update failed"),
+            }
+        }
+        
+        // Fall back to individual fetch
+        debug!("Using individual fetch for market data");
+        self.fetch_market_data(config, market_fees).await
+    }
+
+    /// Shared method to process market data from various sources
+    async fn process_market_data(
+        &mut self,
+        market_info: &MarketInfo,
+        gm_price_min: I256,
+        pool_info_min: &MarketPoolValueInfoProps,
+        gm_price_max: I256,
+        pool_info_max: &MarketPoolValueInfoProps,
+        long_open_interest: U256,
+        short_open_interest: U256,
+        long_open_interest_in_tokens: U256,
+        short_open_interest_in_tokens: U256,
+        market_fees: &MarketFees,
+    ) -> Result<()> {
+        // Get read locks for tokens
+        let index_token = self.index_token.read().await.clone();
+        let long_token = self.long_token.read().await.clone();
+        let short_token = self.short_token.read().await.clone();
+        
+        debug!(
+            index_symbol = %index_token.symbol,
+            long_symbol = %long_token.symbol,
+            short_symbol = %short_token.symbol,
+            "Token information loaded"
+        );
+
+        // Set borrowing factor per second
+        self.borrowing_factor_per_second = Some(
+            market_utils::BorrowingFactorPerSecond {
+                longs: u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_longs),
+                shorts: u256_to_decimal_scaled(market_info.borrowing_factor_per_second_for_shorts),
+            }
+        );
+
+        // If pool_supply is zero, set has_supply to false
+        let has_supply = pool_info_min.pool_value != I256::zero() || pool_info_max.pool_value != I256::zero();
+        self.has_supply = has_supply;
+        
+        debug!(
+            has_supply = has_supply,
+            pool_value_min = %pool_info_min.pool_value,
+            pool_value_max = %pool_info_max.pool_value,
+            "Supply status determined"
+        );
+
+        // Set GM token price
+        self.gm_token_price = Some(
+            market_utils::GmTokenPrice {
+                min: i256_to_decimal_scaled(gm_price_min),
+                max: i256_to_decimal_scaled(gm_price_max),
+                mid: i256_to_decimal_scaled((gm_price_min + gm_price_max) / I256::from(2)),
+            }
+        );
+
+        // Set pnl
+        self.pnl = Some(
+            market_utils::Pnl {
+                long: i256_to_decimal_scaled(pool_info_min.long_pnl + pool_info_max.long_pnl) / Decimal::from(2),
+                short: i256_to_decimal_scaled(pool_info_min.short_pnl + pool_info_max.short_pnl) / Decimal::from(2),
+                net: i256_to_decimal_scaled(pool_info_min.net_pnl + pool_info_max.net_pnl) / Decimal::from(2),
+            }
+        );
+
+        // Set token pool info
+        self.token_pool = Some(
+            market_utils::TokenPool {
+                long_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.long_token_amount, long_token.decimals),
+                short_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.short_token_amount, short_token.decimals),
+                impact_token_amount: u256_to_decimal_scaled_decimals(pool_info_min.impact_pool_amount, index_token.decimals),
+                long_token_usd: u256_to_decimal_scaled(pool_info_min.long_token_usd + pool_info_max.long_token_usd) / Decimal::from(2),
+                short_token_usd: u256_to_decimal_scaled(pool_info_min.short_token_usd + pool_info_max.short_token_usd) / Decimal::from(2),
+                impact_token_usd: u256_to_decimal_scaled_decimals(pool_info_min.impact_pool_amount, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
+            }
+        );
+
+        // Set open interest
+        self.open_interest = Some(
+            market_utils::OpenInterest {
+                long: u256_to_decimal_scaled(long_open_interest),
+                short: u256_to_decimal_scaled(short_open_interest),
+                long_amount: u256_to_decimal_scaled_decimals(long_open_interest_in_tokens, index_token.decimals),
+                short_amount: u256_to_decimal_scaled_decimals(short_open_interest_in_tokens, index_token.decimals),
+                long_via_tokens: u256_to_decimal_scaled_decimals(long_open_interest_in_tokens, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
+                short_via_tokens: u256_to_decimal_scaled_decimals(short_open_interest_in_tokens, index_token.decimals) * index_token.last_mid_price_usd.unwrap(),
+            }
+        );
+
+        // Calculate utilization
+        let total_open_interest = self.open_interest.as_ref().unwrap().long + self.open_interest.as_ref().unwrap().short;
+        let total_pool_liquidity = self.token_pool.as_ref().unwrap().long_token_usd + self.token_pool.as_ref().unwrap().short_token_usd;
+        if total_pool_liquidity > Decimal::ZERO {
+            self.current_utilization = Some(total_open_interest / total_pool_liquidity);
+        }
+
+        // Process volume and fees (shared logic)
+        self.process_volume_and_fees(&index_token, &long_token, &short_token, market_fees).await?;
+
+        // Update the timestamp of the last update
+        self.updated_at = Some(SystemTime::now());
+
+        Ok(())
+    }
+
+    /// Shared method to process volume and fee data
+    async fn process_volume_and_fees(
+        &mut self,
+        index_token: &AssetToken,
+        long_token: &AssetToken,
+        short_token: &AssetToken,
+        market_fees: &MarketFees,
+    ) -> Result<()> {
+        // Build a map from address to token for efficient lookup
+        let token_map: HashMap<Address, &AssetToken> = [
+            (index_token.address, index_token),
+            (long_token.address, long_token),
+            (short_token.address, short_token),
+        ].into_iter().collect();
+
+        // Set volume and cumulative fees
+        let mut swap_volume_total = Decimal::ZERO;
+        for (token_address, volume) in &market_fees.swap_volume {
+            if let Some(token) = token_map.get(token_address) {
+                let volume_usd = u256_to_decimal_scaled_decimals(*volume, token.decimals) * token.last_mid_price_usd.unwrap();
+                self.volume.swap += volume_usd;
+                swap_volume_total += volume_usd;
+            } else {
+                warn!(
+                    market = %self.market_token,
+                    token = %to_checksum(token_address, None),
+                    "Market has swap volume for unknown token"
+                );
+            }
+        }
+        let trading_volume_usd = u256_to_decimal_scaled(market_fees.trading_volume);
+        self.volume.trading += trading_volume_usd;
+
+        debug!(
+            swap_volume = %swap_volume_total,
+            trading_volume = %trading_volume_usd,
+            "Volume data updated"
+        );
+
+        let mut fee_types = [
+            (&market_fees.position_fees, &mut self.cumulative_fees.position_fees),
+            (&market_fees.liquidation_fees, &mut self.cumulative_fees.liquidation_fees),
+            (&market_fees.swap_fees, &mut self.cumulative_fees.swap_fees),
+            (&market_fees.borrowing_fees, &mut self.cumulative_fees.borrowing_fees),
+        ];
+
+        let mut total_fees_added = Decimal::ZERO;
+        for (fee_map, field) in fee_types.iter_mut() {
+            for (token_address, fee) in fee_map.iter() {
+                if let Some(token) = token_map.get(token_address) {
+                    let fee_val = u256_to_decimal_scaled_decimals(*fee, token.decimals) * token.last_mid_price_usd.unwrap();
+                    **field += fee_val;
+                    self.cumulative_fees.total_fees += fee_val;
+                    total_fees_added += fee_val;
+                } else {
+                    warn!(
+                        market = %self.market_token,
+                        token = %to_checksum(token_address, None),
+                        "Market has fee for unknown token"
+                    );
+                }
+            }
+        }
+
+        debug!(
+            total_fees_added = %total_fees_added,
+            cumulative_total = %self.cumulative_fees.total_fees,
+            "Fee data updated"
+        );
+
+        Ok(())
     }
 
     /// Zero out tracked fields (for each data collection cycle).

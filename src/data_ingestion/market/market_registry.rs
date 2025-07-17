@@ -12,9 +12,10 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::data_ingestion::token::{token::AssetToken, token_registry::AssetTokenRegistry};
 use crate::gmx::{
-    reader_utils::{MarketProps},
+    reader_utils::MarketProps,
     reader,
     event_listener_utils::MarketFees,
+    multicall::fetch_all_market_data_batch,
 };
 use super::market::Market;
 use super::market_utils;
@@ -151,13 +152,13 @@ impl MarketRegistry {
     }
 
     // Returns the number of markets in the registry
-    #[instrument(skip(self), ret)]
+    #[instrument(skip(self))]
     pub fn num_markets(&self) -> usize {
         self.markets.len()
     }
 
     // Returns the number of relevant markets (those with supply)
-    #[instrument(skip(self), ret)]
+    #[instrument(skip(self))]
     pub fn num_relevant_markets(&self) -> usize {
         self.relevant_markets().count()
     }
@@ -203,26 +204,63 @@ impl MarketRegistry {
         }
     }
 
+    /// Update all market data using batch multicall 
     #[instrument(skip(self, config, fee_map), fields(on_close = true))]
     pub async fn update_all_market_data(&mut self, config: Arc<Config>, fee_map: &HashMap<Address, MarketFees>) -> Result<()> {
         let market_count = self.markets.len();
-        debug!(market_count = market_count, "Starting market data update");
+        debug!(market_count = market_count, "Starting batch market data update");
         
+        // Collect market props and prices for all markets that have prices available
+        let mut markets_with_prices = Vec::new();
+        for market in self.markets.values() {
+            let market_props = market.market_props().await;
+            if let Some(market_prices) = market.market_prices().await {
+                markets_with_prices.push((market_props, market_prices));
+            } else {
+                warn!(
+                    market = %market.market_token,
+                    "Market prices not available, will fall back to individual fetch"
+                );
+            }
+        }
+        
+        debug!(
+            total_markets = market_count,
+            batch_markets = markets_with_prices.len(),
+            "Prepared markets for batch fetch"
+        );
+        
+        // Fetch batch data if we have markets with prices
+        let batch_data = if !markets_with_prices.is_empty() {
+            match fetch_all_market_data_batch(&config, &markets_with_prices).await {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    error!("Failed to fetch batch market data: {}, falling back to individual fetches", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        // Update all markets (with fallback to individual fetches)
         stream::iter(self.markets.values_mut())
-            .for_each_concurrent(1, |market| {  // Limit concurrency to 1 for now, can be adjusted later with a paid alchemy plan
+            .for_each_concurrent(1, |market| {
                 let config = Arc::clone(&config);
+                let batch_data_ref = batch_data.as_ref();
                 async move {
                     let fallback_fees = MarketFees::new();
                     let market_fees = fee_map.get(&market.market_token).unwrap_or(&fallback_fees);
-                    if let Err(e) = market.fetch_market_data(&config, market_fees).await {
+                    
+                    if let Err(e) = market.update_from_batch_data_with_fallback(&config, batch_data_ref, market_fees).await {
                         error!(
-                            market = %market.market_token,
+                            market = %market,
                             error = ?e,
-                            "Failed to fetch market data"
+                            "Failed to update market data"
                         );
                     } else {
                         debug!(
-                            market = %market.market_token,
+                            market = %market,
                             "Market data updated successfully"
                         );
                     }
@@ -230,7 +268,11 @@ impl MarketRegistry {
             })
             .await;
         
-        info!(market_count = market_count, "Market data update completed");
+        info!(
+            market_count = market_count,
+            batch_count = batch_data.as_ref().map(|d| d.market_infos.len()).unwrap_or(0),
+            "Batch market data update completed"
+        );
         Ok(())
     }
 

@@ -26,7 +26,7 @@ use super::market_utils::{
     u256_to_decimal_scaled_decimals
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Market {
     // --- Market properties & data ---
     pub market_token: Address,

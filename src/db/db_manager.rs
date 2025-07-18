@@ -60,86 +60,9 @@ impl DbManager {
         })
     }
 
-    /// Add all tokens if not already present, and update `token_id_map`
-    #[instrument(skip(self, tokens_iter), fields(on_close = true))]
-    pub async fn sync_tokens<I>(&mut self, tokens_iter: I) -> Result<(), sqlx::Error>
-    where
-        I: IntoIterator<Item = Arc<RwLock<AssetToken>>>,
-    {
-        debug!("Syncing tokens with database");
-        let mut synced_count = 0;
-        let mut new_count = 0;
-        
-        for token_arc in tokens_iter {
-            let token = token_arc.read().await;
-            synced_count += 1;
-            
-            if self.token_id_map.contains_key(&token.address) {
-                continue;
-            }
-
-            let new_token = NewTokenModel::from(&*token);
-            let id = tokens_queries::insert_token(&self.pool, &new_token).await?;
-            self.token_id_map.insert(token.address, id);
-            new_count += 1;
-            
-            debug!(
-                symbol = %token.symbol,
-                address = %token.address,
-                id = id,
-                "New token added to database"
-            );
-        }
-        
-        info!(
-            synced_count = synced_count,
-            new_count = new_count,
-            "Token sync completed"
-        );
-        Ok(())
-    }
-
-    /// Add all markets if not already present, and update `market_id_map`
-    #[instrument(skip(self, markets_iter), fields(on_close = true))]
-    pub async fn sync_markets<'a, I>(&mut self, markets_iter: I) -> Result<(), sqlx::Error>
-    where
-        I: IntoIterator<Item = &'a Market>,
-    {
-        debug!("Syncing markets with database");
-        let mut synced_count = 0;
-        let mut new_count = 0;
-        
-        for market in markets_iter {
-            synced_count += 1;
-            
-            if self.market_id_map.contains_key(&market.market_token) {
-                continue;
-            }
-
-            // Use async reads to extract token addresses for NewMarketModel
-            let new_market = NewMarketModel::from_async(market, &self.token_id_map).await;
-            let id = markets_queries::insert_market(&self.pool, &new_market).await?;
-            self.market_id_map.insert(market.market_token, id);
-            new_count += 1;
-            
-            debug!(
-                market_token = %market.market_token,
-                id = id,
-                "New market added to database"
-            );
-        }
-        
-        info!(
-            synced_count = synced_count,
-            new_count = new_count,
-            "Market sync completed"
-        );
-        Ok(())
-    }
-
     /// Internal method to refresh ID maps from the database
     #[instrument(skip(self))]
-    async fn refresh_id_maps(&mut self) -> Result<(), sqlx::Error> {
+    pub async fn refresh_id_maps(&mut self) -> Result<(), sqlx::Error> {
         debug!("Refreshing ID maps from database");
         
         let token_id_map = tokens_queries::get_token_id_map(&self.pool).await?;
@@ -164,19 +87,38 @@ impl DbManager {
 
     /// Prepare token price models from a list of AssetToken objects
     #[instrument(skip(self, tokens_iter))]
-    pub async fn prepare_token_prices<I>(&self, tokens_iter: I) -> Vec<NewTokenPriceModel>
+    pub async fn prepare_token_prices<I>(&mut self, tokens_iter: I) -> Result<(Vec<NewTokenPriceModel>, Vec<AssetToken>), sqlx::Error>
     where
         I: IntoIterator<Item = Arc<RwLock<AssetToken>>>,
     {
         debug!("Preparing token price models");
+        self.refresh_id_maps().await?;
+
         let mut token_prices = Vec::new();
+        let mut failed_tokens = Vec::new();
+        let mut count = 0;
         for token_arc in tokens_iter {
+            count += 1;
             let token = token_arc.read().await;
-            let new_token_price = NewTokenPriceModel::from(&*token, &self.token_id_map);
-            token_prices.push(new_token_price);
+            if self.token_id_map.contains_key(&token.address) {
+                let new_token_price = NewTokenPriceModel::from(&*token, &self.token_id_map);
+                token_prices.push(new_token_price);
+            } else {
+                debug!(
+                    symbol = %token.symbol,
+                    address = %token.address,
+                    "Token not found in ID map, skipping token price preparation"
+                );
+                failed_tokens.push(token.clone());
+            }
         }
-        debug!(count = token_prices.len(), "Token price models prepared");
-        token_prices
+        debug!(
+            num_requested = count,
+            num_succeeded = token_prices.len(), 
+            num_failed = failed_tokens.len(),
+            "Token price models prepared"
+        );
+        Ok((token_prices, failed_tokens))
     }
 
     /// Insert a batch of token price models into the database
@@ -197,18 +139,36 @@ impl DbManager {
 
     /// Prepare market state models from a list of Market objects
     #[instrument(skip(self, markets_iter))]
-    pub fn prepare_market_states<'a, I>(&self, markets_iter: I) -> Vec<NewMarketStateModel>
+    pub async fn prepare_market_states<'a, I>(&mut self, markets_iter: I) -> Result<(Vec<NewMarketStateModel>, Vec<Market>), sqlx::Error>
     where
         I: IntoIterator<Item = &'a Market>,
     {
         debug!("Preparing market state models");
+        self.refresh_id_maps().await?;
+
         let mut market_states = Vec::new();
+        let mut failed_markets = Vec::new();
+        let mut count = 0;
         for market in markets_iter {
-            let new_market_state = NewMarketStateModel::from(market, &self.market_id_map);
-            market_states.push(new_market_state);
+            count += 1;
+            if self.market_id_map.contains_key(&market.market_token) {
+                let new_market_state = NewMarketStateModel::from(market, &self.market_id_map);
+                market_states.push(new_market_state);
+            } else {
+                debug!(
+                    market_token = %market.market_token,
+                    "Market not found in ID map, skipping market state preparation"
+                );
+                failed_markets.push(market.clone());
+            }
         }
-        debug!(count = market_states.len(), "Market state models prepared");
-        market_states
+        debug!(
+            num_requested = count,
+            num_succeeded = market_states.len(),
+            num_failed = failed_markets.len(),
+            "Market state models prepared"
+        );
+        Ok((market_states, failed_markets))
     }
 
     /// Insert a batch of market state models into the database
@@ -229,27 +189,49 @@ impl DbManager {
 
     /// Prepare new token models from a list of AssetToken objects
     #[instrument(skip(self, tokens))]
-    pub fn prepare_new_tokens(&self, tokens: &[AssetToken]) -> Vec<NewTokenModel> {
+    pub async fn prepare_new_tokens(&mut self, tokens: &[AssetToken]) -> Result<Vec<NewTokenModel>, sqlx::Error> {
         debug!("Preparing new token models");
+        self.refresh_id_maps().await?;
+
         let new_tokens: Vec<NewTokenModel> = tokens
             .iter()
+            .filter(|token| !self.token_id_map.contains_key(&token.address))
             .map(|token| NewTokenModel::from(token))
             .collect();
-        debug!(count = new_tokens.len(), "New token models prepared");
-        new_tokens
+        debug!(
+            num_requested = tokens.len(),
+            num_added = new_tokens.len(), 
+            num_skipped = tokens.len() - new_tokens.len(),
+            "New token models prepared"
+        );
+        Ok(new_tokens)
     }
 
     /// Prepare new market models from a list of Market objects
     #[instrument(skip(self, markets))]
-    pub async fn prepare_new_markets(&self, markets: &[&Market]) -> Vec<NewMarketModel> {
+    pub async fn prepare_new_markets(&mut self, markets: &[&Market]) -> Result<(Vec<NewMarketModel>, Vec<Market>), sqlx::Error> {
         debug!("Preparing new market models");
+        self.refresh_id_maps().await?;
+
         let mut new_markets = Vec::new();
+        let mut failed_markets = Vec::new();
         for market in markets {
-            let new_market = NewMarketModel::from_async(market, &self.token_id_map).await;
-            new_markets.push(new_market);
+            if self.token_id_map.contains_key(&market.index_token.read().await.address) &&
+               self.token_id_map.contains_key(&market.long_token.read().await.address) &&
+               self.token_id_map.contains_key(&market.short_token.read().await.address) {     
+                let new_market = NewMarketModel::from_async(market, &self.token_id_map).await;
+                new_markets.push(new_market);
+            } else {
+                failed_markets.push((*market).clone());
+            }
         }
-        debug!(count = new_markets.len(), "New market models prepared");
-        new_markets
+        debug!(
+            num_requested = markets.len(),
+            num_succeeded = new_markets.len(),
+            num_failed = failed_markets.len(),
+            "New market models prepared"
+        );
+        Ok((new_markets, failed_markets))
     }
 
     /// Insert a batch of new token models into the database

@@ -134,10 +134,11 @@ impl MarketRegistry {
             self.insert_market_if_possible(props, asset_token_registry, true);
             if self.markets.len() > initial_count {
                 new_market_addresses.push(market_token);
+                debug!(market_token = %market_token, "Added new tracked market");
             }
         }
         
-        debug!(
+        info!(
             total_markets = self.markets.len(),
             new_markets = new_market_addresses.len(),
             new_tokens = new_tokens.len(),
@@ -146,7 +147,7 @@ impl MarketRegistry {
         Ok((new_tokens, new_market_addresses))
     }
 
-    #[instrument(skip(self), ret)]
+    #[instrument(skip(self, market_token))]
     pub fn get_market(&self, market_token: &Address) -> Option<&Market> {
         self.markets.get(market_token)
     }

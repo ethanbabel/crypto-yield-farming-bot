@@ -168,7 +168,7 @@ impl AssetTokenRegistry {
 
         // If no new tokens were found, return early
         if new_tokens.is_empty() {
-            info!("No new supported tokens found");
+            debug!("No new supported tokens found");
             return Ok(Vec::new());
         }
 
@@ -191,7 +191,6 @@ impl AssetTokenRegistry {
         fs::write(&path, serde_json::to_string_pretty(&existing_json_data)?)?;
         info!(
             new_token_count = new_tokens.len(),
-            new_tokens = ?new_tokens.iter().map(|t| &t.symbol).collect::<Vec<_>>(),
             "Added new tokens to registry and updated data file"
         );
         Ok(new_tokens)

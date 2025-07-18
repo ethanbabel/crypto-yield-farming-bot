@@ -1,13 +1,9 @@
 use dotenvy::dotenv;
-use tracing::{info, error};
-use std::collections::HashMap;
+use tracing::{info};
 use std::sync::Arc;
-use std::str::FromStr;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::data_ingestion::token::token_registry;
-use crypto_yield_farming_bot::data_ingestion::market::market_registry;
 use crypto_yield_farming_bot::gmx;
 
 #[tokio::main]
@@ -25,42 +21,22 @@ async fn main() -> eyre::Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Initialize and populate token registry
-    let mut token_registry = token_registry::AssetTokenRegistry::new(&cfg);
-    if let Err(err) = token_registry.load_from_file() {
-        error!(?err, "Failed to load asset tokens from file");
-        return Err(err);
-    }
-    info!(count = token_registry.num_asset_tokens(), "Asset token registry initialized");
-
-    // Initialize and populate market registry
-    let mut market_registry = market_registry::MarketRegistry::new(&cfg);
-    if let Err(err) = market_registry.populate(&cfg, &token_registry).await {
-        error!(?err, "Failed to populate market registry");
-        return Err(err);
-    }
-    info!(
-        total_markets = market_registry.num_markets(),
-        relevant_markets = market_registry.num_relevant_markets(),
-        "Market registry populated"
+    // Initialize GMX event fetcher
+    let mut event_fetcher = gmx::event_fetcher::GmxEventFetcher::init(
+        Arc::clone(&cfg.alchemy_provider),
+        cfg.gmx_eventemitter,
     );
 
-    // Fetch token prices
-    if let Err(e) = token_registry.update_all_gmx_prices().await {
-        error!(?e, "Failed to update asset token prices from GMX");
-        return Err(e);
-    }
-    info!("Asset token prices updated from GMX");
+    // Fetch fees
+    let fees_map = event_fetcher.fetch_fees().await?;
+    info!("Fetched cumulative fees: {:#?}", fees_map);
 
-    // Fetch market data using multicall
-    let dummy_fee_map: HashMap<ethers::types::Address, gmx::event_listener_utils::MarketFees> = HashMap::new();
-    if let Err(e) = market_registry.update_all_market_data(Arc::clone(&cfg), &dummy_fee_map).await {
-        error!(?e, "Failed to update market data");
-        return Err(e);
-    }
-    info!("Market data updated successfully");
-    let address = ethers::types::Address::from_str("0x47c031236e19d024b42f8AE6780E44A573170703").unwrap();
-    info!("Market info for address {}: {:?}", address, market_registry.get_market(&address));
+    // Wait for 5 mins
+    tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+
+    // Fetch fees again
+    let fees_map = event_fetcher.fetch_fees().await?;
+    info!("Fetched cumulative fees again: {:#?}", fees_map);
 
     Ok(())
 }

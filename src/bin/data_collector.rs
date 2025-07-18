@@ -1,6 +1,6 @@
 use crypto_yield_farming_bot::config;
 use crypto_yield_farming_bot::logging;
-use crypto_yield_farming_bot::gmx::event_listener::GmxEventListener;
+use crypto_yield_farming_bot::gmx::event_fetcher::GmxEventFetcher;
 use crypto_yield_farming_bot::data_ingestion::token::{
     token_registry,
     token::AssetToken,
@@ -60,20 +60,12 @@ async fn main() -> eyre::Result<()> {
     let mut redis_connection = redis_client.get_multiplexed_async_connection().await?;
     info!("Redis connection established");
 
-    // Initialize the GMX event listener
-    let event_listener = GmxEventListener::init(
-        cfg.alchemy_ws_url.clone(),
+    // Initialize the GMX event fetcher
+    let mut event_fetcher = GmxEventFetcher::init(
+        Arc::clone(&cfg.alchemy_provider),
         cfg.gmx_eventemitter,
     );
-    let fees_map = Arc::clone(&event_listener.fees);
-
-    // Spawn the event listener in a background task
-    tokio::spawn(async move {
-        if let Err(e) = event_listener.start_listening().await {
-            error!(?e, "GMX event listener failed");
-        }
-    });
-    info!("GMX event listener started in background task");
+    info!("GMX event fetcher initialized");
 
     // Periodically update markets and save to database
     let mut ticker = interval(Duration::from_secs(300));
@@ -163,16 +155,17 @@ async fn main() -> eyre::Result<()> {
         debug!("Asset token prices updated from GMX");
 
         // Fetch GMX fees
-        let snapshot = {
-            let mut map = fees_map.lock().await;
-            let ss = map.clone();
-            map.clear();
-            ss
+        let fees_snapshot = match event_fetcher.fetch_fees().await {
+            Ok(fees) => fees,
+            Err(e) => {
+                error!(?e, "Failed to fetch GMX fees");
+                return Err(e);
+            }
         };
-        debug!(fee_markets = snapshot.len(), "Fee snapshot captured");
+        debug!(fee_markets = fees_snapshot.len(), "Fee snapshot captured");
 
         // Update market data
-        if let Err(e) = market_registry.update_all_market_data(Arc::clone(&cfg), &snapshot).await {
+        if let Err(e) = market_registry.update_all_market_data(Arc::clone(&cfg), &fees_snapshot).await {
             error!(?e, "Failed to update market data");
             return Err(e);
         }

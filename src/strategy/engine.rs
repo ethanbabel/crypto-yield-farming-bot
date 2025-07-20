@@ -1,13 +1,15 @@
-use ethers::types::Address;
+use tracing::{info, error};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
+use ndarray::Array1;
 
 use super::{
-    pnl_model, fee_model, allocator, 
+    pnl_model, fee_model, allocator, covariance,
     types::{
         MarketStateSlice, 
-        MarketDiagnostics, 
-        AllocationPlan,
         PnLSimulationConfig,
         TokenCategory,
+        PortfolioData,
     },
     strategy_constants::{
         TIME_HORIZON_HRS,
@@ -16,19 +18,35 @@ use super::{
     }
 };
 use crate::db::db_manager::DbManager;
-use std::collections::HashMap;
 
 /// Entry point for the strategy engine — run on each data refresh
-pub async fn run_strategy_engine(db_manager: &DbManager) -> AllocationPlan {
-    tracing::info!("Starting strategy engine...");
+pub async fn run_strategy_engine(db_manager: &DbManager) -> Option<PortfolioData> {
+    info!("Starting strategy engine...");
 
     // Fetch all data from DB
     let market_slices = fetch_market_state_slices(db_manager).await;
 
-    // Run models on each market
-    let mut diagnostics: HashMap<Address, MarketDiagnostics> = HashMap::new();
+    if market_slices.is_empty() {
+        tracing::warn!("No market slices available");
+        return None;
+    }
 
-    for slice in &market_slices {
+    // Calculate covariance matrix using the same ordering as market_slices
+    let covariance_matrix = match covariance::calculate_covariance_matrix(&market_slices) {
+        Some(matrix) => matrix,
+        None => {
+            error!("Failed to calculate covariance matrix");
+            return None;
+        }
+    };
+
+    let n_markets = market_slices.len();
+    let mut market_addresses = Vec::with_capacity(n_markets);
+    let mut display_names = Vec::with_capacity(n_markets);
+    let mut expected_returns = Array1::zeros(n_markets);
+
+    // Run models on each market - this ensures same ordering as covariance matrix
+    for (i, slice) in market_slices.iter().enumerate() {
         let token_category = get_token_category(slice);
 
         let config = PnLSimulationConfig {
@@ -37,29 +55,24 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> AllocationPlan {
             token_category,
         };
 
-        let Some((pnl_return, pnl_var)) = pnl_model::simulate_trader_pnl(slice, &config) else { continue };
-        let Some(fee_return) = fee_model::simulate_fee_return(slice, TIME_HORIZON_HRS) else { continue };
+        let pnl_return = pnl_model::simulate_trader_pnl(slice, &config).unwrap_or(Decimal::ZERO);
+        let fee_return = fee_model::simulate_fee_return(slice).unwrap_or(Decimal::ZERO);
 
-        diagnostics.insert(slice.market_address, MarketDiagnostics {
-            market_address: slice.market_address,
-            display_name: slice.display_name.clone(),
-            expected_return: pnl_return + fee_return,
-            variance: pnl_var,
-            pnl_return,
-            fee_return,
-        });
+        market_addresses.push(slice.market_address);
+        display_names.push(slice.display_name.clone());
+        expected_returns[i] = (pnl_return + fee_return).to_f64().unwrap_or(0.0);
     }
+
+    // Create PortfolioData with consistent ordering
+    let portfolio_data = PortfolioData::new(market_addresses, display_names, expected_returns, covariance_matrix);
 
     // Optimize allocations
-    // let weights = allocator::optimize_allocations(&diagnostics);
+    // let weights = allocator::optimize_allocations(&portfolio_data);
 
-    tracing::info!("Strategy engine completed.");
+    info!("Strategy engine completed.");
 
-    // AllocationPlan { weights, diagnostics }
-    AllocationPlan {
-        weights: HashMap::new(),
-        diagnostics,
-    }
+    Some(portfolio_data)
+    
 }
 
 /// Fetch market state slices from the database
@@ -70,7 +83,7 @@ async fn fetch_market_state_slices(db_manager: &DbManager) -> Vec<MarketStateSli
     match db_manager.get_market_state_slices(start, end).await {
         Ok(slices) => slices,
         Err(e) => {
-            tracing::error!(err = ?e, "Failed to fetch market state slices");
+            error!(err = ?e, "Failed to fetch market state slices");
             Vec::new()
         }
     }

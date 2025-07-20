@@ -39,4 +39,6 @@ sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "macro
 redis = { version = "0.27", features = ["tokio-comp"] } # Redis client 
 rand = "0.9" # Random number generation
 rand_distr = "0.5" # Statistical distributions for random sampling
+ndarray = "0.16" # N-dimensional arrays
+ndarray-stats = "0.6" # Stats for N-dimensional arrays
 

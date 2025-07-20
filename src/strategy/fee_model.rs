@@ -7,7 +7,7 @@ use super::types::MarketStateSlice;
 use super::strategy_constants::EWMA_ALPHA;
 
 /// Returns expected return over the time horizon (as % of pool value)
-pub fn simulate_fee_return(slice: &MarketStateSlice, time_horizon_hrs: u64) -> Option<Decimal> {
+pub fn simulate_fee_return(slice: &MarketStateSlice) -> Option<Decimal> {
     let hourly_fees = standardize_to_hourly(&slice.timestamps, &slice.fees_usd)?;
 
     let pool_value = slice.pool_long_collateral_usd + slice.pool_short_collateral_usd - slice.impact_pool_usd;
@@ -17,10 +17,13 @@ pub fn simulate_fee_return(slice: &MarketStateSlice, time_horizon_hrs: u64) -> O
     }
 
     let hourly_ewma = compute_ewma(&hourly_fees)?;
-    let total_expected_fees = hourly_ewma * Decimal::from(time_horizon_hrs);
+    let total_expected_fees = hourly_ewma;
 
     let expected_return = total_expected_fees / pool_value;
-    Some(expected_return)
+
+    // Scale
+    let scale = Decimal::from_f64(12.0).unwrap();
+    Some(expected_return / scale)
 }
 
 /// Aggregates ~5-min fee data into hourly fee buckets

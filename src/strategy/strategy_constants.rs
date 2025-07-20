@@ -1,8 +1,9 @@
 use super::types::TokenCategory;
 
+// --- PNL MODEL CONSTANTS ---
+
 pub const TIME_HORIZON_HRS: u64 = 72;
 
-// --- PNL MODEL CONSTANTS ---
 /// Blue-chip tokens
 pub const BLUE_CHIP_TOKENS: [&str; 5] = [
     "BTC",

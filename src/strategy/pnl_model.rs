@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 pub fn simulate_trader_pnl(
     slice: &MarketStateSlice,
     config: &PnLSimulationConfig,
-) -> Option<(Decimal, Decimal)> {
+) -> Option<Decimal> {
     // Get index token returns
     let returns = get_returns(&slice.index_prices)?;
     if returns.len() < 2 {
@@ -72,11 +72,11 @@ pub fn simulate_trader_pnl(
     // Calculate expected return and variance for LP-side PnL
     let n = lp_pnl_return_samples.len() as f64;
     let expected_return = lp_pnl_return_samples.iter().cloned().sum::<Decimal>() / Decimal::from_f64(n).unwrap();
-    let variance = lp_pnl_return_samples.iter()
-        .map(|x| (*x - expected_return).powi(2))
-        .sum::<Decimal>() / Decimal::from_f64(n - 1.0).unwrap(); // Divide by n-1 for sample variance
 
-    Some((expected_return, variance))
+    // Scale to 5 min
+    let expected_return = expected_return / Decimal::from_f64(12.0 * config.time_horizon_hrs as f64).unwrap();
+
+    Some(expected_return)
 }
 
 /// Extract regular returns from price vector

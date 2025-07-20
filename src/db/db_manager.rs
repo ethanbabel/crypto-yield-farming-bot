@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use ethers::types::Address;
 use std::sync::Arc;
+use std::str::FromStr;
 use tokio::sync::RwLock;
 use tracing::{info, debug, instrument};
 use chrono::{DateTime, Utc};
@@ -369,8 +370,8 @@ impl DbManager {
                 continue;
             }
 
-            // Get index token prices for this market
-            let (index_token_timestamps, index_prices) = match self.get_index_token_prices_for_market(
+            // Get index token data
+            let (index_token_address, index_token_symbol, index_token_timestamps, index_prices) = match self.get_index_token_prices_for_market(
                 *market_id, start, end
             ).await {
                 Ok(prices) => prices,
@@ -431,9 +432,11 @@ impl DbManager {
                 market_address: *address,
                 display_name,
                 timestamps,
+                fees_usd,
+                index_token_address,
+                index_token_symbol,
                 index_prices,
                 index_token_timestamps,
-                fees_usd,
                 pnl_long,
                 pnl_short,
                 pnl_net,
@@ -461,11 +464,18 @@ impl DbManager {
         market_id: i32,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
-    ) -> Result<(Vec<DateTime<Utc>>, Vec<Decimal>), sqlx::Error> {
+    ) -> Result<(Address, String, Vec<DateTime<Utc>>, Vec<Decimal>), sqlx::Error> {
         // Get the index token ID for this market
         let index_token_id = markets_queries::get_market_index_token_id(&self.pool, market_id)
             .await?
             .ok_or_else(|| sqlx::Error::RowNotFound)?;
+
+        // Get the index token address and symbol
+        let index_token = tokens_queries::get_token_by_id(&self.pool, index_token_id)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound)?;
+        let index_token_address = Address::from_str(&index_token.address)
+            .map_err(|_| sqlx::Error::Decode("Invalid token address".into()))?;
 
         // Fetch the token price history
         let price_history = token_prices_queries::get_token_price_history_in_range(
@@ -479,6 +489,6 @@ impl DbManager {
         let timestamps = price_history.iter().map(|p| p.timestamp).collect();
         let prices = price_history.iter().map(|p| p.mid_price).collect();
 
-        Ok((timestamps, prices))
+        Ok((index_token_address, index_token.symbol, timestamps, prices))
     }
 }

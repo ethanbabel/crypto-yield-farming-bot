@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use ndarray::{Array1, Array2};
 
 /// Historical slice of market data for one GMX market
 #[derive(Debug, Clone)]
@@ -11,9 +11,12 @@ pub struct MarketStateSlice {
 
     // --- Historical data ---
     pub timestamps: Vec<DateTime<Utc>>,
+    pub fees_usd: Vec<Decimal>,       // Total fees collected per timestep
+
+    pub index_token_address: Address, 
+    pub index_token_symbol: String,   
     pub index_prices: Vec<Decimal>,   // Index token prices from token_prices table
     pub index_token_timestamps: Vec<DateTime<Utc>>, // Timestamps corresponding to index token prices
-    pub fees_usd: Vec<Decimal>,       // Total fees collected per timestep
 
     // --- Current state ---
     // PnL
@@ -38,24 +41,49 @@ pub struct MarketStateSlice {
     pub impact_pool_token_amount: Decimal, // Total impact pool value in index token
 }
 
-/// Return + risk breakdown for a single market
+/// Portfolio data containing returns and covariance matrix with consistent ordering
 #[derive(Debug, Clone)]
-pub struct MarketDiagnostics {
-    pub market_address: Address,
-    pub display_name: String, // e.g. "ETH/USD [WETH - USDC]"
-
-    pub expected_return: Decimal,
-    pub variance: Decimal,
-
-    pub pnl_return: Decimal,
-    pub fee_return: Decimal, 
+pub struct PortfolioData {
+    pub market_addresses: Vec<Address>,
+    pub display_names: Vec<String>,
+    pub expected_returns: Array1<f64>,
+    pub covariance_matrix: Array2<f64>,
 }
 
-/// Final allocation decision and diagnostics
-#[derive(Debug, Clone)]
-pub struct AllocationPlan {
-    pub weights: HashMap<Address, Decimal>,             // market_address -> weight
-    pub diagnostics: HashMap<Address, MarketDiagnostics>,
+impl PortfolioData {
+    pub fn new(market_addresses: Vec<Address>, display_names: Vec<String>, expected_returns: Array1<f64>, covariance_matrix: Array2<f64>) -> Self {
+        assert_eq!(market_addresses.len(), display_names.len());
+        assert_eq!(market_addresses.len(), expected_returns.len());
+        assert_eq!(market_addresses.len(), covariance_matrix.nrows());
+        assert_eq!(market_addresses.len(), covariance_matrix.ncols());
+        
+        Self {
+            market_addresses,
+            display_names,
+            expected_returns,
+            covariance_matrix,
+        }
+    }
+    
+    pub fn get_market_index(&self, address: Address) -> Option<usize> {
+        self.market_addresses.iter().position(|&addr| addr == address)
+    }
+    
+    pub fn get_expected_return(&self, address: Address) -> Option<f64> {
+        let index = self.get_market_index(address)?;
+        Some(self.expected_returns[index])
+    }
+    
+    pub fn get_variance(&self, address: Address) -> Option<f64> {
+        let index = self.get_market_index(address)?;
+        Some(self.covariance_matrix[[index, index]])
+    }
+    
+    pub fn get_covariance(&self, address_a: Address, address_b: Address) -> Option<f64> {
+        let index_a = self.get_market_index(address_a)?;
+        let index_b = self.get_market_index(address_b)?;
+        Some(self.covariance_matrix[[index_a, index_b]])
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

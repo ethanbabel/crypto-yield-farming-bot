@@ -1,5 +1,4 @@
 use dotenvy::dotenv;
-use rust_decimal::Decimal;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
@@ -30,28 +29,47 @@ async fn main() -> eyre::Result<()> {
     info!("Database manager initialized");
 
     // Run strategy engine
-    let allocation_plan = engine::run_strategy_engine(&db).await;
-    let mut diagnostics_vec: Vec<_> = allocation_plan.diagnostics
-        .iter()
-        .collect();
-    diagnostics_vec.sort_by(|a, b| b.1.expected_return.partial_cmp(&a.1.expected_return).unwrap());
+    let portfolio_data = match engine::run_strategy_engine(&db).await {
+        Some(data) => data,
+        None => {
+            info!("No portfolio data available");
+            return Ok(());
+        }
+    };
     
-    let output = diagnostics_vec
+    // Log basic diagnostics
+    info!("Strategy engine completed with {} markets", portfolio_data.market_addresses.len());
+    
+    // Calculate Sharpe ratios and create sorted data
+    let mut market_data: Vec<(usize, String, f64, f64, f64)> = portfolio_data.market_addresses
         .iter()
-        .map(|(_, diagnostics)| {
+        .enumerate()
+        .map(|(i, &addr)| {
+            let expected_return = portfolio_data.expected_returns[i];
+            let variance = portfolio_data.get_variance(addr).unwrap_or(0.0);
+            let std_dev = variance.sqrt();
+            let sharpe = if std_dev > 0.0 { expected_return / std_dev } else { 0.0 };
+            
+            (i, portfolio_data.display_names[i].clone(), expected_return * 10000.0, std_dev * 10000.0, sharpe)
+        })
+        .collect();
+    
+    // Sort by Sharpe ratio (descending)
+    market_data.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+    
+    // Create formatted output
+    let market_summary = market_data
+        .iter()
+        .map(|(_, name, return_pct, variance_pct, sharpe)| {
             format!(
-                "Market: {}, Expected Return: {:.5}% (PnL Return: {:.5}%, Fee Return: {:.5}%), Variance: {:.5}%",
-                diagnostics.display_name,
-                diagnostics.expected_return * Decimal::from(100),
-                diagnostics.pnl_return * Decimal::from(100),
-                diagnostics.fee_return * Decimal::from(100),
-                diagnostics.variance * Decimal::from(100)
+                "{}: Return={:.8}bps, Vol={:.8}bps, Sharpe={:.3}",
+                name, return_pct, variance_pct, sharpe
             )
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    info!("Strategy engine completed. Allocation plan:\n{}", output);
-
+        .join("\n  ");
+    
+    info!("Portfolio Analysis (sorted by Sharpe):\n  {}", market_summary);
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
 
     Ok(())

@@ -101,7 +101,7 @@ async fn process_stream_entries(
     Ok(())
 }
 
-#[instrument]
+#[instrument(name = "data_recorder_main")]
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Load environment variables from .env file

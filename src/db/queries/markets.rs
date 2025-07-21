@@ -74,3 +74,13 @@ pub async fn get_market_index_token_id(pool: &PgPool, market_id: i32) -> Result<
 
     Ok(row.map(|r| r.index_token_id))
 }
+
+/// Fetch all markets from the database
+pub async fn get_all_markets(pool: &PgPool) -> Result<Vec<MarketModel>, Error> {
+    sqlx::query_as!(
+        MarketModel,
+        "SELECT id, address, index_token_id, long_token_id, short_token_id FROM markets"
+    )
+    .fetch_all(pool)
+    .await
+}

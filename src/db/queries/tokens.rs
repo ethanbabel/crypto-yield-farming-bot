@@ -61,3 +61,13 @@ pub async fn get_token_id_map(pool: &PgPool) -> Result<HashMap<Address, i32>, Er
         .collect();
     Ok(map)
 }
+
+/// Fetch all tokens from the database
+pub async fn get_all_tokens(pool: &PgPool) -> Result<Vec<TokenModel>, Error> {
+    sqlx::query_as!(
+        TokenModel,
+        "SELECT id, address, symbol, decimals FROM tokens"
+    )
+    .fetch_all(pool)
+    .await
+}

@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use ethers::types::Address;
+use rust_decimal::Decimal;
 
 use crate::db::models::market_states::{NewMarketStateModel, MarketStateModel};
 
@@ -205,4 +206,86 @@ pub async fn get_market_display_names(pool: &PgPool) -> Result<HashMap<Address, 
         .collect();
 
     Ok(display_names)
+}
+
+/// Fetch latest market state for a specific market
+pub async fn get_latest_market_state_for_market(pool: &PgPool, market_id: i32) -> Result<Option<MarketStateModel>, sqlx::Error> {
+    sqlx::query_as!(
+        MarketStateModel,
+        r#"
+        SELECT 
+            id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
+            pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
+            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
+            fees_borrowing, fees_total
+        FROM market_states 
+        WHERE market_id = $1
+        ORDER BY timestamp DESC
+        LIMIT 1
+        "#,
+        market_id
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Fetch latest market state for all markets
+pub async fn get_latest_market_states_for_all_markets(pool: &PgPool) -> Result<Vec<MarketStateModel>, sqlx::Error> {
+    sqlx::query_as!(
+        MarketStateModel,
+        r#"
+        SELECT DISTINCT ON (market_id)
+            id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
+            pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
+            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
+            fees_borrowing, fees_total
+        FROM market_states
+        ORDER BY market_id, timestamp DESC
+        "#
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetch all market tokens
+pub async fn get_all_market_tokens(pool: &PgPool) -> Result<Vec<(String, String, Decimal)>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT DISTINCT ON (ms.market_id)
+            m.address AS market_address,
+            it.symbol AS index_token_symbol,
+            lt.symbol AS long_token_symbol,
+            st.symbol AS short_token_symbol,
+            ms.gm_price_mid AS last_mid_price_usd
+        FROM market_states ms
+        JOIN markets m ON ms.market_id = m.id
+        JOIN tokens it ON m.index_token_id = it.id
+        JOIN tokens lt ON m.long_token_id = lt.id
+        JOIN tokens st ON m.short_token_id = st.id
+        ORDER BY ms.market_id, ms.timestamp DESC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let market_tokens = rows.into_iter()
+        .filter_map(|row| {
+            if let Some(last_mid_price_usd) = row.last_mid_price_usd {
+                Some((
+                    row.market_address,
+                    format!("GM_{}/USD_[{}-{}]", row.index_token_symbol, row.long_token_symbol, row.short_token_symbol),
+                    last_mid_price_usd,
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    Ok(market_tokens)
 }

@@ -17,10 +17,10 @@ use super::queries::{
     market_states as market_states_queries,
 };
 use super::models::{
-    tokens::NewTokenModel,
-    markets::NewMarketModel,
-    token_prices::NewTokenPriceModel,
-    market_states::NewMarketStateModel,
+    tokens::{TokenModel, NewTokenModel},
+    markets::{MarketModel, NewMarketModel},
+    token_prices::{TokenPriceModel, NewTokenPriceModel},
+    market_states::{MarketStateModel, NewMarketStateModel},
 };
 use crate::config::Config;
 use crate::data_ingestion::token::token::AssetToken;
@@ -490,5 +490,73 @@ impl DbManager {
         let prices = price_history.iter().map(|p| p.mid_price).collect();
 
         Ok((index_token_address, index_token.symbol, timestamps, prices))
+    }
+
+    /// Fetch all tokens
+    #[instrument(skip(self))]
+    pub async fn get_all_tokens(&self) -> Result<Vec<TokenModel>, sqlx::Error> {
+        let tokens = tokens_queries::get_all_tokens(&self.pool).await?;
+        debug!(count = tokens.len(), "Fetched all tokens");
+        Ok(tokens)
+    }
+
+    /// Fetch all markets
+    pub async fn get_all_markets(&self) -> Result<Vec<MarketModel>, sqlx::Error> {
+        let markets = markets_queries::get_all_markets(&self.pool).await?;
+        debug!(count = markets.len(), "Fetched all markets");
+        Ok(markets)
+    }
+
+    /// Fetch most recent token price for all tokens
+    #[instrument(skip(self))]
+    pub async fn get_latest_token_prices(&self) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
+        let tokens = token_prices_queries::get_latest_token_prices_for_all_tokens(&self.pool).await?;
+        debug!(count = tokens.len(), "Fetched latest token prices");
+        Ok(tokens)
+    }
+
+    /// Fetch most recent market state for all markets
+    #[instrument(skip(self))]
+    pub async fn get_latest_market_states(&self) -> Result<Vec<MarketStateModel>, sqlx::Error> {
+        let states = market_states_queries::get_latest_market_states_for_all_markets(&self.pool).await?;
+        debug!(count = states.len(), "Fetched latest market states");
+        Ok(states)
+    }
+
+    /// Fetch all asset tokens
+    #[instrument(skip(self))]
+    pub async fn get_all_asset_tokens(&self) -> Result<Vec<(Address, String, u8, Decimal)>, sqlx::Error> {
+        let tokens: Vec<(Address, String, u8, Decimal)> = token_prices_queries::get_all_asset_tokens(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                (
+                    Address::from_str(&row.0).unwrap_or_default(),
+                    row.1,
+                    row.2 as u8,
+                    row.3,
+                )
+            })
+            .collect();
+        debug!(count = tokens.len(), "Fetched all asset tokens");
+        Ok(tokens)
+    }
+
+    /// Fetch all market tokens
+    #[instrument(skip(self))]
+    pub async fn get_all_market_tokens(&self) -> Result<Vec<(Address, String, Decimal)>, sqlx::Error> {
+        let market_tokens: Vec<(Address, String, Decimal)> = market_states_queries::get_all_market_tokens(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                (
+                    Address::from_str(&row.0).unwrap_or_default(),
+                    row.1,
+                    row.2,
+                )
+            })
+            .collect();
+        debug!(count = market_tokens.len(), "Fetched all market tokens");
+        Ok(market_tokens)
     }
 }

@@ -1,14 +1,13 @@
 use dotenvy::dotenv;
+use tracing::{instrument, info};
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
+use crypto_yield_farming_bot::wallet::WalletManager;
 use crypto_yield_farming_bot::db::db_manager::DbManager;
 use crypto_yield_farming_bot::strategy::engine;
 
-
-use tracing::{info};
-
-
+#[instrument(name = "trading_bot_main")]
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Load environment variables from .env file
@@ -27,6 +26,14 @@ async fn main() -> eyre::Result<()> {
     // Initialize db manager
     let db = DbManager::init(&cfg).await?;
     info!("Database manager initialized");
+
+    // Initialize and load wallet manager
+    let mut wallet_manager = WalletManager::new(&cfg)?;
+    wallet_manager.load_tokens(&db).await?;
+    info!(address = ?wallet_manager.address, "Wallet manager initialized");
+
+    // Log wallet token balances
+    wallet_manager.log_all_balances(true).await?;
 
     // Run strategy engine
     let portfolio_data = match engine::run_strategy_engine(&db).await {

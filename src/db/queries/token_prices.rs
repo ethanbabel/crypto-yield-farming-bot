@@ -1,5 +1,6 @@
 use sqlx::PgPool;
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 
 use crate::db::models::token_prices::{NewTokenPriceModel, TokenPriceModel};
 
@@ -91,4 +92,55 @@ pub async fn get_token_price_history_in_range(
     )
     .fetch_all(pool)
     .await
+}
+
+/// Fetch the latest token price for a specific token
+pub async fn get_latest_token_price_for_token(pool: &PgPool, token_id: i32) -> Result<Option<TokenPriceModel>, sqlx::Error> {
+    sqlx::query_as!(
+        TokenPriceModel,
+        r#"
+        SELECT id, token_id, timestamp, min_price, max_price, mid_price
+        FROM token_prices
+        WHERE token_id = $1
+        ORDER BY timestamp DESC
+        LIMIT 1
+        "#,
+        token_id
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Fetch the latest token prices for all tokens
+pub async fn get_latest_token_prices_for_all_tokens(pool: &PgPool) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
+    sqlx::query_as!(
+        TokenPriceModel,
+        r#"
+        SELECT DISTINCT ON (token_id) 
+            id, token_id, timestamp, min_price, max_price, mid_price
+        FROM token_prices
+        ORDER BY token_id, timestamp DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetch all asset tokens
+pub async fn get_all_asset_tokens(pool: &PgPool) -> Result<Vec<(String, String, u8, Decimal)>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT DISTINCT ON (tp.token_id)
+            t.address, t.symbol, t.decimals, tp.mid_price
+        FROM token_prices tp
+        JOIN tokens t ON tp.token_id = t.id
+        ORDER BY tp.token_id, tp.timestamp DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let tokens = rows.into_iter()
+        .map(|row| (row.address, row.symbol, row.decimals as u8, row.mid_price))
+        .collect();
+    Ok(tokens)
 }

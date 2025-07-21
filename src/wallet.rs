@@ -1,4 +1,5 @@
 use ethers::prelude::*;
+use ethers::contract::Multicall;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -119,15 +120,32 @@ impl WalletManager {
         Ok(balance)
     }
 
+    async fn get_nonnative_token_balances_multicall(&self) -> Result<HashMap<Address, Decimal>> {
+        debug!("Fetching all token balances using multicall");
+        let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
+        for token in self.tokens.values() {
+            let contract = IERC20::new(token.address, self.signer.provider().clone().into());
+            let call = contract.balance_of(self.address);
+            multicall.add_call(call, false);
+        }
+
+        // Execute multicall
+        let results: Vec<U256> = multicall.call_array().await?;
+
+        // Parse results into a map
+        let mut balances = HashMap::new();
+        for (i, token) in self.tokens.values().enumerate() {
+            let balance = Self::u256_to_decimal(results[i], token.decimals);
+            balances.insert(token.address, balance);
+        }
+
+        Ok(balances)
+    }
+
     /// Get all token balances
     #[instrument(skip(self))]
     pub async fn get_all_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
-        let mut balances = HashMap::new();
-        for token_address in self.tokens.keys() {
-            let balance = self.get_token_balance(*token_address).await?;
-            balances.insert(*token_address, balance);
-        }
-        Ok(balances)
+        self.get_nonnative_token_balances_multicall().await
     }
 
     /// Print comprehensive wallet balances including native, all ERC20 tokens, and all market tokens

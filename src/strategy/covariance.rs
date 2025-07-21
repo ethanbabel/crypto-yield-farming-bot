@@ -25,13 +25,13 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
         let n_markets = market_slices.len();
         
         // Extract PnL returns for each market
-        let mut pnl_returns_matrix: Vec<Vec<f64>> = Vec::with_capacity(n_markets);
+        let mut returns_matrix: Vec<Vec<f64>> = Vec::with_capacity(n_markets);
         let mut min_length = usize::MAX;
 
         for slice in market_slices {
-            let pnl_returns = calculate_pnl_returns(slice)?;
-            min_length = min_length.min(pnl_returns.len());
-            pnl_returns_matrix.push(pnl_returns);
+            let returns = calculate_returns(slice)?;
+            min_length = min_length.min(returns.len());
+            returns_matrix.push(returns);
         }
 
         if min_length < 2 {
@@ -39,7 +39,7 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
         }
 
         // Truncate all return series to the same length
-        for returns in &mut pnl_returns_matrix {
+        for returns in &mut returns_matrix {
             returns.truncate(min_length);
         }
 
@@ -48,8 +48,22 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
         
         for i in 0..n_markets {
             for j in 0..n_markets {
-                let covariance = calculate_covariance(&pnl_returns_matrix[i], &pnl_returns_matrix[j]);
-                cov_matrix[[i, j]] = covariance;
+                let covariance = calculate_covariance(&returns_matrix[i], &returns_matrix[j]);
+                let net_oi_i = market_slices[i].oi_long_via_tokens - market_slices[i].oi_short_via_tokens;
+                let net_oi_j = market_slices[j].oi_long_via_tokens - market_slices[j].oi_short_via_tokens;
+                let pool_value_i = market_slices[i].pool_long_collateral_usd + market_slices[i].pool_short_collateral_usd - market_slices[i].impact_pool_usd;
+                let pool_value_j = market_slices[j].pool_long_collateral_usd + market_slices[j].pool_short_collateral_usd - market_slices[j].impact_pool_usd;
+                let net_oi_exposure_i = if pool_value_i > Decimal::ZERO {
+                    (net_oi_i / pool_value_i).to_f64().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                let net_oi_exposure_j = if pool_value_j > Decimal::ZERO {
+                    (net_oi_j / pool_value_j).to_f64().unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                cov_matrix[[i, j]] = covariance * net_oi_exposure_i * net_oi_exposure_j;
             }
         }
 
@@ -57,7 +71,7 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
     }
 
 /// Calculate PnL returns for a single market from historical data
-fn calculate_pnl_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
+fn calculate_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
         if slice.index_prices.len() < 2 {
             return None;
         }
@@ -68,16 +82,7 @@ fn calculate_pnl_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
             return None;
         }
 
-        // Check if we have meaningful open interest
-        let total_oi = slice.oi_long_token_amount + slice.oi_short_token_amount;
-        if total_oi <= Decimal::ZERO {
-            return None;
-        }
-
-        let net_oi_dollars = (slice.oi_long - slice.oi_short).to_f64().unwrap_or(0.0);
-        let pool_value_f64 = current_pool_value.to_f64().unwrap_or(1.0);
-
-        let mut pnl_returns = Vec::new();
+        let mut returns = Vec::new();
 
         for i in 1..slice.index_prices.len() {
             let p0 = slice.index_prices[i - 1];
@@ -85,19 +90,14 @@ fn calculate_pnl_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
             
             if p0 > Decimal::ZERO && p1 > Decimal::ZERO {
                 let token_return = ((p1 - p0) / p0).to_f64().unwrap_or(0.0);
-                
-                // Calculate LP PnL return (opposite of trader PnL)
-                let lp_pnl_dollar = -net_oi_dollars * token_return;
-                let lp_pnl_return = lp_pnl_dollar / pool_value_f64;
-
-                pnl_returns.push(lp_pnl_return);
+                returns.push(token_return);
             }
         }
 
-        if pnl_returns.is_empty() {
+        if returns.is_empty() {
             None
         } else {
-            Some(pnl_returns)
+            Some(returns)
         }
     }
 

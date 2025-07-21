@@ -48,20 +48,23 @@ pub struct PortfolioData {
     pub display_names: Vec<String>,
     pub expected_returns: Array1<f64>,
     pub covariance_matrix: Array2<f64>,
+    pub weights: Array1<f64>,
 }
 
 impl PortfolioData {
-    pub fn new(market_addresses: Vec<Address>, display_names: Vec<String>, expected_returns: Array1<f64>, covariance_matrix: Array2<f64>) -> Self {
+    pub fn new(market_addresses: Vec<Address>, display_names: Vec<String>, expected_returns: Array1<f64>, covariance_matrix: Array2<f64>, weights: Array1<f64>) -> Self {
         assert_eq!(market_addresses.len(), display_names.len());
         assert_eq!(market_addresses.len(), expected_returns.len());
         assert_eq!(market_addresses.len(), covariance_matrix.nrows());
         assert_eq!(market_addresses.len(), covariance_matrix.ncols());
+        assert_eq!(market_addresses.len(), weights.len());
         
         Self {
             market_addresses,
             display_names,
             expected_returns,
             covariance_matrix,
+            weights,
         }
     }
     
@@ -83,6 +86,11 @@ impl PortfolioData {
         let index_a = self.get_market_index(address_a)?;
         let index_b = self.get_market_index(address_b)?;
         Some(self.covariance_matrix[[index_a, index_b]])
+    }
+
+    pub fn get_weight(&self, address: Address) -> Option<f64> {
+        let index = self.get_market_index(address)?;
+        Some(self.weights[index])
     }
 }
 

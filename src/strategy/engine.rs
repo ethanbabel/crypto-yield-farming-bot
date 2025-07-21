@@ -1,4 +1,4 @@
-use tracing::{info, error};
+use tracing::{debug, info, error};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use ndarray::Array1;
@@ -31,6 +31,32 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> Option<PortfolioData
         return None;
     }
 
+    // // Filter market slices
+    let market_slices: Vec<MarketStateSlice> = market_slices
+        .into_iter()
+        .filter(|slice| {
+            // Filter out slices without at least one day of market observations
+            slice.timestamps.len() >= 288 &&
+            // Filter out slices without at least one day of index token prices
+            slice.index_prices.len() >= 288 &&
+            // Filter out slices where the oldest market timestamp is too recent 
+            slice.timestamps.first().map_or(false, |t| *t < (chrono::Utc::now() - chrono::Duration::days(1))) &&
+            // Filter out slices where the oldest index token timestamp is too recent
+            slice.index_token_timestamps.first().map_or(false, |t| *t < (chrono::Utc::now() - chrono::Duration::days(1))) &&
+            // Filter out slices where the newest market timestamp is too old
+            slice.timestamps.last().map_or(false, |t| *t > (chrono::Utc::now() - chrono::Duration::hours(1))) &&
+            // Filter out slices where the newest index token timestamp is too old
+            slice.index_token_timestamps.last().map_or(false, |t| *t > (chrono::Utc::now() - chrono::Duration::hours(1))) &&
+            // Filter out slices without high enough total OI
+            slice.oi_long + slice.oi_short > Decimal::from_f64(10000.0).unwrap() 
+        })
+        .collect();
+    if market_slices.is_empty() {
+        tracing::warn!("No market slices passed filtering criteria");
+        return None;
+    }
+    debug!("Filtered market slices: {} available", market_slices.len());
+
     // Calculate covariance matrix using the same ordering as market_slices
     let covariance_matrix = match covariance::calculate_covariance_matrix(&market_slices) {
         Some(matrix) => matrix,
@@ -39,6 +65,7 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> Option<PortfolioData
             return None;
         }
     };
+    debug!("Covariance matrix calculated");
 
     let n_markets = market_slices.len();
     let mut market_addresses = Vec::with_capacity(n_markets);
@@ -62,17 +89,23 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> Option<PortfolioData
         display_names.push(slice.display_name.clone());
         expected_returns[i] = (pnl_return + fee_return).to_f64().unwrap_or(0.0);
     }
+    debug!("Market returns calculated");
 
     // Create PortfolioData with consistent ordering
-    let portfolio_data = PortfolioData::new(market_addresses, display_names, expected_returns, covariance_matrix);
+    let weights = match allocator::maximize_sharpe(expected_returns.clone(), covariance_matrix.clone()) {
+        Ok(weights) => weights,
+        Err(e) => {
+            error!("Failed to solve MPT QP: {}", e);
+            return None;
+        }
+    };
 
-    // Optimize allocations
-    // let weights = allocator::optimize_allocations(&portfolio_data);
+    info!("Optimal portfolio weights calculated");
 
+    let portfolio_data = PortfolioData::new(market_addresses, display_names, expected_returns, covariance_matrix, weights);
     info!("Strategy engine completed.");
 
     Some(portfolio_data)
-    
 }
 
 /// Fetch market state slices from the database

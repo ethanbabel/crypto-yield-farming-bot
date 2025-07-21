@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use rust_decimal::Decimal;
 use ndarray::{Array1, Array2};
+use tracing::info;
 
 /// Historical slice of market data for one GMX market
 #[derive(Debug, Clone)]
@@ -91,6 +92,54 @@ impl PortfolioData {
     pub fn get_weight(&self, address: Address) -> Option<f64> {
         let index = self.get_market_index(address)?;
         Some(self.weights[index])
+    }
+
+    pub fn log_portfolio_data(&self) {
+        // Calculate Sharpe ratios and create sorted data
+        let mut market_data: Vec<(usize, String, f64, f64, f64, f64)> = self.market_addresses
+            .iter()
+            .enumerate()
+            .map(|(i, &addr)| {
+                let expected_return = self.expected_returns[i];
+                let variance = self.get_variance(addr).unwrap_or(0.0);
+                let std_dev = variance.sqrt();
+                let sharpe = if std_dev > 0.0 { expected_return / std_dev } else { 0.0 };
+                let weight = self.weights[i];
+                
+                (i, self.display_names[i].clone(), expected_return * 10000.0, std_dev * 10000.0, sharpe, weight)
+            })
+            .collect();
+        
+        // Sort by weight (descending)
+        market_data.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap_or(b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)));
+
+        // Create formatted output
+        let market_summary = market_data
+            .iter()
+            .map(|(_, name, return_pct, vol_pct, sharpe, weight)| {
+                format!(
+                    "{}: Weight={:.2}%, Return={:.5}bps, Vol={:.5}bps, Sharpe={:.3}",
+                    name, weight * 100.0, return_pct, vol_pct, sharpe
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n  ");
+        
+        // Calculate portfolio metrics
+        let total_weight = self.weights.sum();
+        let portfolio_return = self.weights.dot(&self.expected_returns);
+        let portfolio_variance = self.weights.dot(&self.covariance_matrix.dot(&self.weights));
+        let portfolio_volatility = portfolio_variance.sqrt();
+        let portfolio_sharpe = if portfolio_volatility > 0.0 { portfolio_return / portfolio_volatility } else { 0.0 };
+        
+        info!(
+            "Optimal Portfolio (sorted by weight):\n  {}\n\nPortfolio Summary:\n  Total Weight: {:.2}%\n  Expected Return: {:.5}bps\n  Volatility: {:.5}bps\n  Sharpe Ratio: {:.3}",
+            market_summary,
+            total_weight * 100.0,
+            portfolio_return * 10000.0,
+            portfolio_volatility * 10000.0,
+            portfolio_sharpe
+        );
     }
 }
 

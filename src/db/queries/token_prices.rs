@@ -134,6 +134,11 @@ pub async fn get_all_asset_tokens(pool: &PgPool) -> Result<Vec<(String, String, 
             t.address, t.symbol, t.decimals, tp.mid_price
         FROM token_prices tp
         JOIN tokens t ON tp.token_id = t.id
+        WHERE t.id IN (
+            SELECT DISTINCT long_token_id FROM markets
+            UNION
+            SELECT DISTINCT short_token_id FROM markets
+        )
         ORDER BY tp.token_id, tp.timestamp DESC
         "#,
     )

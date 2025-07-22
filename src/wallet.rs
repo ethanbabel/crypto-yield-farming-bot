@@ -66,7 +66,27 @@ impl WalletManager {
     // Load all tokens from the database
     #[instrument(skip(self, db))]
     pub async fn load_tokens(&mut self, db: &DbManager) -> Result<()> {
+        self.load_asset_tokens(db).await?;
         self.load_market_tokens(db).await?;
+        Ok(())
+    }
+
+    /// Load all asset tokens from the database
+    #[instrument(skip(self, db))]
+    pub async fn load_asset_tokens(&mut self, db: &DbManager) -> Result<()> {
+        let asset_tokens = db.get_all_asset_tokens().await?;
+        for token in asset_tokens {
+            let token_info = TokenInfo {
+                address: token.0,
+                symbol: token.1,
+                decimals: token.2,
+                last_mid_price_usd: token.3,
+            };     
+            if token_info.address == Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap() { // WETH
+                self.native_token.last_mid_price_usd = token_info.last_mid_price_usd;
+            }
+            self.tokens.insert(token_info.address, token_info);
+        }
         Ok(())
     }
 
@@ -75,13 +95,13 @@ impl WalletManager {
     async fn load_market_tokens(&mut self, db: &DbManager) -> Result<()> {
         let market_tokens = db.get_all_market_tokens().await?;
         for token in market_tokens {
-            let token = TokenInfo {
+            let token_info = TokenInfo {
                 address: token.0,
                 symbol: token.1,
                 decimals: 18, // Market tokens are always 18 decimals
                 last_mid_price_usd: token.2,
             };
-            self.tokens.insert(token.address, token);
+            self.tokens.insert(token_info.address, token_info);
         }
         Ok(())
     }
@@ -153,9 +173,10 @@ impl WalletManager {
     pub async fn log_all_balances(&self, include_zero_balances: bool) -> Result<()> {
         let native_balance = self.get_native_balance().await?;
         let token_balances = self.get_all_token_balances().await?;
-        let mut all_tokens: Vec<&TokenInfo> = self.tokens.values().collect();
-        all_tokens.push(&self.native_token);
-        let output = all_tokens.iter().filter_map(|token| {
+        let mut all_tokens: Vec<&TokenInfo> = vec![&self.native_token];
+        all_tokens.extend(self.tokens.values());
+        
+        let balance_entries: Vec<String> = all_tokens.iter().filter_map(|token| {
             let bal = if token_balances.contains_key(&token.address) {
                 token_balances.get(&token.address).unwrap_or(&Decimal::ZERO)
             } else if token.address == self.native_token.address {
@@ -168,15 +189,21 @@ impl WalletManager {
             }
             Some(
                 format!(
-                    "{} ({}): {} ({} USD)", 
+                    "{} ({:?}): {} ({} USD)", 
                     token.symbol, 
                     token.address, 
                     bal, 
                     bal * token.last_mid_price_usd, 
                 )
             )
-        }).collect::<Vec<String>>().join("\n");
-        info!(balances = %output, "All token balances");
+        }).collect();
+        
+        let output = if balance_entries.is_empty() {
+            "N/A".to_string()
+        } else {
+            balance_entries.join("\n")
+        };
+        info!("All token balances: \n{}", output);
         Ok(())
     }
 

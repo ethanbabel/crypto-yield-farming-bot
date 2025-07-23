@@ -32,9 +32,6 @@ async fn main() -> eyre::Result<()> {
     wallet_manager.load_tokens(&db).await?;
     info!(address = ?wallet_manager.address, "Wallet manager initialized");
 
-    // Log wallet token balances
-    wallet_manager.log_all_balances(false).await?;
-
     // Run strategy engine
     let portfolio_data = match engine::run_strategy_engine(&db).await {
         Some(data) => data,

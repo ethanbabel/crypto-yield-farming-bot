@@ -2,6 +2,7 @@ use tracing::{debug, info, error};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use ndarray::Array1;
+use rayon::prelude::*;
 
 use super::{
     pnl_model, fee_model, allocator, covariance,
@@ -72,22 +73,37 @@ pub async fn run_strategy_engine(db_manager: &DbManager) -> Option<PortfolioData
     let mut display_names = Vec::with_capacity(n_markets);
     let mut expected_returns = Array1::zeros(n_markets);
 
-    // Run models on each market - this ensures same ordering as covariance matrix
-    for (i, slice) in market_slices.iter().enumerate() {
-        let token_category = get_token_category(slice);
+    // Run models on each market in parallel - maintaining same ordering as covariance matrix
+    let results: Vec<(usize, f64)> = market_slices
+        .par_iter()
+        .enumerate()
+        .map(|(i, slice)| {
+            let token_category = get_token_category(slice);
 
-        let config = PnLSimulationConfig {
-            time_horizon_hrs: TIME_HORIZON_HRS,
-            n_simulations: 10000,
-            token_category,
-        };
+            let config = PnLSimulationConfig {
+                time_horizon_hrs: TIME_HORIZON_HRS,
+                n_simulations: 10000,
+                token_category,
+            };
 
-        let pnl_return = pnl_model::simulate_trader_pnl(slice, &config).unwrap_or(Decimal::ZERO);
-        let fee_return = fee_model::simulate_fee_return(slice).unwrap_or(Decimal::ZERO);
+            let pnl_return = pnl_model::simulate_trader_pnl(slice, &config).unwrap_or(Decimal::ZERO);
+            let fee_return = fee_model::simulate_fee_return(slice).unwrap_or(Decimal::ZERO);
 
+            let total_return = (pnl_return + fee_return).to_f64().unwrap_or(0.0);
+            
+            (i, total_return)
+        })
+        .collect();
+
+    // Populate arrays maintaining the original market_slices order
+    for slice in market_slices.iter() {
         market_addresses.push(slice.market_address);
         display_names.push(slice.display_name.clone());
-        expected_returns[i] = (pnl_return + fee_return).to_f64().unwrap_or(0.0);
+    }
+    
+    // Set expected returns using the parallel computation results
+    for (i, return_value) in results {
+        expected_returns[i] = return_value;
     }
     debug!("Market returns calculated");
 

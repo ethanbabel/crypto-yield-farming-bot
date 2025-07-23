@@ -48,5 +48,6 @@ ndarray-stats = "0.6" # Stats for N-dimensional arrays
 ndarray-linalg = "0.16" # Linear algebra for ndarray
 argmin = { version = "0.10", features = ["serde1"] } # Optimization library
 argmin-math = "0.4" # Math operations for argmin
+rayon = "1.8" # Data parallelism for performance-critical computations
 
 

@@ -20,6 +20,10 @@ path = "src/bin/trading_bot.rs"
 name = "main"   # For development and testing
 path = "src/bin/main.rs"
 
+[[bin]]         # Utility to see wallet balances
+name = "see_balances"
+path = "src/bin/see_balances.rs"
+
 [dependencies]
 dotenvy = "0.15"    # Load environment variables from .env file
 ethers = { version = "2", features = ["ws", "rustls"] } # Ethereum with WebSocket support

@@ -30,7 +30,7 @@ async fn main() -> eyre::Result<()> {
     // Initialize and load wallet manager
     let mut wallet_manager = WalletManager::new(&cfg)?;
     wallet_manager.load_tokens(&db).await?;
-    info!(address = ?wallet_manager.address, "Wallet manager initialized");
+    info!("Wallet manager initialized");
 
     // Run strategy engine
     let portfolio_data = match engine::run_strategy_engine(&db).await {

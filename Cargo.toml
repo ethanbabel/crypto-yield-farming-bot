@@ -31,6 +31,11 @@ serde = { version = "1.0", features = ["derive"] } # Serialization/deserializati
 tokio = { version = "1", features = ["full"] } # Async runtime
 eyre = "0.6" # East error handling
 reqwest = { version = "0.11", features = ["json", "blocking"] } # HTTP client
+reqwest-middleware = { version = "0.4", features = ["json"] } # Middleware for reqwest
+reqwest-retry = "0.7" # Retry middleware for reqwest
+reqwest-ratelimit = "0.4" # Rate limiting middleware for reqwest
+governor = "0.10" # Rate limiting library
+nonzero_ext = "0.3" # Non-zero integer types for use with governor
 serde_json = "1" # Working with JSON
 futures = "0.3" # Async programming utilities
 tracing = "0.1" # Logging, especially for async code
@@ -49,5 +54,6 @@ ndarray-linalg = "0.16" # Linear algebra for ndarray
 argmin = { version = "0.10", features = ["serde1"] } # Optimization library
 argmin-math = "0.4" # Math operations for argmin
 rayon = "1.8" # Data parallelism for performance-critical computations
-
+thiserror = "1.0" # Derive error types
+url = "2.5" # URL parsing and manipulation
 

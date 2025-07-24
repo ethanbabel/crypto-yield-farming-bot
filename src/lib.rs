@@ -7,3 +7,4 @@ pub mod data_ingestion;
 pub mod logging;
 pub mod db;
 pub mod strategy;
+pub mod spot_swap;

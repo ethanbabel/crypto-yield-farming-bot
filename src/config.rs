@@ -18,6 +18,7 @@ pub struct Config {
     pub etherscan_api_key: String,
     pub refetch_abis: bool,
     pub database_url: String,
+    pub zerox_api_key: String,
 }
 
 impl Config {
@@ -83,6 +84,9 @@ impl Config {
         // Load database URL
         let database_url = env::var("DATABASE_URL").expect("Missing DATABASE_URL");
 
+        // Load 0x API key
+        let zerox_api_key = env::var("ZEROX_API_KEY").expect("Missing ZEROX_API_KEY");
+
         let config = Config {
             alchemy_provider: Arc::new(provider),
             alchemy_ws_url,
@@ -95,6 +99,7 @@ impl Config {
             etherscan_api_key,
             refetch_abis,
             database_url,
+            zerox_api_key,
         };
         
         Arc::new(config)

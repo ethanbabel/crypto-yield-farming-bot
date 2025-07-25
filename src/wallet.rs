@@ -17,18 +17,18 @@ abigen!(
     ]"#
 );
 
-struct TokenInfo {
-    address: Address,
-    symbol: String,
-    decimals: u8,
-    last_mid_price_usd: Decimal,
+pub struct TokenInfo {
+    pub address: Address,
+    pub symbol: String,
+    pub decimals: u8,
+    pub last_mid_price_usd: Decimal,
 }
 
 pub struct WalletManager {
     pub signer: Arc<SignerMiddleware<Arc<Provider<Http>>, Wallet<k256::ecdsa::SigningKey>>>,
     pub address: Address,
-    native_token: TokenInfo,
-    tokens: HashMap<Address, TokenInfo>,
+    pub native_token: TokenInfo,
+    pub tokens: HashMap<Address, TokenInfo>,
 }
 
 impl WalletManager {

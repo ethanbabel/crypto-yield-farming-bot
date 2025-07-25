@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use eyre::Result;
 
-use super::paraswap_types::{SwapRequest, SwapQuote, ParaSwapQuoteResponse};
+use super::paraswap_types::{QuoteRequest, QuoteResponse, ParaSwapQuoteResponse};
 use crate::config::Config;
 
 const PARASWAP_BASE_URL: &str = "https://api.paraswap.io";
@@ -65,7 +65,7 @@ impl ParaSwapClient {
 
     /// Get quote for specific buy amount (ParaSwap's native feature)
     #[instrument(skip(self))]
-    pub async fn get_quote(&self, request: &SwapRequest) -> Result<SwapQuote> {
+    pub async fn get_quote(&self, request: &QuoteRequest) -> Result<QuoteResponse> {
         let amount = if request.side == "BUY" {
             self.decimal_to_u256_str(request.amount, request.to_token_decimals)
         } else {
@@ -85,30 +85,22 @@ impl ParaSwapClient {
             ("version", "6.2".to_string()), 
         ];
 
-        let response = self.http_client.get(url).query(&params).send().await?;
-            // .error_for_status()?;
-
-        if !response.status().is_success() {
-            warn!("Failed to fetch quote: {:?}", response);
-            return Err(eyre::eyre!("Failed to fetch quote: {}", response.text().await?));
-        }
+        let response = self.http_client.get(url).query(&params).send().await?.error_for_status()?;
 
         let quote_response: ParaSwapQuoteResponse = response.json().await?;
+        tracing::debug!(?quote_response, "Received quote response from ParaSwap");
         let price_route = quote_response.price_route;
 
-        Ok(SwapQuote {
+        Ok(QuoteResponse {
             from_token: Address::from_str(&price_route.src_token)?,
             to_token: Address::from_str(&price_route.dest_token)?,
             from_amount: self.u256_str_to_decimal(&price_route.src_amount, request.from_token_decimals),
             to_amount: self.u256_str_to_decimal(&price_route.dest_amount, request.to_token_decimals),
-            gas_used: Decimal::from_str(&price_route.gas_cost)?,
-            gas_price_per_unit: self.u256_str_to_decimal(&quote_response.tx_params.gas_price, 18),
-            gas_cost: Decimal::from_str(&price_route.gas_cost)? * self.u256_str_to_decimal(&quote_response.tx_params.gas_price, 18),
             from_amount_usd: Decimal::from_str(&price_route.src_usd)?,
             to_amount_usd: Decimal::from_str(&price_route.dest_usd)?,
-            gas_cost_usd: Decimal::from_str(&price_route.gas_cost_usd)?,
             to_contract: Address::from_str(&quote_response.tx_params.to)?,
             transaction_data: Bytes::from_str(&quote_response.tx_params.data)?,
+            value: U256::from_dec_str(&quote_response.tx_params.value)?,
         })
     }
        

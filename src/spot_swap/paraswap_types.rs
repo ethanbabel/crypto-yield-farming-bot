@@ -1,32 +1,37 @@
-use ethers::types::{Address, Bytes};
+use ethers::types::{Address, Bytes, U256};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct SwapRequest {
+    pub from_token_address: Address,
+    pub to_token_address: Address,
+    pub amount: Decimal, // Amount to swap (in to_token if side is "BUY", in from_token if side is "SELL")
+    pub side: String, // "BUY" or "SELL"
+}
+
+#[derive(Debug, Clone)]
+pub struct QuoteRequest {
     pub from_token: Address,
     pub from_token_decimals: u8,
     pub to_token: Address,
     pub to_token_decimals: u8,
-    pub amount: Decimal,
+    pub amount: Decimal, // Amount to swap (in to_token if side is "BUY", in from_token if side is "SELL")
     pub side: String, // "BUY" or "SELL"
     pub slippage_tolerance: Decimal, // in percentage (e.g., 1 for 1%)
 }
 
 #[derive(Debug, Clone)]
-pub struct SwapQuote {
+pub struct QuoteResponse {
     pub from_token: Address,
     pub to_token: Address,
     pub from_amount: Decimal,
-    pub to_amount: Decimal, // Amount received after swap less fees
-    pub gas_used: Decimal, // Gas cost for the swap
-    pub gas_price_per_unit: Decimal, // Gas price per unit in ETH
-    pub gas_cost: Decimal, // Total gas cost in ETH
+    pub to_amount: Decimal, // Amount received after swap
     pub from_amount_usd: Decimal, // USD value of the from amount
     pub to_amount_usd: Decimal, // USD value of the to amount
-    pub gas_cost_usd: Decimal, // USD value of the gas cost
     pub to_contract: Address, // The address of the contract to send the transaction data for execution
     pub transaction_data: Bytes, // The transaction data to execute the swap
+    pub value: U256,
 }
 
 // ParaSwap API Response structures

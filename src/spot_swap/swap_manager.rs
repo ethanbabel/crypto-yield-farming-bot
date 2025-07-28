@@ -9,10 +9,11 @@ use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 
-use super::paraswap_types::{SwapRequest, QuoteRequest, QuoteResponse};
-use super::paraswap_api_client::ParaSwapClient;
 use crate::config::Config;
 use crate::wallet::WalletManager;
+use crate::constants::WNT_ADDRESS;
+use super::paraswap_types::{SwapRequest, QuoteRequest, QuoteResponse};
+use super::paraswap_api_client::ParaSwapClient;
 
 // Add ERC20 ABI for approve function
 abigen!(
@@ -20,6 +21,15 @@ abigen!(
     r#"[
         function approve(address spender, uint256 amount) external returns (bool)
         function allowance(address owner, address spender) external view returns (uint256)
+    ]"#
+);
+
+// Add WETH9 ABI for wrap/unwrap functions
+abigen!(
+    WETH9,
+    r#"[
+        function deposit() public payable
+        function withdraw(uint wad) public
     ]"#
 );
 
@@ -50,6 +60,16 @@ impl SwapManager {
     pub async fn execute_swap(&self, swap_request: &SwapRequest) -> Result<()> {
         let (swap_log_string, quote_request) = self.validate_swap_request(swap_request).await?;
 
+        // Check if this is an ETH/WETH swap
+        let weth_address = Address::from_str(WNT_ADDRESS).unwrap();
+        if let Some(is_wrap) = self.is_eth_weth_swap(
+            quote_request.from_token,
+            quote_request.to_token,
+            weth_address,
+        ) {
+            return self.execute_eth_weth_swap(swap_request, is_wrap, &swap_log_string).await;
+        }
+
         // Get initial balances
         let initial_native_balance = self.wallet_manager.get_native_balance().await?;
         let initial_from_balance = if quote_request.from_token == self.wallet_manager.native_token.address {
@@ -62,7 +82,6 @@ impl SwapManager {
         } else {
             self.wallet_manager.get_token_balance(quote_request.to_token).await?
         };
-       
 
         info!(
             initial_from_balance = %initial_from_balance,
@@ -291,7 +310,6 @@ impl SwapManager {
         let gas_price_decimal = self.u256_to_decimal(self.wallet_manager.signer.provider().get_gas_price().await?, 0)?;
         let gas_price_with_buf = gas_price_decimal * self.max_fee_per_gas_buffer;
         let gas_price = self.decimal_to_u256(gas_price_with_buf, 0)?;
-       
 
         // Set tx gas limit and gas price
         let tx = tx.gas(gas_estimate).gas_price(gas_price);
@@ -398,5 +416,133 @@ impl SwapManager {
         let formatted = ethers::utils::format_units(value, decimals as usize)
             .map_err(|e| eyre::eyre!("Failed to format U256 value: {}", e))?;
         Decimal::from_str(&formatted).map_err(|e| eyre::eyre!("Failed to parse formatted value: {}", e))
+    }
+
+    /// Execute ETH/WETH wrap or unwrap operation
+    #[instrument(skip(self, swap_request, is_wrap, swap_log_string))]
+    async fn execute_eth_weth_swap(
+        &self,
+        swap_request: &SwapRequest,
+        is_wrap: bool,
+        swap_log_string: &str,
+    ) -> Result<()> {
+        let weth_address = Address::from_str(WNT_ADDRESS).unwrap();
+
+        // Get initial balances
+        let initial_native_balance = self.wallet_manager.get_native_balance().await?;
+        let initial_weth_balance = self.wallet_manager.get_token_balance(weth_address).await?;
+
+        info!(
+            initial_eth_balance = %initial_native_balance,
+            initial_weth_balance = %initial_weth_balance,
+            "{} ETH/WETH Operation Initiated",
+            swap_log_string
+        );
+
+        // Validate we have sufficient balance
+        if is_wrap {
+            if initial_native_balance < swap_request.amount {
+                return Err(eyre::eyre!(
+                    "Insufficient ETH balance for wrap: need {} but have {}",
+                    swap_request.amount,
+                    initial_native_balance
+                ));
+            }
+        } else {
+            if initial_weth_balance < swap_request.amount {
+                return Err(eyre::eyre!(
+                    "Insufficient WETH balance for unwrap: need {} but have {}",
+                    swap_request.amount,
+                    initial_weth_balance
+                ));
+            }
+        }
+        debug!("{} ETH/WETH Operation Validated", swap_log_string);
+
+        // Build the transaction
+        let tx = self.build_weth_transaction(weth_address, is_wrap, swap_request.amount).await?;
+        debug!(transaction = ?tx, "{} ETH/WETH Operation Transaction Built", swap_log_string);
+
+        // Simulate the transaction
+        self.simulate_transaction(&tx, initial_native_balance).await?;
+        debug!("{} ETH/WETH Operation Simulation Successful", swap_log_string);
+
+        // Execute the transaction
+        let (tx_hash, receipt) = self.execute_transaction(tx).await?;
+        let gas_used = self.u256_to_decimal(receipt.gas_used.unwrap_or(U256::zero()), 0)?;
+        let gas_price = self.u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
+        info!(
+            tx_hash = ?tx_hash,
+            block_number = ?receipt.block_number.unwrap_or(U64::zero()),
+            gas_used = ?gas_used,
+            gas_price = ?gas_price,
+            gas_cost = ?gas_used * gas_price,
+            "{} ETH/WETH Operation Executed Successfully",
+            swap_log_string,
+        );
+
+        // Get final balances
+        let final_native_balance = self.wallet_manager.get_native_balance().await?;
+        let final_weth_balance = self.wallet_manager.get_token_balance(weth_address).await?;
+
+        info!(
+            final_eth_balance = %final_native_balance,
+            final_weth_balance = %final_weth_balance,
+            "{} ETH/WETH Operation Completed",
+            swap_log_string
+        );
+
+        Ok(())
+    }
+
+    /// Check if a swap is between ETH and WETH
+    fn is_eth_weth_swap(
+        &self,
+        from_token: Address,
+        to_token: Address,
+        weth_address: Address,
+    ) -> Option<bool> {
+        if from_token == self.wallet_manager.native_token.address && to_token == weth_address {
+            Some(true) // wrap ETH to WETH
+        } else if from_token == weth_address && to_token == self.wallet_manager.native_token.address {
+            Some(false) // unwrap WETH to ETH
+        } else {
+            None // not an ETH/WETH swap
+        }
+    }
+
+    /// Build transaction for wrapping or unwrapping WETH
+    #[instrument(skip(self))]
+    async fn build_weth_transaction(&self, weth_address: Address, is_wrap: bool, amount: Decimal) -> Result<TransactionRequest> {
+        let tx = if is_wrap {
+            WETH9::new(weth_address, self.wallet_manager.signer.clone())
+                .deposit()
+                .value(self.decimal_to_u256(amount, 18).unwrap())
+        } else {
+            WETH9::new(weth_address, self.wallet_manager.signer.clone())
+                .withdraw(self.decimal_to_u256(amount, 18).unwrap())
+        };
+
+        let mut tx_request: TransactionRequest = tx.tx.clone().into();
+        tx_request = tx_request.from(self.wallet_manager.address).chain_id(self.chain_id);
+
+        // Estimate gas using the provider
+        let gas_estimate = self.wallet_manager.signer.provider().estimate_gas(&tx_request.clone().into(), None).await?;
+        let gas_price_decimal = self.u256_to_decimal(self.wallet_manager.signer.provider().get_gas_price().await?, 0)?;
+        let gas_price_with_buf = gas_price_decimal * self.max_fee_per_gas_buffer;
+        let gas_price = self.decimal_to_u256(gas_price_with_buf, 0)?;
+
+        // Set tx gas limit and gas price
+        tx_request = tx_request.gas(gas_estimate).gas_price(gas_price);
+        
+        debug!(
+            to = ?weth_address,
+            value = %tx_request.value.unwrap_or(U256::zero()),
+            gas_price = %tx_request.gas_price.unwrap_or(U256::zero()),
+            gas_limit = %tx_request.gas.unwrap_or(U256::zero()),
+            "Transaction built"
+        );
+        
+        Ok(tx_request)
     }
 }

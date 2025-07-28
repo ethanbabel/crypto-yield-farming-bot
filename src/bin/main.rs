@@ -42,45 +42,31 @@ async fn main() -> eyre::Result<()> {
     let swap_manager = SwapManager::new(wallet_manager, &cfg);
     info!("Swap manager initialized");
 
-    // Example SwapRequest 1 (Side = "BUY", ERC20 to ERC20)
-    let swap_request1 = SwapRequest {
-        from_token_address: Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap(), // USDC
-        to_token_address: Address::from_str("0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34").unwrap(), // USDe
-        amount: Decimal::from_f64(0.5).unwrap(), // 0.5 USDe
-        side: "BUY".to_string(), // Buying USDe with USDC
-    };
-
-    // Execute swap 1
-    if let Err(e) = swap_manager.execute_swap(&swap_request1).await {
-        error!(error = %e, "Failed to execute swap");
-        return Err(e.into());
-    }
-
-    // Example SwapRequest 2 (Side = "SELL", ERC20 to Native Token)
-    let swap_request2 = SwapRequest {
-        from_token_address: Address::from_str("0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34").unwrap(), // USDe
-        to_token_address: Address::from_str("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE").unwrap(), // Native token
-        amount: Decimal::from_f64(0.5).unwrap(), // 0.5 USDe
-        side: "SELL".to_string(), // Selling USDe for native token
-    };
-
-    // Execute swap 2
-    if let Err(e) = swap_manager.execute_swap(&swap_request2).await {
-        error!(error = %e, "Failed to execute swap");
-        return Err(e.into());
-    }
-
-    // Example SwapRequest 3 (Side = "BUY", Native Token to ERC20)
-    let swap_request3 = SwapRequest {
+    // Swap (Wrap) ETH to WETH
+    let swap_request = SwapRequest {
         from_token_address: Address::from_str("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE").unwrap(), // Native token
-        to_token_address: Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap(), // USDC
-        amount: Decimal::from_f64(0.5).unwrap(), // 0.5 USDC
-        side: "BUY".to_string(), // Buying USDC with native token
+        to_token_address: Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap(), // WETH
+        amount: Decimal::from_f64(0.0001).unwrap(), // 0.0001 ETH/WETH
+        side: "BUY".to_string(), // Irrelevant for ETH -> WETH Wrap (exchange is always 1:1)
     };
 
-    // Execute swap 3
-    if let Err(e) = swap_manager.execute_swap(&swap_request3).await {
-        error!(error = %e, "Failed to execute swap");
+    // Execute the wrap
+    if let Err(e) = swap_manager.execute_swap(&swap_request).await {
+        error!(error = ?e, "Failed to execute ETH/WETH swap");
+        return Err(e.into());
+    }
+
+    // Swap (Unwrap) WETH to ETH
+    let swap_request = SwapRequest {
+        from_token_address: Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap(), // WETH
+        to_token_address: Address::from_str("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE").unwrap(), // Native token
+        amount: Decimal::from_f64(0.0001).unwrap(), // 0.0001 ETH/WETH
+        side: "SELL".to_string(), // Irrelevant for WETH -> ETH unwrap (exchange is always 1:1)
+    };
+
+    // Execute the unwrap
+    if let Err(e) = swap_manager.execute_swap(&swap_request).await {
+        error!(error = ?e, "Failed to execute WETH/ETH swap");
         return Err(e.into());
     }
 

@@ -106,19 +106,51 @@ impl WalletManager {
         Ok(())
     }
 
-    /// Get native token (ETH) balance
+    /// Get native token (ETH) balance as U256
+    #[instrument(skip(self))]
+    pub async fn get_native_balance_u256(&self) -> Result<U256> {
+        let balance = self.signer.get_balance(self.address, None).await?;
+        debug!(
+            balance = ?balance,
+            "Retrieved native balance as U256"
+        );
+        Ok(balance)
+    }
+
+    /// Get native token (ETH) balance as Decimal
     #[instrument(skip(self))]
     pub async fn get_native_balance(&self) -> Result<Decimal> {
         let balance = self.signer.get_balance(self.address, None).await?;
         let balance = Self::u256_to_decimal(balance, self.native_token.decimals);
         debug!(
             balance = %balance,
-            "Retrieved native balance"
+            "Retrieved native balance as Decimal"
         );
         Ok(balance)
     }
 
-    /// Get ERC20 token balance for a specific token
+    /// Get ERC20 token balance as U256
+    #[instrument(skip(self, token_address))]
+    pub async fn get_token_balance_u256(&self, token_address: Address) -> Result<U256> {
+        let token_info = self.tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
+
+        // Create ERC20 contract instance
+        let contract = IERC20::new(token_address, self.signer.clone());
+
+        // Get balance
+        let balance = contract.balance_of(self.address).call().await?;
+
+        debug!(
+            token_address = ?token_address,
+            token_symbol = %token_info.symbol,
+            balance = %balance,
+            "Retrieved token balance as U256"
+        );
+
+        Ok(balance)
+    }
+
+    /// Get ERC20 token balance for a specific token as Decimal
     #[instrument(skip(self, token_address))]
     pub async fn get_token_balance(&self, token_address: Address) -> Result<Decimal> {
         let token_info = self.tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
@@ -134,7 +166,7 @@ impl WalletManager {
             token_address = ?token_address,
             token_symbol = %token_info.symbol,
             balance = %balance,
-            "Retrieved token balance"
+            "Retrieved token balance as Decimal"
         );
         
         Ok(balance)

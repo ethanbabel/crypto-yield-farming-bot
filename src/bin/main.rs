@@ -1,21 +1,22 @@
 use dotenvy::dotenv;
-use tracing::{info, error};
-use ethers::types::Address;
+use eyre::Result;
+use tracing::{debug, info, error};
+use ethers::types::{Address, U256};
+use ethers::middleware::Middleware;
 use std::str::FromStr;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
 use crypto_yield_farming_bot::wallet::WalletManager;
 use crypto_yield_farming_bot::db::db_manager::DbManager;
-use crypto_yield_farming_bot::spot_swap::{
-    paraswap_types::SwapRequest,
-    swap_manager::SwapManager,
+use crypto_yield_farming_bot::gmx::{
+    exchange_router_utils,
+    exchange_router,
+    datastore,
 };
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
+async fn main() -> Result<()> {
     // Load environment variables from .env file
     dotenv()?;
 
@@ -38,39 +39,112 @@ async fn main() -> eyre::Result<()> {
     wallet_manager.load_tokens(&db).await?;
     info!("Wallet manager initialized and tokens loaded");
 
-    // Initialize ParaSwap client
-    let swap_manager = SwapManager::new(wallet_manager, &cfg);
-    info!("Swap manager initialized");
+    // Log all wallet balances
+    wallet_manager.log_all_balances(false).await?;
 
-    // Swap (Wrap) ETH to WETH
-    let swap_request = SwapRequest {
-        from_token_address: Address::from_str("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE").unwrap(), // Native token
-        to_token_address: Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap(), // WETH
-        amount: Decimal::from_f64(0.0001).unwrap(), // 0.0001 ETH/WETH
-        side: "BUY".to_string(), // Irrelevant for ETH -> WETH Wrap (exchange is always 1:1)
+    // Calculate execution fee for a deposit
+    let num_swaps = U256::from(0);
+    let callback_gas_limit = U256::from(500_000); 
+    let (execution_fee, gas_limit, gas_price) = calculate_execution_fee(
+        &cfg, &wallet_manager, num_swaps, callback_gas_limit, true
+    ).await?;
+
+    // Example usage of create_deposit
+    let params = exchange_router_utils::CreateDepositParams {
+        receiver: wallet_manager.address,
+        callback_contract: wallet_manager.address, 
+        ui_fee_receiver: Address::zero(), 
+        market: Address::from_str("0x70d95587d40A2caf56bd97485aB3Eec10Bee6336").unwrap(), // ETH/USD [ETH - USDC]
+        initial_long_token: Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap(), // WETH
+        initial_short_token: Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap(), // USDC
+        long_token_swap_path: vec![], // No swaps needed
+        short_token_swap_path: vec![], // No swaps needed
+        min_market_tokens: U256::zero(), 
+        should_unwrap_native_token: false,
+        execution_fee,
+        callback_gas_limit,
     };
 
-    // Execute the wrap
-    if let Err(e) = swap_manager.execute_swap(&swap_request).await {
-        error!(error = ?e, "Failed to execute ETH/WETH swap");
+    // Create deposit - 0 WETH, 0.5 USDC
+    if let Err(e) = exchange_router::create_deposit(&cfg, &wallet_manager, params, U256::zero(), U256::from(500_000), gas_limit, gas_price).await {
+        error!(error = ?e, "Failed to create deposit");
         return Err(e.into());
-    }
+    } 
+    info!("Deposit created successfully");
 
-    // Swap (Unwrap) WETH to ETH
-    let swap_request = SwapRequest {
-        from_token_address: Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap(), // WETH
-        to_token_address: Address::from_str("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE").unwrap(), // Native token
-        amount: Decimal::from_f64(0.0001).unwrap(), // 0.0001 ETH/WETH
-        side: "SELL".to_string(), // Irrelevant for WETH -> ETH unwrap (exchange is always 1:1)
+    // Print wallet balances
+    wallet_manager.log_all_balances(false).await?;
+    let market_token_balance = wallet_manager.get_token_balance_u256(
+        Address::from_str("0x70d95587d40A2caf56bd97485aB3Eec10Bee6336").unwrap() // ETH/USD [ETH - USDC]
+    ).await?;
+
+    // Re-calculate execution fee for a withdrawal
+    let num_swaps = U256::from(0);
+    let (execution_fee, gas_limit, gas_price) = calculate_execution_fee(
+        &cfg, &wallet_manager, num_swaps, callback_gas_limit, false
+    ).await?;
+
+    // Example usage of create_withdrawal
+    let withdrawal_params = exchange_router_utils::CreateWithdrawalParams {
+        receiver: wallet_manager.address,
+        callback_contract: wallet_manager.address,
+        ui_fee_receiver: Address::zero(),
+        market: Address::from_str("0x70d95587d40A2caf56bd97485aB3Eec10Bee6336").unwrap(), // ETH/USD [ETH - USDC]
+        long_token_swap_path: vec![], // No swaps needed
+        short_token_swap_path: vec![], // No swaps needed
+        min_long_token_amount: U256::zero(),
+        min_short_token_amount: U256::zero(),
+        should_unwrap_native_token: false,
+        execution_fee,
+        callback_gas_limit,
     };
 
-    // Execute the unwrap
-    if let Err(e) = swap_manager.execute_swap(&swap_request).await {
-        error!(error = ?e, "Failed to execute WETH/ETH swap");
+    // Create withdrawal
+    if let Err(e) = exchange_router::create_withdrawal(&cfg, &wallet_manager, withdrawal_params, market_token_balance, gas_limit, gas_price).await {
+        error!(error = ?e, "Failed to create withdrawal");
         return Err(e.into());
     }
+    info!("Withdrawal created successfully");
+
+    // Print final wallet balances
+    wallet_manager.log_all_balances(false).await?;
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
-
     Ok(())
 }
+
+async fn calculate_execution_fee(
+    config: &config::Config, 
+    wallet_manager: &WalletManager,
+    num_swaps: U256,
+    callback_gas_limit: U256, 
+    is_deposit: bool
+) -> Result<(U256, U256, U256)> {
+    let gas_per_swap = datastore::estimate_execute_gas_limit_per_swap(config).await?;
+    let gas_for_swaps = gas_per_swap * num_swaps;
+    let gas_limit = if is_deposit {
+        datastore::get_deposit_gas_limit(config).await?
+    } else {
+        datastore::get_withdrawal_gas_limit(config).await?
+    };
+    let estimated_gas_limit = gas_limit + callback_gas_limit + gas_for_swaps;
+    debug!(?estimated_gas_limit, "Estimated total gas limit for deposit");
+
+    let oracle_price_count = datastore::estimate_oracle_price_count(num_swaps);
+    let adjusted_gas_limit = datastore::adjust_gas_limit_for_estimate(
+        config,
+        estimated_gas_limit,
+        oracle_price_count,
+    ).await?;
+    debug!(?adjusted_gas_limit, "Adjusted gas limit for estimate");
+
+    let gas_price = wallet_manager.signer.provider().get_gas_price().await?;
+    let gas_price = gas_price + (gas_price / 10); // Add 10% buffer
+    debug!(?gas_price, "Gas price with buffer");
+
+    let execution_fee = adjusted_gas_limit * gas_price;
+    debug!(?execution_fee, "Calculated execution fee for deposit");
+
+    Ok((execution_fee, adjusted_gas_limit, gas_price))
+}
+

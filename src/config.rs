@@ -15,6 +15,10 @@ pub struct Config {
     pub gmx_datastore: Address,
     pub gmx_reader: Address,
     pub gmx_eventemitter: Address,
+    pub gmx_exchangerouter: Address,
+    pub gmx_baserouter: Address,
+    pub gmx_depositvault: Address,
+    pub gmx_withdrawalvault: Address,
     pub etherscan_api_key: String,
     pub refetch_abis: bool,
     pub database_url: String,
@@ -61,16 +65,27 @@ impl Config {
         };
 
         // Load GMX contract addresses based on network mode
-        let (gmx_datastore, gmx_reader, gmx_eventemitter) = match network_mode.as_str() {
+        let (
+            gmx_datastore, gmx_reader, gmx_eventemitter, gmx_exchangerouter, 
+            gmx_baserouter, gmx_depositvault, gmx_withdrawalvault
+        ) = match network_mode.as_str() {
             "test" => (
                 constants::GMX_DATASTORE_ADDRESS_SEPOLIA, 
                 constants::GMX_READER_ADDRESS_SEPOLIA,
                 constants::GMX_EVENTEMITTER_ADDRESS_SEPOLIA,
+                constants::GMX_EXCHANGEROUTER_ADDRESS_SEPOLIA,
+                constants::GMX_BASEROUTER_ADDRESS_SEPOLIA,
+                constants::GMX_DEPOSITVAULT_ADDRESS_SEPOLIA,
+                constants::GMX_WITHDRAWALVAULT_ADDRESS_SEPOLIA,
             ),
             "prod" => (
                 constants::GMX_DATASTORE_ADDRESS_MAINNET, 
                 constants::GMX_READER_ADDRESS_MAINNET,
                 constants::GMX_EVENTEMITTER_ADDRESS_MAINNET,
+                constants::GMX_EXCHANGEROUTER_ADDRESS_MAINNET,
+                constants::GMX_BASEROUTER_ADDRESS_MAINNET,
+                constants::GMX_DEPOSITVAULT_ADDRESS_MAINNET,
+                constants::GMX_WITHDRAWALVAULT_ADDRESS_MAINNET,
             ),
             _ => panic!("Invalid NETWORK_MODE"),
         };
@@ -96,6 +111,10 @@ impl Config {
             gmx_datastore: gmx_datastore.parse().expect("Invalid GMX DataStore address"),
             gmx_reader: gmx_reader.parse().expect("Invalid GMX Reader address"),
             gmx_eventemitter: gmx_eventemitter.parse().expect("Invalid GMX EventEmitter address"),
+            gmx_exchangerouter: gmx_exchangerouter.parse().expect("Invalid GMX ExchangeRouter address"),
+            gmx_baserouter: gmx_baserouter.parse().expect("Invalid GMX BaseRouter address"),
+            gmx_depositvault: gmx_depositvault.parse().expect("Invalid GMX DepositVault address"),
+            gmx_withdrawalvault: gmx_withdrawalvault.parse().expect("Invalid GMX WithdrawalVault address"),
             etherscan_api_key,
             refetch_abis,
             database_url,

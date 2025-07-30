@@ -260,3 +260,67 @@ fn get_open_interest_in_tokens_key(market: Address, collateral_token: Address, i
     ]);
     H256::from(keccak256(encoded))
 }
+
+pub async fn estimate_execute_gas_limit_per_swap(config: &Config) -> Result<U256> {
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("SINGLE_SWAP_GAS_LIMIT".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    get_uint(config, key).await
+}
+
+pub fn estimate_oracle_price_count(swaps_count: U256) -> U256 {
+    swaps_count + U256::from(3) 
+}
+
+pub async fn get_deposit_gas_limit(config: &Config) -> Result<U256> {
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("DEPOSIT_GAS_LIMIT".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    get_uint(config, key).await
+}
+
+pub async fn get_withdrawal_gas_limit(config: &Config) -> Result<U256> {
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("WITHDRAWAL_GAS_LIMIT".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    get_uint(config, key).await
+}
+
+pub async fn adjust_gas_limit_for_estimate(config: &Config, estimated_gas_limit: U256, oracle_price_count: U256) -> Result<U256> {
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("ESTIMATED_GAS_FEE_BASE_AMOUNT_V2_1".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    let mut base_gas_limit = get_uint(config, key).await?;
+
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("ESTIMATED_GAS_FEE_PER_ORACLE_PRICE".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    base_gas_limit += get_uint(config, key).await? * oracle_price_count;
+
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("ESTIMATED_GAS_FEE_MULTIPLIER_FACTOR".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    let multiplier_factor = get_uint(config, key).await?;
+
+    let gmx_precision = U256::from(10).pow(U256::from(GMX_DECIMALS));
+    let adjusted_estimated_gas = (estimated_gas_limit * multiplier_factor) / gmx_precision;
+    let gas_limit = adjusted_estimated_gas + base_gas_limit;
+    Ok(gas_limit)
+}
+
+pub async fn get_address(config: &Config, key: H256) -> Result<Address> {
+    let datastore = DataStore::new(config.gmx_datastore, config.alchemy_provider.clone());
+    let address: Address = datastore.get_address(key.into()).call().await?;
+    Ok(address)
+}
+
+/// Helper function to generate key for price feed
+fn get_price_feed_key(token: Address) -> H256 {
+    let price_feed_encoded = ethers::abi::encode(&[ethers::abi::Token::String("PRICE_FEED".to_string())]);
+    let price_feed_key = H256::from_slice(&keccak256(&price_feed_encoded));
+    let encoded = ethers::abi::encode(&[
+        ethers::abi::Token::FixedBytes(price_feed_key.as_bytes().to_vec()),
+        ethers::abi::Token::Address(token),
+    ]);
+    H256::from(keccak256(encoded))
+}
+
+pub async fn get_price_feed_for_token(config: &Config, token: Address) -> Result<Address> {
+    let key = get_price_feed_key(token);
+    let price_feed = get_address(config, key).await?;
+    Ok(price_feed)
+}

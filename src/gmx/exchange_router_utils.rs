@@ -33,4 +33,14 @@ pub struct CreateWithdrawalParams {
     pub callback_gas_limit: U256, // Gas limit for the callback contract execution
 }
 
-
+#[derive(Debug, Clone)]
+pub struct CreateShiftParams {
+    pub receiver: Address, // Address of the receiver of shift tokens (e.g. my wallet)
+    pub callback_contract: Address, // Address of the contract to call on shift execution/cancellation
+    pub ui_fee_receiver: Address, // Address to receive UI fees
+    pub from_market: Address, // Address of the market to shift from
+    pub to_market: Address, // Address of the market to shift to
+    pub min_market_tokens: U256, // Minimum amount of toMarket tokens to receive from the shift
+    pub execution_fee: U256, // Max amount of native token (ETH) to pay for shift fees
+    pub callback_gas_limit: U256, // Gas limit for the callback contract execution
+}

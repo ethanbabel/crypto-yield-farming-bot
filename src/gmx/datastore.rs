@@ -267,8 +267,16 @@ pub async fn estimate_execute_gas_limit_per_swap(config: &Config) -> Result<U256
     get_uint(config, key).await
 }
 
-pub fn estimate_oracle_price_count(swaps_count: U256) -> U256 {
+pub fn estimate_deposit_oracle_price_count(swaps_count: U256) -> U256 {
     swaps_count + U256::from(3) 
+}
+
+pub fn estimate_withdrawal_oracle_price_count(swaps_count: U256) -> U256 {
+    swaps_count + U256::from(3) 
+}
+
+pub fn estimate_shift_oracle_price_count(_swaps_count: U256) -> U256 {
+    U256::from(4)
 }
 
 pub async fn get_deposit_gas_limit(config: &Config) -> Result<U256> {
@@ -279,6 +287,12 @@ pub async fn get_deposit_gas_limit(config: &Config) -> Result<U256> {
 
 pub async fn get_withdrawal_gas_limit(config: &Config) -> Result<U256> {
     let encoded = ethers::abi::encode(&[ethers::abi::Token::String("WITHDRAWAL_GAS_LIMIT".to_string())]);
+    let key = H256::from_slice(&keccak256(&encoded));
+    get_uint(config, key).await
+}
+
+pub async fn get_shift_gas_limit(config: &Config) -> Result<U256> {
+    let encoded = ethers::abi::encode(&[ethers::abi::Token::String("SHIFT_GAS_LIMIT".to_string())]);
     let key = H256::from_slice(&keccak256(&encoded));
     get_uint(config, key).await
 }

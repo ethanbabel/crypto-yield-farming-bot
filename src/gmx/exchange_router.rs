@@ -174,6 +174,78 @@ pub async fn create_withdrawal(
     Ok(())
 }
 
+/// Create a shift in the GMX Exchange Router
+#[instrument(skip(config, wallet_manager, params, from_token_amount, gas_limit, gas_price))]
+pub async fn create_shift(
+    config: &Config, 
+    wallet_manager: &WalletManager,
+    params: exchange_router_utils::CreateShiftParams,
+    from_token_amount: U256,
+    gas_limit: U256,
+    gas_price: U256
+) -> Result<()> {
+    let exchange_router = ExchangeRouter::new(config.gmx_exchangerouter, wallet_manager.signer.clone());
+    let execution_fee = params.execution_fee;
+
+    // Verify funds for the shift
+    verify_funds_erc20(wallet_manager, params.from_market, from_token_amount).await?;
+    verify_funds_native(wallet_manager, execution_fee).await?;
+
+    // Approve token spending if needed
+    approve_token(wallet_manager, params.from_market, config.gmx_baserouter, from_token_amount).await?;
+
+    // Create token transfer call
+    let mut encoded_calls = Vec::new();
+    
+    if from_token_amount > U256::zero() {
+        let call = exchange_router.send_tokens(
+            params.from_market, config.gmx_shiftvault, from_token_amount
+        ).gas(gas_limit).gas_price(gas_price);
+        let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
+        encoded_calls.push(calldata);
+    }
+
+    if execution_fee > U256::zero() {
+        let call = exchange_router.send_wnt(
+            config.gmx_shiftvault, execution_fee
+        ).gas(gas_limit).gas_price(gas_price);
+        let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
+        encoded_calls.push(calldata);
+    }
+
+    // Create the shift call
+    let call = exchange_router.create_shift(params.into()).gas(gas_limit).gas_price(gas_price);
+    let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
+    encoded_calls.push(calldata);
+
+    // Create the multicall
+    let multicall = exchange_router.multicall(encoded_calls)
+        .from(wallet_manager.address)
+        .gas(gas_limit)
+        .gas_price(gas_price)
+        .value(execution_fee);
+    info!(multicall = ?multicall, "Creating shift transaction");
+
+    // Send the transaction
+    let pending_tx = multicall.send().await?;
+    let receipt = pending_tx.await?;
+
+    match receipt {
+        Some(receipt) => {
+            if receipt.status == Some(1.into()) {
+                info!(receipt = ?receipt, "Shift created successfully");
+            } else {
+                return Err(eyre::eyre!("Shift creation failed with status {:?}: {:?}", receipt.status, receipt));
+            }
+        },
+        None => {
+            return Err(eyre::eyre!("Shift creation transaction failed: no receipt returned"));
+        }
+    }
+    
+    Ok(())
+}
+
 //----------------------------------------------------------------------------------------------------------------------------------------
 
 /// Helper function to approve token spending
@@ -271,6 +343,21 @@ impl From<exchange_router_utils::CreateWithdrawalParams> for CreateWithdrawalPar
             min_long_token_amount: params.min_long_token_amount,
             min_short_token_amount: params.min_short_token_amount,
             should_unwrap_native_token: params.should_unwrap_native_token,
+            execution_fee: params.execution_fee,
+            callback_gas_limit: params.callback_gas_limit,
+        }
+    }
+}
+
+impl From<exchange_router_utils::CreateShiftParams> for CreateShiftParams {
+    fn from(params: exchange_router_utils::CreateShiftParams) -> Self {
+        CreateShiftParams {
+            receiver: params.receiver,
+            callback_contract: params.callback_contract,
+            ui_fee_receiver: params.ui_fee_receiver,
+            from_market: params.from_market,
+            to_market: params.to_market,
+            min_market_tokens: params.min_market_tokens,
             execution_fee: params.execution_fee,
             callback_gas_limit: params.callback_gas_limit,
         }

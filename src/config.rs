@@ -19,6 +19,7 @@ pub struct Config {
     pub gmx_baserouter: Address,
     pub gmx_depositvault: Address,
     pub gmx_withdrawalvault: Address,
+    pub gmx_shiftvault: Address, 
     pub etherscan_api_key: String,
     pub refetch_abis: bool,
     pub database_url: String,
@@ -67,17 +68,21 @@ impl Config {
         // Load GMX contract addresses based on network mode
         let (
             gmx_datastore, gmx_reader, gmx_eventemitter, gmx_exchangerouter, 
-            gmx_baserouter, gmx_depositvault, gmx_withdrawalvault
+            gmx_baserouter, gmx_depositvault, gmx_withdrawalvault, gmx_shiftvault
         ) = match network_mode.as_str() {
-            "test" => (
-                constants::GMX_DATASTORE_ADDRESS_SEPOLIA, 
-                constants::GMX_READER_ADDRESS_SEPOLIA,
-                constants::GMX_EVENTEMITTER_ADDRESS_SEPOLIA,
-                constants::GMX_EXCHANGEROUTER_ADDRESS_SEPOLIA,
-                constants::GMX_BASEROUTER_ADDRESS_SEPOLIA,
-                constants::GMX_DEPOSITVAULT_ADDRESS_SEPOLIA,
-                constants::GMX_WITHDRAWALVAULT_ADDRESS_SEPOLIA,
-            ),
+            "test" => {
+                
+                (   
+                    constants::GMX_DATASTORE_ADDRESS_SEPOLIA, 
+                    constants::GMX_READER_ADDRESS_SEPOLIA,
+                    constants::GMX_EVENTEMITTER_ADDRESS_SEPOLIA,
+                    constants::GMX_EXCHANGEROUTER_ADDRESS_SEPOLIA,
+                    constants::GMX_BASEROUTER_ADDRESS_SEPOLIA,
+                    constants::GMX_DEPOSITVAULT_ADDRESS_SEPOLIA,
+                    constants::GMX_WITHDRAWALVAULT_ADDRESS_SEPOLIA,
+                    constants::GMX_SHIFTVAULT_ADDRESS_SEPOLIA,
+                ) // No shift vault on Sepolia, using same address as mainnet for placeholder
+        },
             "prod" => (
                 constants::GMX_DATASTORE_ADDRESS_MAINNET, 
                 constants::GMX_READER_ADDRESS_MAINNET,
@@ -86,6 +91,7 @@ impl Config {
                 constants::GMX_BASEROUTER_ADDRESS_MAINNET,
                 constants::GMX_DEPOSITVAULT_ADDRESS_MAINNET,
                 constants::GMX_WITHDRAWALVAULT_ADDRESS_MAINNET,
+                constants::GMX_SHIFTVAULT_ADDRESS_MAINNET, 
             ),
             _ => panic!("Invalid NETWORK_MODE"),
         };
@@ -115,6 +121,7 @@ impl Config {
             gmx_baserouter: gmx_baserouter.parse().expect("Invalid GMX BaseRouter address"),
             gmx_depositvault: gmx_depositvault.parse().expect("Invalid GMX DepositVault address"),
             gmx_withdrawalvault: gmx_withdrawalvault.parse().expect("Invalid GMX WithdrawalVault address"),
+            gmx_shiftvault: gmx_shiftvault.parse().expect("Invalid GMX ShiftVault address"),
             etherscan_api_key,
             refetch_abis,
             database_url,

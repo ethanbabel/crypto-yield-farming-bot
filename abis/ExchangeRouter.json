@@ -233,5 +233,66 @@
         ],
         "stateMutability": "payable",
         "type": "function"
+    },
+    {
+        "name": "createShift",
+        "inputs": [
+            {
+                "components": [
+                    {
+                        "internalType": "address",
+                        "name": "receiver",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "callbackContract",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "uiFeeReceiver",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "fromMarket",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "address",
+                        "name": "toMarket",
+                        "type": "address"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "minMarketTokens",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "executionFee",
+                        "type": "uint256"
+                    },
+                    {
+                        "internalType": "uint256",
+                        "name": "callbackGasLimit",
+                        "type": "uint256"
+                    }
+                ],
+                "internalType": "struct ShiftUtils.CreateShiftParams",
+                "name": "params",
+                "type": "tuple"
+            }
+        ],
+        "outputs": [
+            {
+                "internalType": "bytes32",
+                "name": "",
+                "type": "bytes32"
+            }
+        ],
+        "stateMutability": "payable",
+        "type": "function"
     }
 ]

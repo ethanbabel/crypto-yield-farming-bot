@@ -160,14 +160,14 @@ impl SwapManager {
         let from_token = if swap_request.from_token_address == self.wallet_manager.native_token.address {
             &self.wallet_manager.native_token
         } else {
-            self.wallet_manager.tokens.get(&swap_request.from_token_address).ok_or_else(|| {
+            self.wallet_manager.all_tokens.get(&swap_request.from_token_address).ok_or_else(|| {
                 eyre::eyre!("From token not found in wallet manager: {:?}", swap_request.from_token_address)
             })?
         };
         let to_token = if swap_request.to_token_address == self.wallet_manager.native_token.address {
             &self.wallet_manager.native_token
         } else {
-            self.wallet_manager.tokens.get(&swap_request.to_token_address).ok_or_else(|| {
+            self.wallet_manager.all_tokens.get(&swap_request.to_token_address).ok_or_else(|| {
                 eyre::eyre!("To token not found in wallet manager: {:?}", swap_request.to_token_address)
             })?
         };

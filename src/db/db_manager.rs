@@ -544,8 +544,8 @@ impl DbManager {
 
     /// Fetch all market tokens
     #[instrument(skip(self))]
-    pub async fn get_all_market_tokens(&self) -> Result<Vec<(Address, String, Decimal)>, sqlx::Error> {
-        let market_tokens: Vec<(Address, String, Decimal)> = market_states_queries::get_all_market_tokens(&self.pool)
+    pub async fn get_all_market_tokens(&self) -> Result<Vec<(Address, String, Decimal, Address, Address, Address)>, sqlx::Error> {
+        let market_tokens: Vec<(Address, String, Decimal, Address, Address, Address)> = market_states_queries::get_all_market_tokens(&self.pool)
             .await?
             .into_iter()
             .map(|row| {
@@ -553,6 +553,9 @@ impl DbManager {
                     Address::from_str(&row.0).unwrap_or_default(),
                     row.1,
                     row.2,
+                    Address::from_str(&row.3).unwrap_or_default(),
+                    Address::from_str(&row.4).unwrap_or_default(),
+                    Address::from_str(&row.5).unwrap_or_default(),
                 )
             })
             .collect();

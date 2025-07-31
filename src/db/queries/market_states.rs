@@ -254,7 +254,7 @@ pub async fn get_latest_market_states_for_all_markets(pool: &PgPool) -> Result<V
 }
 
 /// Fetch all market tokens
-pub async fn get_all_market_tokens(pool: &PgPool) -> Result<Vec<(String, String, Decimal)>, sqlx::Error> {
+pub async fn get_all_market_tokens(pool: &PgPool) -> Result<Vec<(String, String, Decimal, String, String, String)>, sqlx::Error> {
     let rows = sqlx::query!(
         r#"
         SELECT DISTINCT ON (ms.market_id)
@@ -262,7 +262,10 @@ pub async fn get_all_market_tokens(pool: &PgPool) -> Result<Vec<(String, String,
             it.symbol AS index_token_symbol,
             lt.symbol AS long_token_symbol,
             st.symbol AS short_token_symbol,
-            ms.gm_price_mid AS last_mid_price_usd
+            ms.gm_price_mid AS last_mid_price_usd,
+            it.address AS index_token_address,
+            lt.address AS long_token_address,
+            st.address AS short_token_address
         FROM market_states ms
         JOIN markets m ON ms.market_id = m.id
         JOIN tokens it ON m.index_token_id = it.id
@@ -281,6 +284,9 @@ pub async fn get_all_market_tokens(pool: &PgPool) -> Result<Vec<(String, String,
                     row.market_address,
                     format!("GM_{}/USD_[{}-{}]", row.index_token_symbol, row.long_token_symbol, row.short_token_symbol),
                     last_mid_price_usd,
+                    row.index_token_address,
+                    row.long_token_address,
+                    row.short_token_address,
                 ))
             } else {
                 None

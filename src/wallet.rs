@@ -17,6 +17,7 @@ abigen!(
     ]"#
 );
 
+#[derive(Debug, Clone)]
 pub struct TokenInfo {
     pub address: Address,
     pub symbol: String,
@@ -24,11 +25,24 @@ pub struct TokenInfo {
     pub last_mid_price_usd: Decimal,
 }
 
+#[derive(Debug, Clone)]
+pub struct MarketTokenInfo {
+    pub address: Address,
+    pub symbol: String,
+    pub decimals: u8,
+    pub last_mid_price_usd: Decimal,
+    pub index_token_address: Address,
+    pub long_token_address: Address,
+    pub short_token_address: Address,
+}
+
 pub struct WalletManager {
     pub signer: Arc<SignerMiddleware<Arc<Provider<Http>>, Wallet<k256::ecdsa::SigningKey>>>,
     pub address: Address,
     pub native_token: TokenInfo,
-    pub tokens: HashMap<Address, TokenInfo>,
+    pub all_tokens: HashMap<Address, TokenInfo>,
+    pub asset_tokens: HashMap<Address, TokenInfo>,
+    pub market_tokens: HashMap<Address, MarketTokenInfo>,
 }
 
 impl WalletManager {
@@ -43,7 +57,9 @@ impl WalletManager {
                 decimals: 18,
                 last_mid_price_usd: Decimal::ZERO,
             },
-            tokens: HashMap::new(),
+            all_tokens: HashMap::new(),
+            asset_tokens: HashMap::new(),
+            market_tokens: HashMap::new(),
         })
     }
 
@@ -85,7 +101,8 @@ impl WalletManager {
             if token_info.address == Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap() { // WETH
                 self.native_token.last_mid_price_usd = token_info.last_mid_price_usd;
             }
-            self.tokens.insert(token_info.address, token_info);
+            self.all_tokens.insert(token_info.address, token_info.clone());
+            self.asset_tokens.insert(token_info.address, token_info);
         }
         Ok(())
     }
@@ -97,11 +114,21 @@ impl WalletManager {
         for token in market_tokens {
             let token_info = TokenInfo {
                 address: token.0,
-                symbol: token.1,
+                symbol: token.1.clone(),
                 decimals: 18, // Market tokens are always 18 decimals
                 last_mid_price_usd: token.2,
             };
-            self.tokens.insert(token_info.address, token_info);
+            self.all_tokens.insert(token_info.address, token_info);
+            let market_token_info = MarketTokenInfo {
+                address: token.0,
+                symbol: token.1,
+                decimals: 18, // Market tokens are always 18 decimals
+                last_mid_price_usd: token.2,
+                index_token_address: token.3,
+                long_token_address: token.4,
+                short_token_address: token.5,
+            };
+            self.market_tokens.insert(market_token_info.address, market_token_info);
         }
         Ok(())
     }
@@ -132,7 +159,11 @@ impl WalletManager {
     /// Get ERC20 token balance as U256
     #[instrument(skip(self, token_address))]
     pub async fn get_token_balance_u256(&self, token_address: Address) -> Result<U256> {
-        let token_info = self.tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
+        if token_address == self.native_token.address {
+            return self.get_native_balance_u256().await;
+        }
+
+        let token_info = self.all_tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
 
         // Create ERC20 contract instance
         let contract = IERC20::new(token_address, self.signer.clone());
@@ -153,7 +184,10 @@ impl WalletManager {
     /// Get ERC20 token balance for a specific token as Decimal
     #[instrument(skip(self, token_address))]
     pub async fn get_token_balance(&self, token_address: Address) -> Result<Decimal> {
-        let token_info = self.tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
+        if token_address == self.native_token.address {
+            return self.get_native_balance().await;
+        }
+        let token_info = self.all_tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
 
         // Create ERC20 contract instance
         let contract = IERC20::new(token_address, self.signer.clone());
@@ -172,10 +206,12 @@ impl WalletManager {
         Ok(balance)
     }
 
-    async fn get_nonnative_token_balances_multicall(&self) -> Result<HashMap<Address, Decimal>> {
+    /// Get all token balances
+    #[instrument(skip(self))]
+    pub async fn get_all_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
         debug!("Fetching all token balances using multicall");
         let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
-        for token in self.tokens.values() {
+        for token in self.all_tokens.values() {
             let contract = IERC20::new(token.address, self.signer.provider().clone().into());
             let call = contract.balance_of(self.address);
             multicall.add_call(call, false);
@@ -186,7 +222,7 @@ impl WalletManager {
 
         // Parse results into a map
         let mut balances = HashMap::new();
-        for (i, token) in self.tokens.values().enumerate() {
+        for (i, token) in self.all_tokens.values().enumerate() {
             let balance = Self::u256_to_decimal(results[i], token.decimals);
             balances.insert(token.address, balance);
         }
@@ -194,48 +230,124 @@ impl WalletManager {
         Ok(balances)
     }
 
-    /// Get all token balances
+    /// Get all asset token balances
     #[instrument(skip(self))]
-    pub async fn get_all_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
-        self.get_nonnative_token_balances_multicall().await
+    pub async fn get_asset_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
+        debug!("Fetching all asset token balances");
+        let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
+        for asset_token in self.asset_tokens.values() {
+            let contract = IERC20::new(asset_token.address, self.signer.provider().clone().into());
+            let call = contract.balance_of(self.address);
+            multicall.add_call(call, false);
+        }
+
+        // Execute multicall
+        let results: Vec<U256> = multicall.call_array().await?;
+
+        // Parse results into a map
+        let mut balances = HashMap::new();
+        for (i, asset_token) in self.asset_tokens.values().enumerate() {
+            let balance = Self::u256_to_decimal(results[i], asset_token.decimals);
+            balances.insert(asset_token.address, balance);
+        }
+
+        Ok(balances)
+    }
+
+    /// Get all market token balances
+    #[instrument(skip(self))]
+    pub async fn get_market_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
+        debug!("Fetching all market token balances");
+        let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
+        for market_token in self.market_tokens.values() {
+            let contract = IERC20::new(market_token.address, self.signer.provider().clone().into());
+            let call = contract.balance_of(self.address);
+            multicall.add_call(call, false);
+        }
+
+        // Execute multicall
+        let results: Vec<U256> = multicall.call_array().await?;
+
+        // Parse results into a map
+        let mut balances = HashMap::new();
+        for (i, market_token) in self.market_tokens.values().enumerate() {
+            let balance = Self::u256_to_decimal(results[i], market_token.decimals);
+            balances.insert(market_token.address, balance);
+        }
+
+        Ok(balances)
     }
 
     /// Print comprehensive wallet balances including native, all ERC20 tokens, and all market tokens
     #[instrument(skip(self, include_zero_balances))]
     pub async fn log_all_balances(&self, include_zero_balances: bool) -> Result<()> {
-        let native_balance = self.get_native_balance().await?;
-        let token_balances = self.get_all_token_balances().await?;
-        let mut all_tokens: Vec<&TokenInfo> = vec![&self.native_token];
-        all_tokens.extend(self.tokens.values());
-        
-        let balance_entries: Vec<String> = all_tokens.iter().filter_map(|token| {
-            let bal = if token_balances.contains_key(&token.address) {
-                token_balances.get(&token.address).unwrap_or(&Decimal::ZERO)
-            } else if token.address == self.native_token.address {
-                &native_balance
-            } else {
-                &Decimal::ZERO
-            };
-            if !include_zero_balances && *bal == Decimal::ZERO {
-                return None;
-            }
-            Some(
-                format!(
-                    "{} ({:?}): {} ({} USD)", 
-                    token.symbol, 
-                    token.address, 
-                    bal, 
-                    bal * token.last_mid_price_usd, 
-                )
-            )
-        }).collect();
-        
-        let output = if balance_entries.is_empty() {
+        // Get balance strings
+        let native_balance_string = self.get_native_balance_string().await?;
+        let asset_balance_strings = self.get_asset_token_balance_strings(include_zero_balances).await?;
+        let market_balance_strings = self.get_market_token_balance_strings(include_zero_balances).await?;
+
+        // Combine all balance strings
+        let mut balance_strings = vec![native_balance_string];
+        balance_strings.push("".to_string());
+        balance_strings.extend(asset_balance_strings);
+        balance_strings.push("".to_string());
+        balance_strings.extend(market_balance_strings);
+
+        let output = if balance_strings.is_empty() {
             "N/A".to_string()
         } else {
-            balance_entries.join("\n")
+            balance_strings.join("\n")
         };
+
         info!("All token balances: \n{}", output);
+        Ok(())
+    }
+
+    // Log native token balance only
+    #[instrument(skip(self))]
+    pub async fn log_native_balance(&self) -> Result<()> {
+        let balance_string = self.get_native_balance_string().await?;
+        info!("Native token balance: \n{}", balance_string);
+        Ok(())
+    }
+
+    /// Log single token balance only
+    #[instrument(skip(self, token_address))]
+    pub async fn log_token_balance(&self, token_address: Address) -> Result<()> {
+        if token_address == self.native_token.address {
+            return self.log_native_balance().await;
+        }
+        let balance_string = self.get_token_balance_string(token_address).await?;
+        let token_info = self.all_tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
+        info!("{} token balance: \n{}", token_info.symbol, balance_string);
+        Ok(())
+    }
+
+    /// Log all asset token balances
+    #[instrument(skip(self, include_zero_balances))]
+    pub async fn log_asset_token_balances(&self, include_zero_balances: bool) -> Result<()> {
+        let balance_strings = self.get_asset_token_balance_strings(include_zero_balances).await?;
+        let output = if balance_strings.is_empty() {
+            "N/A".to_string()
+        } else {
+            balance_strings.join("\n")
+        };
+
+        info!("Asset token balances: \n{}", output);
+        Ok(())
+    }
+
+    /// Log all market token balances
+    #[instrument(skip(self, include_zero_balances))]
+    pub async fn log_market_token_balances(&self, include_zero_balances: bool) -> Result<()> {
+        let balance_strings = self.get_market_token_balance_strings(include_zero_balances).await?;
+        let output = if balance_strings.is_empty() {
+            "N/A".to_string()
+        } else {
+            balance_strings.join("\n")
+        };
+
+        info!("Market token balances: \n{}", output);
         Ok(())
     }
 
@@ -247,5 +359,75 @@ impl WalletManager {
             "0".to_string()
         });
         Decimal::from_str(&formatted).unwrap_or(Decimal::ZERO)
+    }
+
+    /// Get native token balance string
+    #[instrument(skip(self))]
+    async fn get_native_balance_string(&self) -> Result<String> {
+        let balance = self.get_native_balance().await?;
+        Ok(format!(
+            "{} ({:?}): {} ({} USD)",
+            self.native_token.symbol,
+            self.native_token.address,
+            balance,
+            balance * self.native_token.last_mid_price_usd
+        ))
+    }
+
+    /// Get single token balance string
+    #[instrument(skip(self, token_address))]
+    async fn get_token_balance_string(&self, token_address: Address) -> Result<String> {
+        if token_address == self.native_token.address {
+            return self.get_native_balance_string().await;
+        }
+        let balance = self.get_token_balance(token_address).await?;
+        let token_info = self.all_tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
+        Ok(format!(
+            "{} ({:?}): {} ({} USD)",
+            token_info.symbol,
+            token_info.address,
+            balance,
+            balance * token_info.last_mid_price_usd
+        ))
+    }
+
+    /// Get asset token balance strings in a vector
+    #[instrument(skip(self, include_zero_balances))]
+    async fn get_asset_token_balance_strings(&self, include_zero_balances: bool) -> Result<Vec<String>> {
+        let balances = self.get_asset_token_balances().await?;
+        let balance_strings = self.asset_tokens.values().filter_map(|token| {
+            let balance = balances.get(&token.address).unwrap_or(&Decimal::ZERO);
+            if !include_zero_balances && *balance == Decimal::ZERO {
+                return None;
+            }
+            Some(format!(
+                "{} ({:?}): {} ({} USD)",
+                token.symbol,
+                token.address,
+                balance,
+                balance * token.last_mid_price_usd
+            ))
+        }).collect::<Vec<_>>();
+        Ok(balance_strings)
+    }
+
+    /// Get market token balance strings in a vector
+    #[instrument(skip(self, include_zero_balances))]
+    async fn get_market_token_balance_strings(&self, include_zero_balances: bool) -> Result<Vec<String>> {
+        let balances = self.get_market_token_balances().await?;
+        let balance_strings = self.market_tokens.values().filter_map(|token| {
+            let balance = balances.get(&token.address).unwrap_or(&Decimal::ZERO);
+            if !include_zero_balances && *balance == Decimal::ZERO {
+                return None;
+            }
+            Some(format!(
+                "{} ({:?}): {} ({} USD)",
+                token.symbol,
+                token.address,
+                balance,
+                balance * token.last_mid_price_usd
+            ))
+        }).collect::<Vec<_>>();
+        Ok(balance_strings)
     }
 }

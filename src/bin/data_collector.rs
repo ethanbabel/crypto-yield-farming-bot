@@ -98,7 +98,13 @@ async fn main() -> eyre::Result<()> {
             
             // Prepare and serialize new tokens using db_manager
             if !new_tokens.is_empty() {
-                let new_token_models = db.prepare_new_tokens(&new_tokens).await?;
+                let new_token_models = match db.prepare_new_tokens(&new_tokens).await {
+                    Ok(models) => models,
+                    Err(e) => {
+                        error!(?e, "Failed to prepare new token models");
+                        return Err(e.into());
+                    }
+                };
                 for token_model in &new_token_models {
                     if let Ok(serialized) = serde_json::to_string(token_model) {
                         let _: () = redis_connection.xadd("new_tokens", "*", &[("data", serialized)]).await?;
@@ -126,7 +132,13 @@ async fn main() -> eyre::Result<()> {
                 }
                 
                 if !new_markets.is_empty() {
-                    let (new_market_models, new_failed_markets) = db.prepare_new_markets(&new_markets).await?;
+                    let (new_market_models, new_failed_markets) = match db.prepare_new_markets(&new_markets).await {
+                        Ok(result) => result,
+                        Err(e) => {
+                            error!(?e, "Failed to prepare new market models");
+                            return Err(e.into());
+                        }
+                    };
                     for market_model in &new_market_models {
                         if let Ok(serialized) = serde_json::to_string(market_model) {
                             let _: () = redis_connection.xadd("new_markets", "*", &[("data", serialized)]).await?;
@@ -171,7 +183,13 @@ async fn main() -> eyre::Result<()> {
         }
 
         // Get token_price models (new)
-        let (mut token_prices, new_failed_token_prices) = db.prepare_token_prices(token_registry.asset_tokens()).await?;
+        let (mut token_prices, new_failed_token_prices) = match db.prepare_token_prices(token_registry.asset_tokens()).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!(?e, "Failed to prepare token price models");
+                return Err(e.into());
+            }
+        };
         info!(
             new_token_prices_count = token_prices.len(),
             new_failed_token_prices_count = new_failed_token_prices.len(),
@@ -180,7 +198,13 @@ async fn main() -> eyre::Result<()> {
         );
 
         // Get market_state models (new)
-        let (mut market_states, new_failed_market_states) = db.prepare_market_states(market_registry.relevant_markets()).await?;
+        let (mut market_states, new_failed_market_states) = match db.prepare_market_states(market_registry.relevant_markets()).await {
+            Ok(result) => result,
+            Err(e) => {
+                error!(?e, "Failed to prepare market state models");
+                return Err(e.into());
+            }
+        };
         info!(
             new_market_states_count = market_states.len(),
             new_failed_market_states_count = new_failed_market_states.len(),
@@ -193,7 +217,13 @@ async fn main() -> eyre::Result<()> {
             let token_prices_to_retry: Vec<_> = token_prices_retry_bank.values()
                 .flat_map(|(token_vec, _)| token_vec.iter().map(|t| Arc::new(RwLock::new(t.clone()))))
                 .collect();
-            let (retry_token_prices, retry_failed_token_prices) = db.prepare_token_prices(token_prices_to_retry).await?;
+            let (retry_token_prices, retry_failed_token_prices) = match db.prepare_token_prices(token_prices_to_retry).await {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(?e, "Failed to prepare token price models for retry");
+                    return Err(e.into());
+                }
+            };
             info!(
                 retry_succeeded_token_prices_count = retry_token_prices.len(),
                 retry_failed_token_prices_count = retry_failed_token_prices.len(),
@@ -232,7 +262,13 @@ async fn main() -> eyre::Result<()> {
             let market_states_to_retry: Vec<_> = market_states_retry_bank.values()
                 .flat_map(|(market_vec, _)| market_vec.iter())
                 .collect();
-            let (retry_market_states, retry_failed_market_states) = db.prepare_market_states(market_states_to_retry).await?;
+            let (retry_market_states, retry_failed_market_states) = match db.prepare_market_states(market_states_to_retry).await {
+                Ok(result) => result,
+                Err(e) => {
+                    error!(?e, "Failed to prepare market state models for retry");
+                    return Err(e.into());
+                }
+            };
             info!(
                 retry_succeeded_market_states_count = retry_market_states.len(),
                 retry_failed_market_states_count = retry_failed_market_states.len(),

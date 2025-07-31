@@ -12,7 +12,7 @@ use rust_decimal::prelude::*;
 use crate::config::Config;
 use crate::wallet::WalletManager;
 use crate::constants::WNT_ADDRESS;
-use super::paraswap_types::{SwapRequest, QuoteRequest, QuoteResponse};
+use super::types::{SwapRequest, QuoteRequest, QuoteResponse};
 use super::paraswap_api_client::ParaSwapClient;
 
 // Add ERC20 ABI for approve function

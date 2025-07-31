@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use eyre::Result;
 
-use super::paraswap_types::{QuoteRequest, QuoteResponse, ParaSwapQuoteResponse};
+use super::types::{QuoteRequest, QuoteResponse, ParaSwapQuoteResponse};
 use crate::config::Config;
 
 const PARASWAP_BASE_URL: &str = "https://api.paraswap.io";

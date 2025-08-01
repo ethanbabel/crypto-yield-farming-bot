@@ -491,6 +491,7 @@ impl SwapManager {
             gas_used = ?gas_used,
             gas_price = ?gas_price,
             gas_cost = ?gas_used * gas_price,
+            gas_cost_usd = ?gas_used * gas_price * self.wallet_manager.native_token.last_mid_price_usd,
             "{} ETH/WETH Operation Executed Successfully",
             swap_log_string,
         );
@@ -498,12 +499,18 @@ impl SwapManager {
         // Get final balances
         let final_native_balance = self.wallet_manager.get_native_balance().await?;
         let final_weth_balance = self.wallet_manager.get_token_balance(weth_address).await?;
+        let native_delta = final_native_balance - initial_native_balance;
+        let weth_delta = final_weth_balance - initial_weth_balance;
 
         info!(
             final_eth_balance = %final_native_balance,
             final_weth_balance = %final_weth_balance,
-            "{} ETH/WETH Operation Completed",
-            swap_log_string
+            "{} ETH/WETH Operation Completed \n {}{} ETH ({:.4} USD) | {}{} WETH ({:.2} USD)",
+            swap_log_string,
+            if is_wrap { "" } else { "+" }, native_delta,
+            native_delta * self.wallet_manager.native_token.last_mid_price_usd,
+            if is_wrap { "+" } else { "" }, weth_delta,
+            weth_delta * self.wallet_manager.all_tokens.get(&weth_address).unwrap().last_mid_price_usd
         );
 
         Ok(())

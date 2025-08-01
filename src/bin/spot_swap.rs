@@ -49,9 +49,9 @@ async fn main() -> Result<()> {
     // Example usage of Spot Swap Manager Swap
     let swap_request = SwapRequest {
         from_token_address: Address::from_str("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1").unwrap(), // WETH
-        to_token_address: Address::from_str("0xaf88d065e77c8cC2239327C5EDb3A432268e5831").unwrap(), // USDC
-        amount: Decimal::from_f64(1.5).unwrap(), // 1.5 USDC
-        side: "BUY".to_string(), // Buying USDC with WETH
+        to_token_address: Address::from_str(crypto_yield_farming_bot::constants::NATIVE_ADDRESS).unwrap(), // NATIVE ETH
+        amount: Decimal::from_f64(0.0001).unwrap(), // SELL 0001 WETH
+        side: "SELL".to_string(), // Selling WETH for NATIVE ETH
     };
     info!("Executing swap request: {:?}", swap_request);
     if let Err(e) = swap_manager.execute_swap(&swap_request).await {

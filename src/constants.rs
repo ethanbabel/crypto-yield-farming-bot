@@ -30,3 +30,6 @@ pub const GMX_DECIMALS: u8 = 30; // GMX prices are returned with 30 decimals
 
 // WNT (Wrapped Native Token) Address
 pub const WNT_ADDRESS: &str = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"; // WETH on Arbitrum
+
+// Native Token Address
+pub const NATIVE_ADDRESS: &str = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"; // ETH on Arbitrum

@@ -8,6 +8,7 @@ use tracing::{debug, info, warn, instrument};
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::wallet::WalletManager;
@@ -37,13 +38,13 @@ const MAX_FEE_PER_GAS_BUFFER: f64 = 1.1; // 10% above the current gas price
 
 pub struct SwapManager {
     paraswap_client: ParaSwapClient,
-    wallet_manager: WalletManager,
+    wallet_manager: Arc<WalletManager>,
     chain_id: u64,
     max_fee_per_gas_buffer: Decimal,
 }
 
 impl SwapManager {
-    pub fn new(wallet_manager: WalletManager, config: &Config) -> Self {
+    pub fn new(config: &Config, wallet_manager: Arc<WalletManager>) -> Self {
         let paraswap_client = ParaSwapClient::new(wallet_manager.address.clone(), config);
         let chain_id = config.chain_id;
         let max_fee_per_gas_buffer = Decimal::from_f64(MAX_FEE_PER_GAS_BUFFER).unwrap();
@@ -123,6 +124,7 @@ impl SwapManager {
             gas_used = ?gas_used,
             gas_price = ?gas_price,
             gas_cost = ?gas_used * gas_price,
+            gas_cost_usd = ?gas_used * gas_price * self.wallet_manager.native_token.last_mid_price_usd,
             "{} Swap Executed Successfully",
             swap_log_string,
         );
@@ -140,12 +142,24 @@ impl SwapManager {
             self.wallet_manager.get_token_balance(quote.to_token).await?
         };
 
+        let from_token_delta = final_from_balance - initial_from_balance;
+        let to_token_delta = final_to_balance - initial_to_balance;
+        let native_token_delta = final_native_balance - initial_native_balance;
+        let from_token_info = self.wallet_manager.all_tokens.get(&quote.from_token).unwrap();
+        let to_token_info = self.wallet_manager.all_tokens.get(&quote.to_token).unwrap();
+
         info!(
             final_from_balance = %final_from_balance,
             final_to_balance = %final_to_balance,
             final_native_balance = %final_native_balance,
-            "{} Swap Completed",
-            swap_log_string
+            "{} Swap Completed \n {}{} {} ({:.2} USD) | {}{} {} ({:.2} USD) | {}{} NATIVE ({:.4} USD)",
+            swap_log_string,
+            if from_token_delta.is_sign_positive() { "+" } else { "" }, from_token_delta,
+            from_token_info.symbol, from_token_delta * from_token_info.last_mid_price_usd,
+            if to_token_delta.is_sign_positive() { "+" } else { "" }, to_token_delta,
+            to_token_info.symbol, to_token_delta * to_token_info.last_mid_price_usd,
+            if native_token_delta.is_sign_positive() { "+" } else { "" }, native_token_delta,
+            native_token_delta * self.wallet_manager.native_token.last_mid_price_usd
         );
 
         Ok(())
@@ -153,7 +167,7 @@ impl SwapManager {
 
     /// Validate swap request, create log string and quote request
     #[instrument(skip(self, swap_request))]
-    pub async fn validate_swap_request(&self, swap_request: &SwapRequest) -> Result<(String, QuoteRequest)> {
+    async fn validate_swap_request(&self, swap_request: &SwapRequest) -> Result<(String, QuoteRequest)> {
         if swap_request.side != "BUY" && swap_request.side != "SELL" {
             return Err(eyre::eyre!("Invalid swap side: {}", swap_request.side));
         }

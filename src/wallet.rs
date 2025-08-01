@@ -366,7 +366,7 @@ impl WalletManager {
     async fn get_native_balance_string(&self) -> Result<String> {
         let balance = self.get_native_balance().await?;
         Ok(format!(
-            "{} ({:?}): {} ({} USD)",
+            "{} ({:?}): {} ({:.2} USD)",
             self.native_token.symbol,
             self.native_token.address,
             balance,
@@ -383,7 +383,7 @@ impl WalletManager {
         let balance = self.get_token_balance(token_address).await?;
         let token_info = self.all_tokens.get(&token_address).ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))?;
         Ok(format!(
-            "{} ({:?}): {} ({} USD)",
+            "{} ({:?}): {} ({:.2} USD)",
             token_info.symbol,
             token_info.address,
             balance,
@@ -401,7 +401,7 @@ impl WalletManager {
                 return None;
             }
             Some(format!(
-                "{} ({:?}): {} ({} USD)",
+                "{} ({:?}): {} ({:.2} USD)",
                 token.symbol,
                 token.address,
                 balance,
@@ -421,7 +421,7 @@ impl WalletManager {
                 return None;
             }
             Some(format!(
-                "{} ({:?}): {} ({} USD)",
+                "{} ({:?}): {} ({:.2} USD)",
                 token.symbol,
                 token.address,
                 balance,

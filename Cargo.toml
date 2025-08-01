@@ -24,6 +24,10 @@ path = "src/bin/main.rs"
 name = "see_balances"
 path = "src/bin/see_balances.rs"
 
+[[bin]]         # Utility for spot swaps
+name = "spot_swap"
+path = "src/bin/spot_swap.rs"
+
 [dependencies]
 dotenvy = "0.15"    # Load environment variables from .env file
 ethers = { version = "2", features = ["ws", "rustls"] } # Ethereum with WebSocket support

@@ -1,4 +1,4 @@
-use tracing::{debug, info, instrument};
+use tracing::{debug, instrument};
 use eyre::Result;
 use ethers::prelude::*;
 
@@ -29,14 +29,9 @@ pub async fn create_deposit(
     initial_short_amount: U256,
     gas_limit: U256,
     gas_price: U256
-) -> Result<()> {
+) -> Result<(TxHash, TransactionReceipt)> {
     let exchange_router = ExchangeRouter::new(config.gmx_exchangerouter, wallet_manager.signer.clone());
     let execution_fee = params.execution_fee;
-
-    // Verify funds for the deposit
-    verify_funds_erc20(wallet_manager, params.initial_long_token, initial_long_amount).await?;
-    verify_funds_erc20(wallet_manager, params.initial_short_token, initial_short_amount).await?;
-    verify_funds_native(wallet_manager, execution_fee).await?;
 
     // Approve token spending if needed
     approve_token(wallet_manager, params.initial_long_token, config.gmx_baserouter, initial_long_amount).await?;
@@ -80,16 +75,17 @@ pub async fn create_deposit(
         .gas(gas_limit)
         .gas_price(gas_price)
         .value(execution_fee);
-    info!(multicall = ?multicall, "Creating deposit transaction");
+    debug!(multicall = ?multicall, "Creating deposit transaction");
     
     // Send the transaction
     let pending_tx = multicall.send().await?;
-    let receipt = pending_tx.await?;
+    let tx_hash = pending_tx.tx_hash();
+    debug!(tx_hash = ?tx_hash, "Deposit transaction sent, waiting for confirmation");
 
-    match receipt {
+    let receipt = match pending_tx.await? {
         Some(receipt) => {
             if receipt.status == Some(1.into()) {
-                info!(receipt = ?receipt, "Deposit created successfully");
+                receipt
             } else {
                 return Err(eyre::eyre!("Deposit creation failed with status {:?}: {:?}", receipt.status, receipt));
             }
@@ -97,9 +93,9 @@ pub async fn create_deposit(
         None => {
             return Err(eyre::eyre!("Deposit creation transaction failed: no receipt returned"));
         }
-    }
+    };
 
-    Ok(())
+    Ok((tx_hash, receipt))
 }
 
 /// Create a withdrawal in the GMX Exchange Router
@@ -111,13 +107,9 @@ pub async fn create_withdrawal(
     market_token_amount: U256,
     gas_limit: U256,
     gas_price: U256
-) -> Result<()> {
+) -> Result<(TxHash, TransactionReceipt)> {
     let exchange_router = ExchangeRouter::new(config.gmx_exchangerouter, wallet_manager.signer.clone());
     let execution_fee = params.execution_fee;
-
-    // Verify funds for the withdrawal
-    verify_funds_erc20(wallet_manager, params.market, market_token_amount).await?;
-    verify_funds_native(wallet_manager, execution_fee).await?;
     
     // Approve token spending if needed
     approve_token(wallet_manager, params.market, config.gmx_baserouter, market_token_amount).await?;
@@ -152,16 +144,17 @@ pub async fn create_withdrawal(
         .gas(gas_limit)
         .gas_price(gas_price)
         .value(execution_fee);
-    info!(multicall = ?multicall, "Creating withdrawal transaction");
+    debug!(multicall = ?multicall, "Creating withdrawal transaction");
 
     // Send the transaction
     let pending_tx = multicall.send().await?;
-    let receipt = pending_tx.await?;
-
-    match receipt {
+    let tx_hash = pending_tx.tx_hash();
+    debug!(tx_hash = ?tx_hash, "Withdrawal transaction sent, waiting for confirmation");
+    
+    let receipt = match pending_tx.await? {
         Some(receipt) => {
             if receipt.status == Some(1.into()) {
-                info!(receipt = ?receipt, "Withdrawal created successfully");
+                receipt
             } else {
                 return Err(eyre::eyre!("Withdrawal creation failed with status {:?}: {:?}", receipt.status, receipt));
             }
@@ -169,9 +162,9 @@ pub async fn create_withdrawal(
         None => {
             return Err(eyre::eyre!("Withdrawal creation transaction failed: no receipt returned"));
         }
-    }
-    
-    Ok(())
+    };
+
+    Ok((tx_hash, receipt))
 }
 
 /// Create a shift in the GMX Exchange Router
@@ -183,18 +176,14 @@ pub async fn create_shift(
     from_token_amount: U256,
     gas_limit: U256,
     gas_price: U256
-) -> Result<()> {
+) -> Result<(TxHash, TransactionReceipt)> {
     let exchange_router = ExchangeRouter::new(config.gmx_exchangerouter, wallet_manager.signer.clone());
     let execution_fee = params.execution_fee;
-
-    // Verify funds for the shift
-    verify_funds_erc20(wallet_manager, params.from_market, from_token_amount).await?;
-    verify_funds_native(wallet_manager, execution_fee).await?;
 
     // Approve token spending if needed
     approve_token(wallet_manager, params.from_market, config.gmx_baserouter, from_token_amount).await?;
 
-    // Create token transfer call
+    // Create token transfer calls
     let mut encoded_calls = Vec::new();
     
     if from_token_amount > U256::zero() {
@@ -224,16 +213,17 @@ pub async fn create_shift(
         .gas(gas_limit)
         .gas_price(gas_price)
         .value(execution_fee);
-    info!(multicall = ?multicall, "Creating shift transaction");
+    debug!(multicall = ?multicall, "Creating shift transaction");
 
     // Send the transaction
     let pending_tx = multicall.send().await?;
-    let receipt = pending_tx.await?;
+    let tx_hash = pending_tx.tx_hash();
+    debug!(tx_hash = ?tx_hash, "Shift transaction sent, waiting for confirmation");
 
-    match receipt {
+    let receipt = match pending_tx.await? {
         Some(receipt) => {
             if receipt.status == Some(1.into()) {
-                info!(receipt = ?receipt, "Shift created successfully");
+                receipt
             } else {
                 return Err(eyre::eyre!("Shift creation failed with status {:?}: {:?}", receipt.status, receipt));
             }
@@ -241,9 +231,9 @@ pub async fn create_shift(
         None => {
             return Err(eyre::eyre!("Shift creation transaction failed: no receipt returned"));
         }
-    }
-    
-    Ok(())
+    };
+
+    Ok((tx_hash, receipt))
 }
 
 //----------------------------------------------------------------------------------------------------------------------------------------
@@ -277,36 +267,6 @@ async fn approve_token(wallet_manager: &WalletManager, token_address: Address, s
     } else {
         debug!(?token_address, ?spender, ?amount, "Token spending already approved");
     }
-    Ok(())
-}
-
-/// Helper function to verify funds are sufficient for the deposit (ERC20 tokens)
-#[instrument(skip(wallet_manager, token_address, amount))]
-async fn verify_funds_erc20(wallet_manager: &WalletManager, token_address: Address, amount: U256) -> Result<()> {
-    if amount.is_zero() {
-        debug!(?token_address, "No funds verification needed for zero amount");
-        return Ok(());
-    }
-    let bal = wallet_manager.get_token_balance_u256(token_address).await?;
-    if bal < amount {
-        return Err(eyre::eyre!("Insufficient funds: required {}, available {}", amount, bal));
-    }
-    debug!(?token_address, ?amount, balance = ?bal, "Funds verified successfully");
-    Ok(())
-}
-
-/// Helper function to verify funds are sufficient for the deposit (Native token)
-#[instrument(skip(wallet_manager, amount))]
-async fn verify_funds_native(wallet_manager: &WalletManager, amount: U256) -> Result<()> {
-    if amount.is_zero() {
-        debug!("No funds verification needed for zero amount");
-        return Ok(());
-    }
-    let bal = wallet_manager.get_native_balance_u256().await?;
-    if bal < amount {
-        return Err(eyre::eyre!("Insufficient native funds: required {}, available {}", amount, bal));
-    }
-    debug!(?amount, balance = ?bal, "Native funds verified successfully");
     Ok(())
 }
 

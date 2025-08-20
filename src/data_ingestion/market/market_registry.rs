@@ -8,6 +8,8 @@ use eyre::Result;
 use tracing::{instrument, info, warn, error, debug};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::SystemTime;
+use chrono::{DateTime, Utc};
 
 use crate::config::Config;
 use crate::data_ingestion::token::{token::AssetToken, token_registry::AssetTokenRegistry};
@@ -164,6 +166,15 @@ impl MarketRegistry {
         self.relevant_markets().count()
     }
 
+    /// Returns the number of markets that have been updated since a given timestamp
+    #[instrument(skip(self, updated_at_threshold))]
+    pub fn num_updated_markets(&self, updated_at_threshold: DateTime<Utc>) -> usize {
+        let system_time_threshold: SystemTime = updated_at_threshold.into();
+        self.markets.values()
+            .filter(|m| m.updated_at.is_some() && m.updated_at.unwrap() > system_time_threshold)
+            .count()
+    }
+
     // Returns an iterator over all markets in the registry
     #[instrument(skip(self))]
     pub fn all_markets(&self) -> impl Iterator<Item = &Market> {
@@ -174,6 +185,13 @@ impl MarketRegistry {
     #[instrument(skip(self))]
     pub fn relevant_markets(&self) -> impl Iterator<Item = &Market> {
         self.markets.values().filter(|m| m.has_supply)
+    }
+
+    // Returns an iterator over all markets that have been updated since a given timestamp
+    #[instrument(skip(self, updated_at_threshold))]
+    pub fn updated_markets(&self, updated_at_threshold: DateTime<Utc>) -> impl Iterator<Item = &Market> {
+        let system_time_threshold: SystemTime = updated_at_threshold.into();
+        self.markets.values().filter(move |m| m.updated_at.is_some() && m.updated_at.unwrap() > system_time_threshold)
     }
 
     // Prints all markets in the registry

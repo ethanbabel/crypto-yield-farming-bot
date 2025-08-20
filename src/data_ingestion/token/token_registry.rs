@@ -11,6 +11,7 @@ use eyre::{Result, eyre};
 use serde_json::Value;
 use reqwest::Client;
 use tracing::{instrument, info, warn, debug, error};
+use chrono::{DateTime, Utc};
 
 use super::token::AssetToken;
 use super::oracle::Oracle;
@@ -45,6 +46,36 @@ impl AssetTokenRegistry {
     #[instrument(skip(self))]
     pub fn asset_tokens(&self) -> impl Iterator<Item = Arc<RwLock<AssetToken>>> + '_ {
         self.asset_tokens.values().cloned()
+    }
+
+        /// Returns the number of tokens that have been updated since a given timestamp
+    #[instrument(skip(self, updated_at_threshold))]
+    pub async fn num_updated_tokens(&self, updated_at_threshold: DateTime<Utc>) -> usize {
+        let system_time_threshold: SystemTime = updated_at_threshold.into();
+        let mut count = 0;
+        for token_arc in self.asset_tokens.values() {
+            let token = token_arc.read().await;
+            if token.updated_at.is_some() && token.updated_at.unwrap() > system_time_threshold {
+                count += 1;
+            }
+        }
+        
+        count
+    }
+
+    /// Returns a vector of tokens that have been updated since a given timestamp
+    #[instrument(skip(self, updated_at_threshold))]
+    pub async fn updated_tokens(&self, updated_at_threshold: DateTime<Utc>) -> impl Iterator<Item = Arc<RwLock<AssetToken>>> + '_ {
+        let system_time_threshold: SystemTime = updated_at_threshold.into();
+        let mut updated_tokens = Vec::new();
+        for token_arc in self.asset_tokens.values() {
+            let token = token_arc.read().await;
+            if token.updated_at.is_some() && token.updated_at.unwrap() > system_time_threshold {
+                updated_tokens.push(Arc::clone(token_arc));
+            }
+        }
+        
+        updated_tokens.into_iter()
     }
 
     #[instrument(skip(self), fields(on_close = true))]

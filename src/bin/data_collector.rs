@@ -20,6 +20,7 @@ use tokio::time::interval;
 use tokio::sync::RwLock;
 use ethers::types::Address;
 use redis::AsyncCommands;
+use chrono::Utc;
 
 
 #[instrument(name = "data_collector_main")]
@@ -74,6 +75,7 @@ async fn main() -> eyre::Result<()> {
     loop {
         ticker.tick().await;
         info!("Data collection cycle started");
+        let cycle_start = Utc::now();
         
         // Repopulate the market registry and get new tokens/markets
         let (new_tokens, new_market_addresses) = match market_registry.repopulate(&cfg, &mut token_registry).await {
@@ -183,7 +185,8 @@ async fn main() -> eyre::Result<()> {
         }
 
         // Get token_price models (new)
-        let (mut token_prices, new_failed_token_prices) = match db.prepare_token_prices(token_registry.asset_tokens()).await {
+        let token_prices_iter = token_registry.updated_tokens(cycle_start).await;
+        let (mut token_prices, new_failed_token_prices) = match db.prepare_token_prices(token_prices_iter).await {
             Ok(result) => result,
             Err(e) => {
                 error!(?e, "Failed to prepare token price models");
@@ -198,7 +201,7 @@ async fn main() -> eyre::Result<()> {
         );
 
         // Get market_state models (new)
-        let (mut market_states, new_failed_market_states) = match db.prepare_market_states(market_registry.relevant_markets()).await {
+        let (mut market_states, new_failed_market_states) = match db.prepare_market_states(market_registry.updated_markets(cycle_start)).await {
             Ok(result) => result,
             Err(e) => {
                 error!(?e, "Failed to prepare market state models");

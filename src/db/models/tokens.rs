@@ -12,11 +12,28 @@ pub struct TokenModel {
     pub decimals: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RawTokenModel {
+    pub address: String,
+    pub symbol: String,
+    pub decimals: i32,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewTokenModel {
     pub address: String,
     pub symbol: String,
     pub decimals: i32,
+}
+
+impl RawTokenModel {
+    pub fn from(token: &AssetToken) -> Self {
+        Self {
+            address: to_checksum(&token.address, None),
+            symbol: token.symbol.clone(),
+            decimals: token.decimals as i32,
+        }
+    }
 }
 
 impl NewTokenModel {

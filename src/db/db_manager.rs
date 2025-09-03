@@ -17,10 +17,10 @@ use super::queries::{
     market_states as market_states_queries,
 };
 use super::models::{
-    tokens::{TokenModel, NewTokenModel},
-    markets::{MarketModel, NewMarketModel},
-    token_prices::{TokenPriceModel, NewTokenPriceModel},
-    market_states::{MarketStateModel, NewMarketStateModel},
+    tokens::{TokenModel, NewTokenModel, RawTokenModel},
+    markets::{MarketModel, NewMarketModel, RawMarketModel},
+    token_prices::{TokenPriceModel, NewTokenPriceModel, RawTokenPriceModel},
+    market_states::{MarketStateModel, NewMarketStateModel, RawMarketStateModel},
 };
 use crate::config::Config;
 use crate::data_ingestion::token::token::AssetToken;
@@ -561,5 +561,131 @@ impl DbManager {
             .collect();
         debug!(count = market_tokens.len(), "Fetched all market tokens");
         Ok(market_tokens)
+    }
+
+    /// Convert raw token model to new token model
+    #[instrument(skip(self, raw_token))]
+    pub async fn convert_raw_token_to_new_token(&mut self, raw_token: RawTokenModel) -> Result<NewTokenModel, sqlx::Error> {
+        // For tokens, conversion is direct since no foreign keys are involved
+        Ok(NewTokenModel {
+            address: raw_token.address,
+            symbol: raw_token.symbol,
+            decimals: raw_token.decimals,
+        })
+    }
+
+    /// Convert raw market model to new market model
+    #[instrument(skip(self, raw_market))]
+    pub async fn convert_raw_market_to_new_market(&mut self, raw_market: RawMarketModel) -> Result<Option<NewMarketModel>, sqlx::Error> {
+        self.refresh_id_maps().await?;
+
+        // Parse addresses
+        let index_token_address = raw_market.index_token_address.parse::<Address>()
+            .map_err(|_| sqlx::Error::Decode("Invalid index token address".into()))?;
+        let long_token_address = raw_market.long_token_address.parse::<Address>()
+            .map_err(|_| sqlx::Error::Decode("Invalid long token address".into()))?;
+        let short_token_address = raw_market.short_token_address.parse::<Address>()
+            .map_err(|_| sqlx::Error::Decode("Invalid short token address".into()))?;
+
+        // Check if all required token IDs exist
+        if let (Some(&index_token_id), Some(&long_token_id), Some(&short_token_id)) = (
+            self.token_id_map.get(&index_token_address),
+            self.token_id_map.get(&long_token_address),
+            self.token_id_map.get(&short_token_address)
+        ) {
+            Ok(Some(NewMarketModel {
+                address: raw_market.address,
+                index_token_id,
+                long_token_id,
+                short_token_id,
+            }))
+        } else {
+            debug!(
+                index_exists = self.token_id_map.contains_key(&index_token_address),
+                long_exists = self.token_id_map.contains_key(&long_token_address),
+                short_exists = self.token_id_map.contains_key(&short_token_address),
+                "Cannot convert raw market - missing token IDs"
+            );
+            Ok(None)
+        }
+    }
+
+    /// Convert raw token price model to new token price model
+    #[instrument(skip(self, raw_token_price))]
+    pub async fn convert_raw_token_price_to_new_token_price(&mut self, raw_token_price: RawTokenPriceModel) -> Result<Option<NewTokenPriceModel>, sqlx::Error> {
+        self.refresh_id_maps().await?;
+
+        // Parse token address
+        let token_address = raw_token_price.token_address.parse::<Address>()
+            .map_err(|_| sqlx::Error::Decode("Invalid token address".into()))?;
+
+        // Check if token ID exists
+        if let Some(&token_id) = self.token_id_map.get(&token_address) {
+            Ok(Some(NewTokenPriceModel {
+                token_id,
+                timestamp: raw_token_price.timestamp,
+                min_price: raw_token_price.min_price,
+                max_price: raw_token_price.max_price,
+                mid_price: raw_token_price.mid_price,
+            }))
+        } else {
+            debug!(
+                token_address = %token_address,
+                "Cannot convert raw token price - missing token ID"
+            );
+            Ok(None)
+        }
+    }
+
+    /// Convert raw market state model to new market state model
+    #[instrument(skip(self, raw_market_state))]
+    pub async fn convert_raw_market_state_to_new_market_state(&mut self, raw_market_state: RawMarketStateModel) -> Result<Option<NewMarketStateModel>, sqlx::Error> {
+        self.refresh_id_maps().await?;
+
+        // Parse market address
+        let market_address = raw_market_state.market_address.parse::<Address>()
+            .map_err(|_| sqlx::Error::Decode("Invalid market address".into()))?;
+
+        // Check if market ID exists
+        if let Some(&market_id) = self.market_id_map.get(&market_address) {
+            Ok(Some(NewMarketStateModel {
+                market_id,
+                timestamp: raw_market_state.timestamp,
+                borrowing_factor_long: raw_market_state.borrowing_factor_long,
+                borrowing_factor_short: raw_market_state.borrowing_factor_short,
+                pnl_long: raw_market_state.pnl_long,
+                pnl_short: raw_market_state.pnl_short,
+                pnl_net: raw_market_state.pnl_net,
+                gm_price_min: raw_market_state.gm_price_min,
+                gm_price_max: raw_market_state.gm_price_max,
+                gm_price_mid: raw_market_state.gm_price_mid,
+                pool_long_amount: raw_market_state.pool_long_amount,
+                pool_short_amount: raw_market_state.pool_short_amount,
+                pool_impact_amount: raw_market_state.pool_impact_amount,
+                pool_long_token_usd: raw_market_state.pool_long_token_usd,
+                pool_short_token_usd: raw_market_state.pool_short_token_usd,
+                pool_impact_token_usd: raw_market_state.pool_impact_token_usd,
+                open_interest_long: raw_market_state.open_interest_long,
+                open_interest_short: raw_market_state.open_interest_short,
+                open_interest_long_amount: raw_market_state.open_interest_long_amount,
+                open_interest_short_amount: raw_market_state.open_interest_short_amount,
+                open_interest_long_via_tokens: raw_market_state.open_interest_long_via_tokens,
+                open_interest_short_via_tokens: raw_market_state.open_interest_short_via_tokens,
+                utilization: raw_market_state.utilization,
+                swap_volume: raw_market_state.swap_volume,
+                trading_volume: raw_market_state.trading_volume,
+                fees_position: raw_market_state.fees_position,
+                fees_liquidation: raw_market_state.fees_liquidation,
+                fees_swap: raw_market_state.fees_swap,
+                fees_borrowing: raw_market_state.fees_borrowing,
+                fees_total: raw_market_state.fees_total,
+            }))
+        } else {
+            debug!(
+                market_address = %market_address,
+                "Cannot convert raw market state - missing market ID"
+            );
+            Ok(None)
+        }
     }
 }

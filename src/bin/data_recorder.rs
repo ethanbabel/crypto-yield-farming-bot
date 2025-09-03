@@ -3,10 +3,10 @@ use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::db::{
     self,
     models::{
-        token_prices::NewTokenPriceModel,
-        market_states::NewMarketStateModel,
-        tokens::NewTokenModel,
-        markets::NewMarketModel,
+        token_prices::RawTokenPriceModel,
+        market_states::RawMarketStateModel,
+        tokens::RawTokenModel,
+        markets::RawMarketModel
     }
 };
 
@@ -23,10 +23,10 @@ use tokio::sync::mpsc;
 async fn process_stream_entries(
     stream_name: &str,
     stream_entries: &[redis::streams::StreamId],
-    token_prices_tx: &mpsc::Sender<NewTokenPriceModel>,
-    market_states_tx: &mpsc::Sender<NewMarketStateModel>,
-    new_token_tx: &mpsc::Sender<NewTokenModel>,
-    new_market_tx: &mpsc::Sender<NewMarketModel>,
+    token_prices_tx: &mpsc::Sender<RawTokenPriceModel>,
+    market_states_tx: &mpsc::Sender<RawMarketStateModel>,
+    new_token_tx: &mpsc::Sender<RawTokenModel>,
+    new_market_tx: &mpsc::Sender<RawMarketModel>,
     last_ids: &mut HashMap<String, String>,
     redis_connection: &mut redis::aio::MultiplexedConnection,
 ) -> eyre::Result<()> {
@@ -42,9 +42,9 @@ async fn process_stream_entries(
                 // Deserialize based on stream name
                 match stream_name {
                     "token_prices" => {
-                        if let Ok(token_price_model) = serde_json::from_str::<NewTokenPriceModel>(text) {
-                            debug!(token_id = token_price_model.token_id, "Deserialized token price");
-                            if let Err(e) = token_prices_tx.send(token_price_model).await {
+                        if let Ok(raw_token_price_model) = serde_json::from_str::<RawTokenPriceModel>(text) {
+                            debug!(token_address = raw_token_price_model.token_address, "Deserialized token price");
+                            if let Err(e) = token_prices_tx.send(raw_token_price_model).await {
                                 error!(error = ?e, "Token price channel closed");
                                 return Err(eyre::eyre!("Token price channel closed"));
                             }
@@ -53,9 +53,9 @@ async fn process_stream_entries(
                         }
                     },
                     "market_states" => {
-                        if let Ok(market_state_model) = serde_json::from_str::<NewMarketStateModel>(text) {
-                            debug!(market_id = market_state_model.market_id, "Deserialized market state");
-                            if let Err(e) = market_states_tx.send(market_state_model).await {
+                        if let Ok(raw_market_state_model) = serde_json::from_str::<RawMarketStateModel>(text) {
+                            debug!(market_address = raw_market_state_model.market_address, "Deserialized market state");
+                            if let Err(e) = market_states_tx.send(raw_market_state_model).await {
                                 error!(error = ?e, "Market state channel closed");
                                 return Err(eyre::eyre!("Market state channel closed"));
                             }
@@ -64,9 +64,9 @@ async fn process_stream_entries(
                         }
                     },
                     "new_tokens" => {
-                        if let Ok(new_token_model) = serde_json::from_str::<NewTokenModel>(text) {
-                            debug!(token_symbol = %new_token_model.symbol, "Deserialized new token");
-                            if let Err(e) = new_token_tx.send(new_token_model).await {
+                        if let Ok(raw_new_token_model) = serde_json::from_str::<RawTokenModel>(text) {
+                            debug!(token_symbol = %raw_new_token_model.symbol, "Deserialized new token");
+                            if let Err(e) = new_token_tx.send(raw_new_token_model).await {
                                 error!(error = ?e, "New token channel closed");
                                 return Err(eyre::eyre!("New token channel closed"));
                             }
@@ -75,9 +75,9 @@ async fn process_stream_entries(
                         }
                     },
                     "new_markets" => {
-                        if let Ok(new_market_model) = serde_json::from_str::<NewMarketModel>(text) {
-                            debug!(market_address = %new_market_model.address, "Deserialized new market");
-                            if let Err(e) = new_market_tx.send(new_market_model).await {
+                        if let Ok(raw_new_market_model) = serde_json::from_str::<RawMarketModel>(text) {
+                            debug!(market_address = %raw_new_market_model.address, "Deserialized new market");
+                            if let Err(e) = new_market_tx.send(raw_new_market_model).await {
                                 error!(error = ?e, "New market channel closed");
                                 return Err(eyre::eyre!("New market channel closed"));
                             }
@@ -128,10 +128,10 @@ async fn main() -> eyre::Result<()> {
     let redis_client_for_task = redis_client.clone();
     
     // Create channels for batching
-    let (token_prices_tx, mut token_prices_rx) = mpsc::channel::<NewTokenPriceModel>(1000);
-    let (market_states_tx, mut market_states_rx) = mpsc::channel::<NewMarketStateModel>(1000);
-    let (new_token_tx, mut new_token_rx) = mpsc::channel::<NewTokenModel>(100);
-    let (new_market_tx, mut new_market_rx) = mpsc::channel::<NewMarketModel>(100);
+    let (token_prices_tx, mut token_prices_rx) = mpsc::channel::<RawTokenPriceModel>(1000);
+    let (market_states_tx, mut market_states_rx) = mpsc::channel::<RawMarketStateModel>(1000);
+    let (new_token_tx, mut new_token_rx) = mpsc::channel::<RawTokenModel>(100);
+    let (new_market_tx, mut new_market_rx) = mpsc::channel::<RawMarketModel>(100);
 
     info!("Starting database writer task and waiting for coordination signals");
 
@@ -151,6 +151,10 @@ async fn main() -> eyre::Result<()> {
         let mut new_token_batch = Vec::new();
         let mut new_market_batch = Vec::new();
         let mut message_stream = pubsub.on_message();
+
+        let mut markets_retry_bank: HashMap<String, (RawMarketModel, u32)> = HashMap::new();
+        let mut token_prices_retry_bank: HashMap<String, (Vec<RawTokenPriceModel>, u32)> = HashMap::new();
+        let mut market_states_retry_bank: HashMap<String, (Vec<RawMarketStateModel>, u32)> = HashMap::new();
         
         // Count-based coordination state
         let mut waiting_for_flush = false;
@@ -162,11 +166,32 @@ async fn main() -> eyre::Result<()> {
         loop {
             tokio::select! {
                 // Collect token prices
-                Some(token_price) = token_prices_rx.recv() => {
-                    token_prices_batch.push(token_price);
-                    if waiting_for_flush {
-                        tokens_processed_since_signal += 1;
-                    }
+                Some(raw_token_price) = token_prices_rx.recv() => {
+                    match db.convert_raw_token_price_to_new_token_price(raw_token_price.clone()).await {
+                        Ok(Some(token_price)) => {
+                            token_prices_batch.push(token_price);
+                            if waiting_for_flush {
+                                tokens_processed_since_signal += 1;
+                            }
+                        },
+                        Ok(None) => { // Add to retry bank
+                            let entry = token_prices_retry_bank.entry(raw_token_price.token_address.clone()).or_insert((Vec::new(), 0));
+                            entry.0.push(raw_token_price.clone());
+                            entry.1 += 1;
+                            if entry.1 > 10 {
+                                error!(token_address = raw_token_price.token_address, "Exceeded 10 retries for token price conversion, dropping entry");
+                                token_prices_retry_bank.remove(&raw_token_price.token_address);
+                            } else {
+                                info!(token_address = raw_token_price.token_address, retry_count = entry.1, "Added token price to retry bank");
+                            }
+                            if waiting_for_flush {
+                                tokens_processed_since_signal += 1;
+                            }
+                        },
+                        Err(e) => {
+                            error!(error = ?e, token_address = raw_token_price.token_address, "Failed to convert raw token price to new token price");
+                        }
+                    }     
 
                     // Safety flush if batch gets large
                     if token_prices_batch.len() >= 200 {
@@ -177,11 +202,32 @@ async fn main() -> eyre::Result<()> {
                         }
                     }
                 }
-                // Collect markets
-                Some(market_state) = market_states_rx.recv() => {
-                    market_states_batch.push(market_state);
-                    if waiting_for_flush {
-                        markets_processed_since_signal += 1;
+                // Collect market states
+                Some(raw_market_state) = market_states_rx.recv() => {
+                    match db.convert_raw_market_state_to_new_market_state(raw_market_state.clone()).await {
+                        Ok(Some(market_state)) => {
+                            market_states_batch.push(market_state);
+                            if waiting_for_flush {
+                                markets_processed_since_signal += 1;
+                            }
+                        },
+                        Ok(None) => { // Add to retry bank
+                            let entry = market_states_retry_bank.entry(raw_market_state.market_address.clone()).or_insert((Vec::new(), 0));
+                            entry.0.push(raw_market_state.clone());
+                            entry.1 += 1;
+                            if entry.1 > 10 {
+                                error!(market_address = %raw_market_state.market_address, "Exceeded 10 retries for market state conversion, dropping entry");
+                                market_states_retry_bank.remove(&raw_market_state.market_address);
+                            } else {
+                                info!(market_address = %raw_market_state.market_address, retry_count = entry.1, "Added market state to retry bank");
+                            }
+                            if waiting_for_flush {
+                                markets_processed_since_signal += 1;
+                            }
+                        },
+                        Err(e) => {
+                            error!(error = ?e, market_address = %raw_market_state.market_address, "Failed to convert raw market state to new market state");
+                        }
                     }
 
                     // Safety flush if batch gets large
@@ -194,14 +240,38 @@ async fn main() -> eyre::Result<()> {
                     }
                 }
                 // Collect new tokens
-                Some(new_token) = new_token_rx.recv() => {
-                    new_token_batch.push(new_token);
-                    debug!(batch_size = new_token_batch.len(), "Added new token to batch");
+                Some(raw_new_token) = new_token_rx.recv() => {
+                    match db.convert_raw_token_to_new_token(raw_new_token.clone()).await {
+                        Ok(new_token) => {
+                            new_token_batch.push(new_token);
+                            debug!(batch_size = new_token_batch.len(), "Added new token to batch");
+                        },
+                        Err(e) => {
+                            error!(error = ?e, token_address = %raw_new_token.address, "Failed to convert raw token to new token");
+                        }
+                    }
                 }
                 // Collect new markets
-                Some(new_market) = new_market_rx.recv() => {
-                    new_market_batch.push(new_market);
-                    debug!(batch_size = new_market_batch.len(), "Added new market to batch");
+                Some(raw_new_market) = new_market_rx.recv() => {
+                    match db.convert_raw_market_to_new_market(raw_new_market.clone()).await {
+                        Ok(Some(new_market)) => {
+                            new_market_batch.push(new_market);
+                            debug!(batch_size = new_market_batch.len(), "Added new market to batch");
+                        },
+                        Ok(None) => { // Add to retry bank
+                            let entry = markets_retry_bank.entry(raw_new_market.address.clone()).or_insert((raw_new_market.clone(), 0));
+                            entry.1 += 1;
+                            if entry.1 > 10 {
+                                error!(market_address = %raw_new_market.address, "Exceeded 10 retries for new market conversion, dropping entry");
+                                markets_retry_bank.remove(&raw_new_market.address);
+                            } else {
+                                info!(market_address = %raw_new_market.address, retry_count = entry.1, "Added new market to retry bank");
+                            }
+                        },
+                        Err(e) => {
+                            error!(error = ?e, market_address = %raw_new_market.address, "Failed to convert raw market to new market");
+                        }
+                    }
                 }
                 // PubSub signal - set coordination expectations
                 Some(message) = message_stream.next() => {
@@ -281,13 +351,175 @@ async fn main() -> eyre::Result<()> {
                         }
                     }
                     
+                    // After inserting new tokens and markets, retry failed conversions since new foreign key IDs might now be available
+                    if !token_prices_retry_bank.is_empty() || !markets_retry_bank.is_empty() || !market_states_retry_bank.is_empty() {
+                        info!(
+                            token_prices_retrying = token_prices_retry_bank.len(),
+                            markets_retrying = markets_retry_bank.len(),
+                            market_states_retrying = market_states_retry_bank.len(),
+                            "Retrying failed conversions after coordination flush"
+                        );
+                    }
+                    
+                    // Retry token prices
+                    let mut token_prices_retried = 0;
+                    let mut token_addresses_to_remove = Vec::new();
+                    for (address, (raw_token_prices, retry_count)) in token_prices_retry_bank.iter_mut() {
+                        let mut fail_in_batch = false;
+                        let mut items_to_keep = Vec::new();
+                        for raw_token_price in raw_token_prices.drain(..) {
+                            match db.convert_raw_token_price_to_new_token_price(raw_token_price.clone()).await {
+                                Ok(Some(token_price)) => {
+                                    token_prices_batch.push(token_price);
+                                    token_prices_retried += 1;
+                                },
+                                Ok(None) => {
+                                    // Still failing, keep for next retry
+                                    items_to_keep.push(raw_token_price);
+                                    fail_in_batch = true;
+                                },
+                                Err(e) => {
+                                    error!(error = ?e, token_address = %raw_token_price.token_address, "Error retrying token price conversion");
+                                    items_to_keep.push(raw_token_price);
+                                    fail_in_batch = true;
+                                }
+                            }
+                        }
+                        *raw_token_prices = items_to_keep;
+                        if !fail_in_batch {
+                            token_addresses_to_remove.push(address.clone());
+                        } else {
+                            *retry_count += 1;
+                            if *retry_count > 10 {
+                                error!(token_address = %address, "Exceeded 10 retries for token price conversion after coordination flush, dropping entry");
+                                token_addresses_to_remove.push(address.clone());
+                            }
+                        }
+                    }
+                    for address in token_addresses_to_remove {
+                        token_prices_retry_bank.remove(&address);
+                    }
+
+                    // Retry new markets
+                    let mut markets_to_remove = Vec::new();
+                    let mut markets_retried = 0;
+                    for (address, (raw_new_market, retry_count)) in markets_retry_bank.iter_mut() {
+                        match db.convert_raw_market_to_new_market(raw_new_market.clone()).await {
+                            Ok(Some(new_market)) => {
+                                new_market_batch.push(new_market);
+                                markets_to_remove.push(address.clone());
+                                markets_retried += 1;
+                            },
+                            Ok(None) => {
+                                // Still failing, keep for next retry
+                                *retry_count += 1;
+                                if *retry_count > 10 {
+                                    error!(market_address = %address, "Exceeded 10 retries for new market conversion after coordination flush, dropping entry");
+                                    markets_to_remove.push(address.clone());
+                                }
+                            },
+                            Err(e) => {
+                                error!(error = ?e, market_address = %raw_new_market.address, "Error retrying new market conversion");
+                                *retry_count += 1;
+                                if *retry_count > 10 {
+                                    error!(market_address = %address, "Exceeded 10 retries for new market conversion after coordination flush, dropping entry");
+                                    markets_to_remove.push(address.clone());
+                                }
+                            }
+                        }
+                    }
+                    for address in markets_to_remove {
+                        markets_retry_bank.remove(&address);
+                    }
+                    
+                    // Retry market states
+                    let mut market_states_to_remove = Vec::new();
+                    let mut market_states_retried = 0;
+                    for (address, (raw_market_states, retry_count)) in market_states_retry_bank.iter_mut() {
+                        let mut fail_in_batch = false;
+                        let mut items_to_keep = Vec::new();
+                        for raw_market_state in raw_market_states.drain(..) {
+                            match db.convert_raw_market_state_to_new_market_state(raw_market_state.clone()).await {
+                                Ok(Some(market_state)) => {
+                                    market_states_batch.push(market_state);
+                                    market_states_retried += 1;
+                                },
+                                Ok(None) => {
+                                    // Still failing, keep for next retry
+                                    items_to_keep.push(raw_market_state);
+                                    fail_in_batch = true;
+                                },
+                                Err(e) => {
+                                    error!(error = ?e, market_address = %raw_market_state.market_address, "Error retrying market state conversion");
+                                    items_to_keep.push(raw_market_state);
+                                    fail_in_batch = true;
+                                }
+                            }
+                        }
+                        *raw_market_states = items_to_keep;
+                        if !fail_in_batch {
+                            market_states_to_remove.push(address.clone());
+                        }
+                        else {
+                            *retry_count += 1;
+                            if *retry_count > 10 {
+                                error!(market_address = %address, "Exceeded 10 retries for market state conversion after coordination flush, dropping entry");
+                                market_states_to_remove.push(address.clone());
+                            }
+                        }
+                    }
+                    for address in market_states_to_remove {
+                        market_states_retry_bank.remove(&address);
+                    }
+                    
+                    // Insert any items that were successfully retried
+                    if !token_prices_batch.is_empty() {
+                        if let Err(e) = db.insert_token_prices(std::mem::take(&mut token_prices_batch)).await {
+                            error!(error = ?e, "Failed to insert retried token prices");
+                        } else {
+                            debug!(count = token_prices_batch.len(), "Inserted retried token prices");
+                        }
+                    }
+                    if !new_market_batch.is_empty() {
+                        if let Err(e) = db.insert_markets(std::mem::take(&mut new_market_batch)).await {
+                            error!(error = ?e, "Failed to insert retried new markets");
+                        } else {
+                            debug!(count = new_market_batch.len(), "Inserted retried new markets");
+                        }
+                    }
+                    if !market_states_batch.is_empty() {
+                        if let Err(e) = db.insert_market_states(std::mem::take(&mut market_states_batch)).await {
+                            error!(error = ?e, "Failed to insert retried market states");
+                        } else {
+                            debug!(count = market_states_batch.len(), "Inserted retried market states");
+                        }
+                    }
+                    
+                    
+                    if token_prices_retried > 0 || market_states_retried > 0 || markets_retried > 0 {
+                        info!(
+                            token_prices_retried,
+                            market_states_retried,
+                            markets_retried,
+                            "Successfully retried failed conversions after coordination flush"
+                        );
+                    }
+                    if !token_prices_retry_bank.is_empty() || !markets_retry_bank.is_empty() || !market_states_retry_bank.is_empty() {
+                        warn!(
+                            token_prices_still_failing = token_prices_retry_bank.len(),
+                            markets_still_failing = markets_retry_bank.len(),
+                            market_states_still_failing = market_states_retry_bank.len(),
+                            "Some entries still failing after coordination flush and retry attempt"
+                        );
+                    }
+                    
                     // Publish completion signal with actual processed counts
                     let completion_message = format!("completed:{}:{}", 
-                        tokens_processed_since_signal, 
+                        tokens_processed_since_signal,
                         markets_processed_since_signal
                     );
                     let _: Result<(), _> = publish_connection.publish("data_collection_completed", completion_message).await;
-                    debug!(
+                    info!(
                         tokens_flushed = token_count,
                         markets_flushed = market_count,
                         "Published data collection completed signal"

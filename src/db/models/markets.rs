@@ -15,12 +15,34 @@ pub struct MarketModel {
     pub short_token_id: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RawMarketModel {
+    pub address: String,
+    pub index_token_address: String,
+    pub long_token_address: String,
+    pub short_token_address: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewMarketModel {
     pub address: String,
     pub index_token_id: i32,
     pub long_token_id: i32,
     pub short_token_id: i32,
+}
+
+impl RawMarketModel {
+    pub async fn from_async(market: &Market) -> Self {
+        let index_token = market.index_token.read().await;
+        let long_token = market.long_token.read().await;
+        let short_token = market.short_token.read().await;
+        Self {
+            address: to_checksum(&market.market_token, None),
+            index_token_address: to_checksum(&index_token.address, None),
+            long_token_address: to_checksum(&long_token.address, None),
+            short_token_address: to_checksum(&short_token.address, None),
+        }
+    }
 }
 
 impl NewMarketModel {

@@ -1,6 +1,7 @@
 use rust_decimal::Decimal;
 use chrono::{DateTime, Utc};
 use ethers::types::Address;
+use ethers::utils::to_checksum;
 use std::collections::HashMap;
 use sqlx::FromRow;
 use serde::{Serialize, Deserialize};
@@ -17,6 +18,15 @@ pub struct TokenPriceModel {
     pub mid_price: Decimal,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RawTokenPriceModel {
+    pub token_address: String,
+    pub timestamp: chrono::DateTime<Utc>,
+    pub min_price: Decimal,
+    pub max_price: Decimal,
+    pub mid_price: Decimal,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewTokenPriceModel {
     pub token_id: i32,
@@ -24,6 +34,20 @@ pub struct NewTokenPriceModel {
     pub min_price: Decimal,
     pub max_price: Decimal,
     pub mid_price: Decimal,
+}
+
+impl RawTokenPriceModel {
+    pub fn from(token: &AssetToken) -> Self {
+        let timestamp: DateTime<Utc> = token.updated_at.unwrap().into();
+
+        Self {
+            token_address: to_checksum(&token.address, None),
+            timestamp,
+            min_price: token.last_min_price_usd.unwrap(),
+            max_price: token.last_max_price_usd.unwrap(),
+            mid_price: token.last_mid_price_usd.unwrap(),
+        }
+    }
 }
 
 impl NewTokenPriceModel {

@@ -34,15 +34,15 @@ pub async fn create_deposit(
     let execution_fee = params.execution_fee;
 
     // Approve token spending if needed
-    approve_token(wallet_manager, params.initial_long_token, config.gmx_baserouter, initial_long_amount).await?;
-    approve_token(wallet_manager, params.initial_short_token, config.gmx_baserouter, initial_short_amount).await?;
+    approve_token(wallet_manager, params.addresses.initial_long_token, config.gmx_baserouter, initial_long_amount).await?;
+    approve_token(wallet_manager, params.addresses.initial_short_token, config.gmx_baserouter, initial_short_amount).await?;
 
     // Create token transfer calls
     let mut encoded_calls = Vec::new();
 
     if initial_long_amount > U256::zero() {
         let call = exchange_router.send_tokens(
-            params.initial_long_token, config.gmx_depositvault, initial_long_amount
+            params.addresses.initial_long_token, config.gmx_depositvault, initial_long_amount
         ).gas(gas_limit).gas_price(gas_price);
         let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
         encoded_calls.push(calldata);
@@ -50,7 +50,7 @@ pub async fn create_deposit(
 
     if initial_short_amount > U256::zero() {
         let call = exchange_router.send_tokens(
-            params.initial_short_token, config.gmx_depositvault, initial_short_amount
+            params.addresses.initial_short_token, config.gmx_depositvault, initial_short_amount
         ).gas(gas_limit).gas_price(gas_price);
         let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
         encoded_calls.push(calldata);
@@ -112,14 +112,14 @@ pub async fn create_withdrawal(
     let execution_fee = params.execution_fee;
     
     // Approve token spending if needed
-    approve_token(wallet_manager, params.market, config.gmx_baserouter, market_token_amount).await?;
+    approve_token(wallet_manager, params.addresses.market, config.gmx_baserouter, market_token_amount).await?;
 
     // Create token transfer calls
     let mut encoded_calls = Vec::new();
 
     if market_token_amount > U256::zero() {
         let call = exchange_router.send_tokens(
-            params.market, config.gmx_withdrawalvault, market_token_amount
+            params.addresses.market, config.gmx_withdrawalvault, market_token_amount
         ).gas(gas_limit).gas_price(gas_price);
         let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
         encoded_calls.push(calldata);
@@ -181,14 +181,14 @@ pub async fn create_shift(
     let execution_fee = params.execution_fee;
 
     // Approve token spending if needed
-    approve_token(wallet_manager, params.from_market, config.gmx_baserouter, from_token_amount).await?;
+    approve_token(wallet_manager, params.addresses.from_market, config.gmx_baserouter, from_token_amount).await?;
 
     // Create token transfer calls
     let mut encoded_calls = Vec::new();
     
     if from_token_amount > U256::zero() {
         let call = exchange_router.send_tokens(
-            params.from_market, config.gmx_shiftvault, from_token_amount
+            params.addresses.from_market, config.gmx_shiftvault, from_token_amount
         ).gas(gas_limit).gas_price(gas_price);
         let calldata = call.calldata().ok_or_else(|| eyre::eyre!("Failed to encode calldata"))?;
         encoded_calls.push(calldata);
@@ -275,18 +275,27 @@ async fn approve_token(wallet_manager: &WalletManager, token_address: Address, s
 impl From<exchange_router_utils::CreateDepositParams> for CreateDepositParams {
     fn from(params: exchange_router_utils::CreateDepositParams) -> Self {
         CreateDepositParams {
-            receiver: params.receiver,
-            callback_contract: params.callback_contract,
-            ui_fee_receiver: params.ui_fee_receiver,
-            market: params.market,
-            initial_long_token: params.initial_long_token,
-            initial_short_token: params.initial_short_token,
-            long_token_swap_path: params.long_token_swap_path,
-            short_token_swap_path: params.short_token_swap_path,
+            addresses: params.addresses.into(),
             min_market_tokens: params.min_market_tokens,
             should_unwrap_native_token: params.should_unwrap_native_token,
             execution_fee: params.execution_fee,
             callback_gas_limit: params.callback_gas_limit,
+            data_list: params.data_list.into_iter().map(|h| h.into()).collect(),
+        }
+    }
+}
+
+impl From<exchange_router_utils::CreateDepositParamsAddresses> for CreateDepositParamsAddresses {
+    fn from(addresses: exchange_router_utils::CreateDepositParamsAddresses) -> Self {
+        CreateDepositParamsAddresses {
+            receiver: addresses.receiver,
+            callback_contract: addresses.callback_contract,
+            ui_fee_receiver: addresses.ui_fee_receiver,
+            market: addresses.market,
+            initial_long_token: addresses.initial_long_token,
+            initial_short_token: addresses.initial_short_token,
+            long_token_swap_path: addresses.long_token_swap_path,
+            short_token_swap_path: addresses.short_token_swap_path,
         }
     }
 }
@@ -294,17 +303,26 @@ impl From<exchange_router_utils::CreateDepositParams> for CreateDepositParams {
 impl From<exchange_router_utils::CreateWithdrawalParams> for CreateWithdrawalParams {
     fn from(params: exchange_router_utils::CreateWithdrawalParams) -> Self {
         CreateWithdrawalParams {
-            receiver: params.receiver,
-            callback_contract: params.callback_contract,
-            ui_fee_receiver: params.ui_fee_receiver,
-            market: params.market,
-            long_token_swap_path: params.long_token_swap_path,
-            short_token_swap_path: params.short_token_swap_path,
+            addresses: params.addresses.into(),
             min_long_token_amount: params.min_long_token_amount,
             min_short_token_amount: params.min_short_token_amount,
             should_unwrap_native_token: params.should_unwrap_native_token,
             execution_fee: params.execution_fee,
             callback_gas_limit: params.callback_gas_limit,
+            data_list: params.data_list.into_iter().map(|h| h.into()).collect(),
+        }
+    }
+}
+
+impl From<exchange_router_utils::CreateWithdrawalParamsAddresses> for CreateWithdrawalParamsAddresses {
+    fn from(addresses: exchange_router_utils::CreateWithdrawalParamsAddresses) -> Self {
+        CreateWithdrawalParamsAddresses {
+            receiver: addresses.receiver,
+            callback_contract: addresses.callback_contract,
+            ui_fee_receiver: addresses.ui_fee_receiver,
+            market: addresses.market,
+            long_token_swap_path: addresses.long_token_swap_path,
+            short_token_swap_path: addresses.short_token_swap_path,
         }
     }
 }
@@ -312,14 +330,23 @@ impl From<exchange_router_utils::CreateWithdrawalParams> for CreateWithdrawalPar
 impl From<exchange_router_utils::CreateShiftParams> for CreateShiftParams {
     fn from(params: exchange_router_utils::CreateShiftParams) -> Self {
         CreateShiftParams {
-            receiver: params.receiver,
-            callback_contract: params.callback_contract,
-            ui_fee_receiver: params.ui_fee_receiver,
-            from_market: params.from_market,
-            to_market: params.to_market,
+            addresses: params.addresses.into(),
             min_market_tokens: params.min_market_tokens,
             execution_fee: params.execution_fee,
             callback_gas_limit: params.callback_gas_limit,
+            data_list: params.data_list.into_iter().map(|h| h.into()).collect(),
+        }
+    }
+}
+
+impl From<exchange_router_utils::CreateShiftParamsAddresses> for CreateShiftParamsAddresses {
+    fn from(addresses: exchange_router_utils::CreateShiftParamsAddresses) -> Self {
+        CreateShiftParamsAddresses {
+            receiver: addresses.receiver,
+            callback_contract: addresses.callback_contract,
+            ui_fee_receiver: addresses.ui_fee_receiver,
+            from_market: addresses.from_market,
+            to_market: addresses.to_market,
         }
     }
 }

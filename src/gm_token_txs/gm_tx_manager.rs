@@ -451,18 +451,21 @@ impl GmTxManager {
         let initial_short_amount = self.decimal_to_u256(request.short_amount, short_token_decimals)?;
 
         let deposit_params = exchange_router_utils::CreateDepositParams {
-            receiver: self.wallet_manager.address,
-            callback_contract: Address::zero(),
-            ui_fee_receiver: Address::zero(),
-            market: request.market,
-            initial_long_token: market_token_info.long_token_address,
-            initial_short_token: market_token_info.short_token_address,
-            long_token_swap_path: vec![], 
-            short_token_swap_path: vec![],
+            addresses: exchange_router_utils::CreateDepositParamsAddresses {
+                receiver: self.wallet_manager.address,
+                callback_contract: Address::zero(),
+                ui_fee_receiver: Address::zero(),
+                market: request.market,
+                initial_long_token: market_token_info.long_token_address,
+                initial_short_token: market_token_info.short_token_address,
+                long_token_swap_path: vec![], 
+                short_token_swap_path: vec![],
+            },
             min_market_tokens: U256::zero(),
             should_unwrap_native_token: false,
             execution_fee,
             callback_gas_limit: U256::zero(),
+            data_list: vec![],
         };
         Ok((deposit_params, initial_long_amount, initial_short_amount))
     }
@@ -472,17 +475,20 @@ impl GmTxManager {
         let market_token_amount = self.decimal_to_u256(request.amount, 18)?; // Always 18 decimals for GM market tokens
 
         let withdrawal_params = exchange_router_utils::CreateWithdrawalParams {
-            receiver: self.wallet_manager.address,
-            callback_contract: Address::zero(),
-            ui_fee_receiver: Address::zero(),
-            market: request.market,
-            long_token_swap_path: vec![], 
-            short_token_swap_path: vec![],
+            addresses: exchange_router_utils::CreateWithdrawalParamsAddresses {
+                receiver: self.wallet_manager.address,
+                callback_contract: Address::zero(),
+                ui_fee_receiver: Address::zero(),
+                market: request.market,
+                long_token_swap_path: vec![], 
+                short_token_swap_path: vec![],
+            },
             min_long_token_amount: U256::zero(),
             min_short_token_amount: U256::zero(),
             should_unwrap_native_token: false,
             execution_fee,
             callback_gas_limit: U256::zero(),
+            data_list: vec![],
         };
         Ok((withdrawal_params, market_token_amount))
     }
@@ -492,14 +498,17 @@ impl GmTxManager {
         let from_market_amount = self.decimal_to_u256(request.amount, 18)?; // Always 18 decimals for GM market tokens  
         
         let shift_params = exchange_router_utils::CreateShiftParams {
-            receiver: self.wallet_manager.address,
-            callback_contract: Address::zero(),
-            ui_fee_receiver: Address::zero(),
-            from_market: request.from_market,
-            to_market: request.to_market,
+            addresses: exchange_router_utils::CreateShiftParamsAddresses {
+                receiver: self.wallet_manager.address,
+                callback_contract: Address::zero(),
+                ui_fee_receiver: Address::zero(),
+                from_market: request.from_market,
+                to_market: request.to_market,
+            },
             min_market_tokens: U256::zero(),
             execution_fee,
             callback_gas_limit: U256::zero(),
+            data_list: vec![],
         };
         Ok((shift_params, from_market_amount))
     }

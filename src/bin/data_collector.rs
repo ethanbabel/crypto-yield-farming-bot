@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::sync::Arc;
 use tokio::time::interval;
 use redis::AsyncCommands;
+use redis::streams::StreamMaxlen;
 use chrono::Utc;
 
 
@@ -88,7 +89,7 @@ async fn main() -> eyre::Result<()> {
                 for token in &new_tokens {
                     let raw_token_model = RawTokenModel::from(token);
                     if let Ok(serialized) = serde_json::to_string(&raw_token_model) {
-                        let _: () = redis_connection.xadd("new_tokens", "*", &[("data", serialized)]).await?;
+                        let _: () = redis_connection.xadd_maxlen("new_tokens", StreamMaxlen::Approx(1000), "*", &[("data", serialized)]).await?;
                     }
                     debug!(
                         token_address = %raw_token_model.address, 
@@ -104,7 +105,7 @@ async fn main() -> eyre::Result<()> {
                     if let Some(market) = market_registry.get_market(&market_address) {
                         let raw_market_model = RawMarketModel::from_async(market).await;
                         if let Ok(serialized) = serde_json::to_string(&raw_market_model) {
-                            let _: () = redis_connection.xadd("new_markets", "*", &[("data", serialized)]).await?;
+                            let _: () = redis_connection.xadd_maxlen("new_markets", StreamMaxlen::Approx(1000), "*", &[("data", serialized)]).await?;
                         }
                         debug!(
                             market_address = %raw_market_model.address,
@@ -192,10 +193,10 @@ async fn main() -> eyre::Result<()> {
         );
         
         for tp in serialized_token_prices {
-            let _: () = redis_connection.xadd("token_prices", "*", &[("data", tp)]).await?;
+            let _: () = redis_connection.xadd_maxlen("token_prices", StreamMaxlen::Approx(1000), "*", &[("data", tp)]).await?;
         }
         for ms in serialized_market_states {
-            let _: () = redis_connection.xadd("market_states", "*", &[("data", ms)]).await?;
+            let _: () = redis_connection.xadd_maxlen("market_states", StreamMaxlen::Approx(1000), "*", &[("data", ms)]).await?;
         }
 
         info!(

@@ -6,28 +6,40 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 
 use crate::config::Config;
+use crate::constants::GMX_DECIMALS;
 use crate::wallet::WalletManager;
+use crate::db::db_manager::DbManager;
 use crate::gmx::{
     exchange_router_utils,
     exchange_router,
     datastore,
+    reader,
+    reader_utils,
 };
-use super::types::{GmTxRequest, GmDepositRequest, GmWithdrawalRequest, GmShiftRequest};
+use super::types::{
+    GmTxRequest, 
+    GmDepositRequest, 
+    GmWithdrawalRequest, 
+    GmShiftRequest,
+    GmAmountOutResponse,
+};
 
 const MAX_FEE_PER_GAS_BUFFER: f64 = 1.1; // 10% above the current gas price
 
 pub struct GmTxManager {
     config: Arc<Config>,
     wallet_manager: Arc<WalletManager>,
+    db_manager: Arc<DbManager>,
     max_fee_per_gas_buffer: Decimal,
 }
 
 impl GmTxManager {
     /// Creates a new instance of TxManager
-    pub fn new(config: Arc<Config>, wallet_manager: Arc<WalletManager>) -> Self {
+    pub fn new(config: Arc<Config>, wallet_manager: Arc<WalletManager>, db_manager: Arc<DbManager>) -> Self {
         Self {
             config,
             wallet_manager,
+            db_manager,
             max_fee_per_gas_buffer: Decimal::from_f64(MAX_FEE_PER_GAS_BUFFER).unwrap(),
         }
     }
@@ -39,6 +51,15 @@ impl GmTxManager {
             GmTxRequest::Deposit(deposit_request) => self.execute_deposit(deposit_request).await,
             GmTxRequest::Withdrawal(withdrawal_request) => self.execute_withdrawal(withdrawal_request).await,
             GmTxRequest::Shift(shift_request) => self.execute_shift(shift_request).await,
+        }
+    }
+
+    #[instrument(skip(self))]
+    pub async fn get_transaction_amount_out(&self, request: &GmTxRequest) -> Result<GmAmountOutResponse> {
+        match request {
+            GmTxRequest::Deposit(deposit_request) => self.get_deposit_amount_out(deposit_request).await,
+            GmTxRequest::Withdrawal(withdrawal_request) => self.get_withdrawal_amount_out(withdrawal_request).await,
+            GmTxRequest::Shift(_) => Err(eyre::eyre!("Amount out estimation for Shift requests is not supported")),
         }
     }
 
@@ -513,7 +534,138 @@ impl GmTxManager {
         Ok((shift_params, from_market_amount))
     }
 
-    // Helper to convert Decimal to U256
+    /// Get deposit amount out
+    #[instrument(skip(self, request))]
+    async fn get_deposit_amount_out(&self, request: &GmDepositRequest) -> Result<GmAmountOutResponse> {
+        // Validate request
+        let _ = self.validate_deposit_request(&request).await?;
+
+        // Get token infos
+        let market_token_info = self.wallet_manager.market_tokens.get(&request.market)
+            .ok_or_else(|| eyre::eyre!("Market token not found: {}", request.market))?;
+        let index_token_info = self.wallet_manager.asset_tokens.get(&market_token_info.index_token_address)
+            .ok_or_else(|| eyre::eyre!("Index token not found: {}", market_token_info.index_token_address))?;
+        let long_token_info = self.wallet_manager.asset_tokens.get(&market_token_info.long_token_address)
+            .ok_or_else(|| eyre::eyre!("Long token not found: {}", market_token_info.long_token_address))?;
+        let short_token_info = self.wallet_manager.asset_tokens.get(&market_token_info.short_token_address)
+            .ok_or_else(|| eyre::eyre!("Short token not found: {}", market_token_info.short_token_address))?;
+        
+        let market_props = reader_utils::MarketProps {
+            market_token: market_token_info.address,
+            index_token: index_token_info.address,
+            long_token: long_token_info.address,
+            short_token: short_token_info.address,
+        };
+
+        let price_props = match self.db_manager.get_latest_price_props_for_market(market_token_info.address).await? {
+            Some(props) => props,
+            None => return Err(eyre::eyre!("Price props not found for market: {}", market_token_info.address)),
+        };
+        let market_prices = reader_utils::MarketPrices {
+            index_token_price: reader_utils::PriceProps { // GMX stores prices as [usd_price / 10^(token_decimals)] * 10^GMX_DECIMALS
+                min: self.decimal_to_u256(price_props.0, GMX_DECIMALS - index_token_info.decimals)?,
+                max: self.decimal_to_u256(price_props.1, GMX_DECIMALS - index_token_info.decimals)?,
+            },
+            long_token_price: reader_utils::PriceProps {
+                min: self.decimal_to_u256(price_props.2, GMX_DECIMALS - long_token_info.decimals)?,
+                max: self.decimal_to_u256(price_props.3, GMX_DECIMALS - long_token_info.decimals)?,
+            },
+            short_token_price: reader_utils::PriceProps {
+                min: self.decimal_to_u256(price_props.4, GMX_DECIMALS - short_token_info.decimals)?,
+                max: self.decimal_to_u256(price_props.5, GMX_DECIMALS - short_token_info.decimals)?,
+            },
+        };
+
+        let long_token_amout = self.decimal_to_u256(request.long_amount, long_token_info.decimals)?;
+        let short_token_amount = self.decimal_to_u256(request.short_amount, short_token_info.decimals)?;
+
+        let ui_fee_receiver = Address::zero();
+        let swap_pricing_type = reader_utils::SwapPricingType::Deposit;
+        let include_virtual_inventory_impact = true;
+
+        // Get market tokens out
+        let estimated_market_tokens_out = reader::get_deposit_amount_out(
+            &self.config,
+            market_props,
+            market_prices,
+            long_token_amout,
+            short_token_amount,
+            ui_fee_receiver,
+            swap_pricing_type,
+            include_virtual_inventory_impact,
+        ).await?;
+
+        Ok(GmAmountOutResponse::Deposit {
+            amount_out: self.u256_to_decimal(estimated_market_tokens_out, 18)?, // Always 18 decimals for GM market tokens
+        })
+    }
+
+    /// Get withdrawal amount out
+    #[instrument(skip(self, request))]
+    async fn get_withdrawal_amount_out(&self, request: &GmWithdrawalRequest) -> Result<GmAmountOutResponse> {
+        // Validate request
+        let _ = self.validate_withdrawal_request(&request).await?;
+
+        // Get token infos
+        let market_token_info = self.wallet_manager.market_tokens.get(&request.market)
+            .ok_or_else(|| eyre::eyre!("Market token not found: {}", request.market))?;
+        let index_token_info = self.wallet_manager.asset_tokens.get(&market_token_info.index_token_address)
+            .ok_or_else(|| eyre::eyre!("Index token not found: {}", market_token_info.index_token_address))?;
+        let long_token_info = self.wallet_manager.asset_tokens.get(&market_token_info.long_token_address)
+            .ok_or_else(|| eyre::eyre!("Long token not found: {}", market_token_info.long_token_address))?;
+        let short_token_info = self.wallet_manager.asset_tokens.get(&market_token_info.short_token_address)
+            .ok_or_else(|| eyre::eyre!("Short token not found: {}", market_token_info.short_token_address))?;
+        
+        let market_props = reader_utils::MarketProps {
+            market_token: market_token_info.address,
+            index_token: index_token_info.address,
+            long_token: long_token_info.address,
+            short_token: short_token_info.address,
+        };
+
+        let price_props = match self.db_manager.get_latest_price_props_for_market(market_token_info.address).await? {
+            Some(props) => props,
+            None => return Err(eyre::eyre!("Price props not found for market: {}", market_token_info.address)),
+        };
+        let market_prices = reader_utils::MarketPrices {
+            index_token_price: reader_utils::PriceProps {  // GMX stores prices as [usd_price / 10^(token_decimals)] * 10^GMX_DECIMALS
+                min: self.decimal_to_u256(price_props.0, GMX_DECIMALS - index_token_info.decimals)?,
+                max: self.decimal_to_u256(price_props.1, GMX_DECIMALS - index_token_info.decimals)?,
+            },
+            long_token_price: reader_utils::PriceProps {
+                min: self.decimal_to_u256(price_props.2, GMX_DECIMALS - long_token_info.decimals)?,
+                max: self.decimal_to_u256(price_props.3, GMX_DECIMALS - long_token_info.decimals)?,
+            },
+            short_token_price: reader_utils::PriceProps {
+                min: self.decimal_to_u256(price_props.4, GMX_DECIMALS - short_token_info.decimals)?,
+                max: self.decimal_to_u256(price_props.5, GMX_DECIMALS - short_token_info.decimals)?,
+            },
+        };
+
+        let market_token_amount = self.decimal_to_u256(request.amount, 18)?; // Always 18 decimals for GM market tokens
+
+        let ui_fee_receiver = Address::zero();
+        let swap_pricing_type = reader_utils::SwapPricingType::Withdrawal;
+
+        // Get token amounts out
+        let (estimated_long_tokens_out, estimated_short_tokens_out) = reader::get_withdrawal_amount_out(
+            &self.config,
+            market_props,
+            market_prices,
+            market_token_amount,
+            ui_fee_receiver,
+            swap_pricing_type,
+        ).await?;
+
+        Ok(GmAmountOutResponse::Withdrawal {
+            long_amount_out: self.u256_to_decimal(estimated_long_tokens_out, long_token_info.decimals)?,
+            short_amount_out: self.u256_to_decimal(estimated_short_tokens_out, short_token_info.decimals)?,
+        })
+    }
+
+    // ==================== Utility methods ====================
+
+    /// Helper to convert Decimal to U256
     fn decimal_to_u256(&self, value: Decimal, decimals: u8) -> Result<U256> {
         let value_str = value.to_string();
         let formatted = ethers::utils::parse_units(&value_str, decimals as usize)

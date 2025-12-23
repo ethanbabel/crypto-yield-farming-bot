@@ -563,6 +563,23 @@ impl DbManager {
         Ok(market_tokens)
     }
 
+    /// Fetch most recent price props for a particular market
+    #[instrument(skip(self, market_address))]
+    pub async fn get_latest_price_props_for_market(&self, market_address: Address) -> Result<Option<(Decimal, Decimal, Decimal, Decimal, Decimal, Decimal)>, sqlx::Error> {
+        let market_id = self.market_id_map.get(&market_address)
+            .ok_or_else(|| sqlx::Error::RowNotFound)?;
+        let price_props: Option<(Decimal, Decimal, Decimal, Decimal, Decimal, Decimal)> = token_prices_queries::get_latest_price_props_for_market(
+            &self.pool,
+            *market_id,
+        ).await?;
+        debug!(
+            market_address = %market_address,
+            price_props = ?price_props,
+            "Fetched latest price props for market"
+        );
+        Ok(price_props)
+    }
+
     /// Convert raw token model to new token model
     #[instrument(skip(self, raw_token))]
     pub async fn convert_raw_token_to_new_token(&mut self, raw_token: RawTokenModel) -> Result<NewTokenModel, sqlx::Error> {

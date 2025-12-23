@@ -85,6 +85,17 @@ pub struct MarketPoolValueInfoProps {
     pub impact_pool_amount: U256,          // Amound of tokens reserved for price impact smoothing
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum SwapPricingType {
+    Swap,
+    Shift,
+    AtomicWithdrawal,
+    Deposit,
+    Withdrawal,
+    AtomicSwap,
+}
+
 //----------------------------------------------------------------------------------------------------------------------------------------
 
 impl From<reader::MarketProps> for MarketProps {
@@ -195,5 +206,11 @@ impl From<reader::MarketPoolValueInfoProps> for MarketPoolValueInfoProps {
             borrowing_fee_pool_factor: m.borrowing_fee_pool_factor,
             impact_pool_amount: m.impact_pool_amount,
         }
+    }
+}
+
+impl SwapPricingType {
+    pub fn as_u8(&self) -> u8 {
+        *self as u8
     }
 }

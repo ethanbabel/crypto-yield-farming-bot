@@ -149,3 +149,55 @@ pub async fn get_all_asset_tokens(pool: &PgPool) -> Result<Vec<(String, String, 
         .collect();
     Ok(tokens)
 }
+
+/// Fetch latest price props for a specific market
+pub async fn get_latest_price_props_for_market(
+    pool: &PgPool,
+    market_id: i32,
+) -> Result<Option<(Decimal, Decimal, Decimal, Decimal, Decimal, Decimal)>, sqlx::Error> {
+    // Lateral joins to prevent explosive Cartesian products when joining
+    let row = sqlx::query!(
+        r#"
+        SELECT 
+            it.min_price AS index_min_price, it.max_price AS index_max_price,
+            lt.min_price AS long_min_price, lt.max_price AS long_max_price,
+            st.min_price AS short_min_price, st.max_price AS short_max_price
+        FROM markets m
+        LEFT JOIN LATERAL (
+            SELECT min_price, max_price 
+            FROM token_prices 
+            WHERE token_id = m.index_token_id 
+            ORDER BY timestamp DESC LIMIT 1
+        ) it ON true
+        LEFT JOIN LATERAL (
+            SELECT min_price, max_price 
+            FROM token_prices 
+            WHERE token_id = m.long_token_id 
+            ORDER BY timestamp DESC LIMIT 1
+        ) lt ON true
+        LEFT JOIN LATERAL (
+            SELECT min_price, max_price 
+            FROM token_prices 
+            WHERE token_id = m.short_token_id 
+            ORDER BY timestamp DESC LIMIT 1
+        ) st ON true
+        WHERE m.id = $1;
+        "#,
+        market_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(r) = row {
+        Ok(Some((
+            r.index_min_price,
+            r.index_max_price,
+            r.long_min_price,
+            r.long_max_price,
+            r.short_min_price,
+            r.short_max_price,
+        )))
+    } else {
+        Ok(None)
+    }
+}

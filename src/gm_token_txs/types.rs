@@ -26,4 +26,10 @@ pub struct GmShiftRequest {
     pub from_market: Address,
     pub to_market: Address,
     pub amount: Decimal,
+}   
+
+#[derive(Debug, Clone)]
+pub enum GmAmountOutResponse {
+    Deposit { amount_out: Decimal },
+    Withdrawal { long_amount_out: Decimal, short_amount_out: Decimal },
 }

@@ -283,5 +283,126 @@
         ],
         "stateMutability": "view",
         "type": "function"
+    },
+    {
+        "name": "getDepositAmountOut",
+        "inputs": [
+            { "internalType": "contract DataStore", "name": "dataStore", "type": "address" },
+            {
+                "components": [
+                    { "internalType": "address", "name": "marketToken", "type": "address" },
+                    { "internalType": "address", "name": "indexToken", "type": "address" },
+                    { "internalType": "address", "name": "longToken", "type": "address" },
+                    { "internalType": "address", "name": "shortToken", "type": "address" }
+                ],
+                "internalType": "struct MarketProps",
+                "name": "market",
+                "type": "tuple"
+            },
+            {
+                "components": [
+                    {
+                        "components": [
+                            { "internalType": "uint256", "name": "min", "type": "uint256" },
+                            { "internalType": "uint256", "name": "max", "type": "uint256" }
+                        ],
+                        "internalType": "struct PriceProps",
+                        "name": "indexTokenPrice",
+                        "type": "tuple"
+                    },
+                    {
+                        "components": [
+                            { "internalType": "uint256", "name": "min", "type": "uint256" },
+                            { "internalType": "uint256", "name": "max", "type": "uint256" }
+                        ],
+                        "internalType": "struct PriceProps",
+                        "name": "longTokenPrice",
+                        "type": "tuple"
+                    },
+                    {
+                        "components": [
+                            { "internalType": "uint256", "name": "min", "type": "uint256" },
+                            { "internalType": "uint256", "name": "max", "type": "uint256" }
+                        ],
+                        "internalType": "struct PriceProps",
+                        "name": "shortTokenPrice",
+                        "type": "tuple"
+                    }
+                ],
+                "internalType": "struct MarketUtils.MarketPrices",
+                "name": "prices",
+                "type": "tuple"
+            },
+            { "internalType": "uint256", "name": "longTokenAmount", "type": "uint256" },
+            { "internalType": "uint256", "name": "shortTokenAmount", "type": "uint256" },
+            { "internalType": "address", "name": "uiFeeReceiver", "type": "address" },
+            { "internalType": "enum ISwapPricingUtilsSwapPricingType", "name": "swapPricingType", "type": "uint8" },
+            { "internalType": "bool", "name": "includeVirtualInventoryImpact", "type": "bool" }
+        ],
+        "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "name": "getWithdrawalAmountOut",
+        "inputs": [
+            { "internalType": "contract DataStore", "name": "dataStore", "type": "address" },
+            {
+                "components": [
+                    { "internalType": "address", "name": "marketToken", "type": "address" },
+                    { "internalType": "address", "name": "indexToken", "type": "address" },
+                    { "internalType": "address", "name": "longToken", "type": "address" },
+                    { "internalType": "address", "name": "shortToken", "type": "address" }
+                ],
+                "internalType": "struct MarketProps",
+                "name": "market",
+                "type": "tuple"
+            },
+            {
+                "components": [
+                    {
+                        "components": [
+                            { "internalType": "uint256", "name": "min", "type": "uint256" },
+                            { "internalType": "uint256", "name": "max", "type": "uint256" }
+                        ],
+                        "internalType": "struct PriceProps",
+                        "name": "indexTokenPrice",
+                        "type": "tuple"
+                    },
+                    {
+                        "components": [
+                            { "internalType": "uint256", "name": "min", "type": "uint256" },
+                            { "internalType": "uint256", "name": "max", "type": "uint256" }
+                        ],
+                        "internalType": "struct PriceProps",
+                        "name": "longTokenPrice",
+                        "type": "tuple"
+                    },
+                    {
+                        "components": [
+                            { "internalType": "uint256", "name": "min", "type": "uint256" },
+                            { "internalType": "uint256", "name": "max", "type": "uint256" }
+                        ],
+                        "internalType": "struct PriceProps",
+                        "name": "shortTokenPrice",
+                        "type": "tuple"
+                    }
+                ],
+                "internalType": "struct MarketUtils.MarketPrices",
+                "name": "prices",
+                "type": "tuple"
+            },
+            { "internalType": "uint256", "name": "marketTokenAmount", "type": "uint256" },
+            { "internalType": "address", "name": "uiFeeReceiver", "type": "address" },
+            { "internalType": "enum ISwapPricingUtilsSwapPricingType", "name": "swapPricingType", "type": "uint8" }
+        ],
+        "outputs": [
+            { "internalType": "uint256", "name": "", "type": "uint256" },
+            { "internalType": "uint256", "name": "", "type": "uint256" }
+        ],
+        "stateMutability": "view",
+        "type": "function"
     }
 ]

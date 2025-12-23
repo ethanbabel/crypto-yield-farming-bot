@@ -210,6 +210,54 @@ pub async fn get_market_token_price_batch(
     Ok((min_prices, max_prices))
 }
 
+pub async fn get_deposit_amount_out(
+    config: &Config,
+    market_props: reader_utils::MarketProps,
+    market_prices: reader_utils::MarketPrices,
+    long_token_amount: U256,
+    short_token_amount: U256,
+    ui_fee_receiver: Address,
+    swap_pricing_type: reader_utils::SwapPricingType,
+    include_virtual_inventory_impact: bool,
+) -> Result<U256> {
+    let reader = Reader::new(config.gmx_reader, config.alchemy_provider.clone());
+
+    let raw_response = reader.get_deposit_amount_out(
+        config.gmx_datastore,
+        market_props.into(),
+        market_prices.into(),
+        long_token_amount,
+        short_token_amount,
+        ui_fee_receiver,
+        swap_pricing_type.as_u8(),
+        include_virtual_inventory_impact,
+    ).call().await?;
+
+    Ok(raw_response)
+}
+
+pub async fn get_withdrawal_amount_out(
+    config: &Config,
+    market_props: reader_utils::MarketProps,
+    market_prices: reader_utils::MarketPrices,
+    market_token_amount: U256,
+    ui_fee_receiver: Address,
+    swap_pricing_type: reader_utils::SwapPricingType,
+) -> Result<(U256, U256)> {
+    let reader = Reader::new(config.gmx_reader, config.alchemy_provider.clone());
+
+    let raw_response = reader.get_withdrawal_amount_out(
+        config.gmx_datastore,
+        market_props.into(),
+        market_prices.into(),
+        market_token_amount,
+        ui_fee_receiver,
+        swap_pricing_type.as_u8(),
+    ).call().await?;
+
+    Ok(raw_response)
+}
+
 //----------------------------------------------------------------------------------------------------------------------------------------
 
 impl From<reader_utils::MarketProps> for MarketProps {

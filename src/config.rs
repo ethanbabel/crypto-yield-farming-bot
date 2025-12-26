@@ -2,8 +2,11 @@ use std::env;
 use std::sync::Arc;
 use ethers::providers::{Provider, Http};
 use ethers::types::Address;
+use std::sync::Once;
 
 use crate::constants;
+
+static INIT_CRYPTO: Once = Once::new();
 
 #[derive(Debug)]
 pub struct Config {
@@ -130,4 +133,12 @@ impl Config {
         
         Arc::new(config)
     }
+}
+
+pub fn init_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("Failed to install AWS-LC-RS as default TLS provider");
+    });
 }

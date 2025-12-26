@@ -64,4 +64,6 @@ argmin-math = "0.4" # Math operations for argmin
 rayon = "1.8" # Data parallelism for performance-critical computations
 thiserror = "1.0" # Derive error types
 url = "2.5" # URL parsing and manipulation
-
+dydx = "0.3" # dYdX API client
+dydx-proto = "0.4" # dYdX protocol
+rustls = { version = "0.23", features = ["aws-lc-rs"] } # TLS library

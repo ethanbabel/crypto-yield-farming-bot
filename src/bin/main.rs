@@ -1,12 +1,10 @@
 use dotenvy::dotenv;
 use eyre::Result;
 use tracing::{debug, info, error};
-use std::sync::Arc;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::data_ingestion::token::token_registry;
-use crypto_yield_farming_bot::data_ingestion::market::market_registry;
+use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,34 +21,21 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Initialize token registry
-    let mut token_registry = token_registry::AssetTokenRegistry::new(&cfg);
-    info!("Asset token registry initialized");
+    // Initialize dydx client
+    let mut dydx_client = DydxClient::new().await?;
+    info!("dYdX client initialized successfully");
 
-    // Initialize market registry
-    let mut market_registry = market_registry::MarketRegistry::new(&cfg);
-    info!("Market registry initialized");
-
-    // Repopulate the market registry and get new tokens/markets
-    let (_new_tokens, _new_market_addresses) = match market_registry.repopulate(&cfg, &mut token_registry).await {
-        Ok(result) => result,
-        Err(e) => {
-            error!(?e, "Failed to repopulate market registry");
-            return Err(e);
+    // Get perpetual markets
+    match dydx_client.get_perpetual_markets().await {
+        Ok(markets) => {
+            info!(market_count = markets.len(), "Fetched perpetual markets from dYdX");
+            for market in markets {
+                info!(market = ?market, "Perpetual Market");
+            }
         }
-    };
-
-    // Fetch Asset Token price data from GMX
-    if let Err(e) = token_registry.update_all_gmx_prices().await {
-        error!(?e, "Failed to update asset token prices from GMX");
-        return Err(e);
-    }
-    debug!("Asset token prices updated from GMX");
-
-    // Update market data
-    if let Err(e) = market_registry.update_all_market_data(Arc::clone(&cfg), &Default::default()).await {
-        error!(?e, "Failed to update market data");
-        return Err(e);
+        Err(e) => {
+            error!("Failed to fetch perpetual markets: {}", e);
+        }
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush

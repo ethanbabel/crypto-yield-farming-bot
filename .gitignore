@@ -12,3 +12,6 @@
 
 # Ignore Grafana API key file
 /alloy/grafana_api_key.txt
+
+# Ignore dydx config file
+/src/hedging/dydx_mainnet.toml

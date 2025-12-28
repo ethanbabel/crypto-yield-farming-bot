@@ -25,13 +25,18 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Example usage of SkipGo client to get chains
-    let request = skip_go::SkipGoGetAssetsRequest {
-        chain_ids: Some(vec!["dydx-mainnet-1".to_string()]),
+    // Example usage of SkipGo client
+    let request = skip_go::SkipGoGetRouteRequest {
+        source_asset_denom: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(), // USDC on Arbitrum
+        source_asset_chain_id: "42161".to_string(), // Arbitrum chain ID
+        dest_asset_denom: "ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14E9E20E2545B5".to_string(), // USDC on dYdX
+        dest_asset_chain_id: "dydx-mainnet-1".to_string(), // dYdX chain ID
+        amount_out: Some("10000000".to_string()), // 10 USDC with 6 decimals
+        go_fast: Some(true), // Enable fast routing
         ..Default::default()
     };
-    let response = skip_go::get_assets(Some(request)).await?;
-    info!(response = %response, "Received response from SkipGo API");
+    let response = skip_go::get_route(request).await?;
+    info!("SkipGo Response: {:#?}", response);
 
     // // Initialize db manager
     // let db = DbManager::init(&cfg).await?;

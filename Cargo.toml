@@ -36,6 +36,7 @@ path = "src/bin/transact_gm_tokens.rs"
 dotenvy = "0.15"    # Load environment variables from .env file
 ethers = { version = "2", features = ["ws", "rustls"] } # Ethereum with WebSocket support
 serde = { version = "1.0", features = ["derive"] } # Serialization/deserialization
+serde_url_params = "0.2" # URL encoding/decoding
 tokio = { version = "1", features = ["full"] } # Async runtime
 eyre = "0.6" # East error handling
 reqwest = { version = "0.11", features = ["json", "blocking"] } # HTTP client
@@ -67,3 +68,5 @@ url = "2.5" # URL parsing and manipulation
 dydx = "0.3" # dYdX API client
 dydx-proto = "0.4" # dYdX protocol
 rustls = { version = "0.23", features = ["aws-lc-rs"] } # TLS library
+cosmrs = "0.22" # Cosmos SDK client
+hex = "0.4" # Hex encoding and decoding

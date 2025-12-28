@@ -824,6 +824,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmrs"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34e74fa7a22930fe0579bef560f2d64b78415d4c47b9dd976c0635136809471d"
+dependencies = [
+ "bip32",
+ "cosmos-sdk-proto 0.27.0",
+ "ecdsa",
+ "eyre",
+ "k256",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "signature",
+ "subtle-encoding",
+ "tendermint",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -934,6 +954,7 @@ dependencies = [
  "argmin",
  "argmin-math",
  "chrono",
+ "cosmrs 0.22.0",
  "dotenvy",
  "dydx",
  "dydx-proto",
@@ -941,6 +962,7 @@ dependencies = [
  "eyre",
  "futures",
  "governor 0.10.0",
+ "hex",
  "ndarray 0.16.1",
  "ndarray-linalg",
  "ndarray-stats",
@@ -957,6 +979,7 @@ dependencies = [
  "rustls 0.23.35",
  "serde",
  "serde_json",
+ "serde_url_params",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
@@ -1217,7 +1240,7 @@ dependencies = [
  "bigdecimal",
  "bip32",
  "chrono",
- "cosmrs",
+ "cosmrs 0.21.1",
  "delegate",
  "derive_more 2.1.1",
  "dydx-proto",
@@ -4787,6 +4810,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87607cb1398ed59d48732e575a4c28a7a8ebf2454b964fe3f224f2afc07909e1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_url_params"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c43307d0640738af32fe8d01e47119bc0fc8a686be470a44a586caff76dfb34"
+dependencies = [
+ "serde",
+ "url",
 ]
 
 [[package]]

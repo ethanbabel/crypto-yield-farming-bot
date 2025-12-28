@@ -1,15 +1,24 @@
 use eyre::Result;
 use std::sync::Arc;
 use std::collections::HashMap;
+use tracing::info;
 use futures::stream::{self, StreamExt};
 use dydx::{
     config::ClientConfig,
-    node::NodeClient,
+    node::{
+        NodeClient,
+        // Account,
+    },
     indexer::{
         IndexerClient,
         types::{Ticker, PerpetualMarket},
     },
 };
+use cosmrs::{
+    crypto::secp256k1,
+    // AccountId,
+};
+use hex;
 
 use crate::config;
 use crate::wallet::WalletManager;
@@ -22,17 +31,28 @@ pub struct DydxClient {
 }
 
 impl DydxClient {
-    pub async fn new(wallet_manager: Arc<WalletManager>) -> Result<Self> {
+    pub async fn new(cfg: Arc<config::Config>, wallet_manager: Arc<WalletManager>) -> Result<Self> {
         // Initialize crypto provider
         config::init_crypto_provider();
 
         let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml")
             .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
-        let node_client = NodeClient::connect(config.node)
+        let mut node_client = NodeClient::connect(config.node)
             .await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let indexer_client = IndexerClient::new(config.indexer);
+
+        // Manually derive dydx account from private key
+        let private_key_str = &cfg.wallet_private_key.clone()[2..]; // Remove "0x" prefix
+        let private_key_bytes = hex::decode(&private_key_str)?;
+        let signing_key = secp256k1::SigningKey::from_slice(&private_key_bytes)?;
+        let public_key = signing_key.public_key();
+        let address = public_key.account_id("dydx")?;
+
+        let account = node_client.get_account(&address.to_string().into()).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX account for address {}: {}", address, e))?;
+        info!(account = ?account, "dYdX account fetched successfully");
         
         Ok(Self {
             node_client,

@@ -26,12 +26,12 @@ async fn main() -> Result<()> {
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
     // Example usage of SkipGo client to get chains
-    let request = skip_go::SkipGoGetChainsRequest {
-        chain_ids: vec!["dydx-mainnet-1".to_string(), "mantle-1".to_string()].into(),
+    let request = skip_go::SkipGoGetAssetsRequest {
+        chain_ids: Some(vec!["dydx-mainnet-1".to_string()]),
         ..Default::default()
     };
-    let response = skip_go::get_chains(Some(request)).await?;
-    info!(response = %response, "Fetched chains from SkipGo API");
+    let response = skip_go::get_assets(Some(request)).await?;
+    info!(response = %response, "Received response from SkipGo API");
 
     // // Initialize db manager
     // let db = DbManager::init(&cfg).await?;

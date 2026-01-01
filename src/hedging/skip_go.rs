@@ -317,7 +317,7 @@ post_route_handler is either:
     }
 */
 
-pub async fn get_msgs(req: SkipGoGetMsgsRequest) -> Result<serde_json::Value> {
+pub async fn get_msgs(req: SkipGoGetMsgsRequest) -> Result<SkipGoGetMsgsResponse> {
     let mut last_err = None;
     for attempt in 1..=MAX_RETRIES {
         match try_get_msgs(&req).await {
@@ -341,7 +341,7 @@ pub async fn get_msgs(req: SkipGoGetMsgsRequest) -> Result<serde_json::Value> {
     Err(last_err.unwrap_or_else(|| eyre::eyre!("Unknown error occurred while fetching msgs")))
 }
 
-async fn try_get_msgs(req: &SkipGoGetMsgsRequest) -> Result<serde_json::Value> {
+async fn try_get_msgs(req: &SkipGoGetMsgsRequest) -> Result<SkipGoGetMsgsResponse> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -350,6 +350,112 @@ async fn try_get_msgs(req: &SkipGoGetMsgsRequest) -> Result<serde_json::Value> {
 
     response.error_for_status_ref()?;
     let json_response = response.json::<serde_json::Value>().await?;
-    Ok(json_response)
+    let response: SkipGoGetMsgsResponse = serde_json::from_value(json_response)?;
+    Ok(response)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SkipGoGetMsgsResponse {
+    pub msgs: Vec<SkipGoMsg>,
+    pub txs: Vec<SkipGoTx>,
+    pub min_amount_out: String,
+    pub estimated_fees: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SkipGoMsg {
+    MultiChainMsg(MsgsMultiChainMsg),
+    EvmTx(MsgsEvmTx),
+    SvmTx(MsgsSvmTx),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MsgsMultiChainMsg {
+    pub multi_chain_msg: MsgsMultiChainMsgData,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MsgsMultiChainMsgData {
+    pub chain_id: String,
+    pub msg: String,
+    pub msg_type_url: String,
+    pub path: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MsgsEvmTx {
+    pub evm_tx: MsgsEvmTxData,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MsgsEvmTxData {
+    pub chain_id: String,
+    pub data: String,
+    pub required_erc20_approvals: Vec<EvmRequiredErc20Approval>,
+    pub signer_address: String,
+    pub to: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct EvmRequiredErc20Approval {
+    pub amount: String,
+    pub spender: String,
+    pub token_contract: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MsgsSvmTx {
+    pub svm_tx: serde_json::Value, // Catch all for SVM transactions
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SkipGoTx {
+    CosmosTx(TxsCosmosTx),
+    EvmTx(TxsEvmTx),
+    SvmTx(TxsSvmTx),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TxsCosmosTx {
+    pub cosmos_tx: TxsCosmosTxData,
+    pub operations_indices: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TxsCosmosTxData {
+    pub chain_id: String,
+    pub path: Vec<String>,
+    pub signer_address: String,
+    pub msgs: Vec<CosmosMsg>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CosmosMsg {
+    pub msg: String,
+    pub msg_type_url: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TxsEvmTx {
+    pub evm_tx: TxsEvmTxData,
+    pub operations_indices: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TxsEvmTxData {
+    pub chain_id: String,
+    pub data: String,
+    pub required_erc20_approvals: Vec<EvmRequiredErc20Approval>,
+    pub signer_address: String,
+    pub to: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TxsSvmTx {
+    pub svm_tx: serde_json::Value, // Catch all for SVM transactions
+    pub operations_indices: Vec<usize>,
+}

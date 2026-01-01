@@ -170,7 +170,7 @@ impl DydxClient {
         source_asset_chain_id: &str,
         dest_asset_denom: &str,
         dest_asset_chain_id: &str,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<skip_go::SkipGoGetMsgsResponse> {
         let amount_in: Option<String> = amount_in.map(|d| {
             let amount_u256 = decimal_to_u256(d, USDC_DECIMALS).unwrap();
             amount_u256.to_string()
@@ -226,7 +226,7 @@ impl DydxClient {
         };
         debug!("SkipGo Msgs Request: {:#?}", msg_request);
         let msgs = skip_go::get_msgs(msg_request).await?;
-        debug!("SkipGo Msgs Response: {:#?}", msgs);
+        info!("SkipGo Msgs Response: {:#?}", msgs);
         Ok(msgs)
     }
 }

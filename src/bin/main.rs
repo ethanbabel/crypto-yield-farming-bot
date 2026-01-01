@@ -2,13 +2,13 @@ use dotenvy::dotenv;
 use eyre::Result;
 use tracing::{info};
 use std::sync::Arc;
+use rust_decimal::prelude::*;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-// use crypto_yield_farming_bot::db::db_manager::DbManager;
-// use crypto_yield_farming_bot::wallet::WalletManager;
-// use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
-use crypto_yield_farming_bot::hedging::skip_go;
+use crypto_yield_farming_bot::db::db_manager::DbManager;
+use crypto_yield_farming_bot::wallet::WalletManager;
+use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,44 +25,36 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Example usage of SkipGo client
-    let request = skip_go::SkipGoGetRouteRequest {
-        source_asset_denom: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831".to_string(), // USDC on Arbitrum
-        source_asset_chain_id: "42161".to_string(), // Arbitrum chain ID
-        dest_asset_denom: "ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14E9E20E2545B5".to_string(), // USDC on dYdX
-        dest_asset_chain_id: "dydx-mainnet-1".to_string(), // dYdX chain ID
-        amount_out: Some("10000000".to_string()), // 10 USDC with 6 decimals
-        go_fast: Some(true), // Enable fast routing
-        ..Default::default()
-    };
-    let response = skip_go::get_route(request).await?;
-    info!("SkipGo Response: {:#?}", response);
+    // Initialize db manager
+    let db = DbManager::init(&cfg).await?;
+    let db = Arc::new(db);
+    info!("Database manager initialized");
 
-    // // Initialize db manager
-    // let db = DbManager::init(&cfg).await?;
-    // let db = Arc::new(db);
-    // info!("Database manager initialized");
+    // Initialize and load wallet manager
+    let mut wallet_manager = WalletManager::new(&cfg)?;
+    wallet_manager.load_tokens(&db).await?;
+    let wallet_manager = Arc::new(wallet_manager);
+    info!("Wallet manager initialized and tokens loaded");
 
-    // // Initialize and load wallet manager
-    // let mut wallet_manager = WalletManager::new(&cfg)?;
-    // wallet_manager.load_tokens(&db).await?;
-    // let wallet_manager = Arc::new(wallet_manager);
-    // info!("Wallet manager initialized and tokens loaded");
+    // Initialize dydx client
+    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    info!("dYdX client initialized successfully");
 
-    // // Initialize dydx client
-    // let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
-    // info!("dYdX client initialized successfully");
+    // Use SkipGo to get route and msgs for a deposit from Arbitrum to dYdX
+    dydx_client.dydx_deposit(
+        Some(Decimal::from_str("10.0")?), // 10 USDC
+        None,
+        false,
+        Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
+    ).await?;
 
-    // // Get perpetual markets
-    // let token_perp_map = dydx_client.get_token_perp_map().await?;
-    // for (token, perp_opt) in token_perp_map.iter() {
-    //     let perp_ticker = if let Some(perp) = perp_opt {
-    //         perp.ticker.to_string()
-    //     } else {
-    //         "N/A".to_string()
-    //     };
-    //     info!("Token: {}, Perpetual Market: {}", token, perp_ticker);
-    // }
+    // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
+    dydx_client.dydx_withdrawal(
+        Some(Decimal::from_str("10.0")?), // 10 USDC
+        None,
+        false,
+        Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
+    ).await?;
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

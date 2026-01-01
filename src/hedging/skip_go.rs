@@ -215,15 +215,24 @@ pub struct SkipGoGetRouteSwapVenue {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SkipGoBridgeType {
-    IBC,
-    AXELAR,
-    CCTP,
-    HYPERPLANE,
-    OPINIT,
-    GO_FAST,
-    STARGATE,
-    LAYER_ZERO,
-    EUREKA,
+    #[serde(rename = "IBC")]
+    Ibc,
+    #[serde(rename = "AXELAR")]
+    Axelar,
+    #[serde(rename = "CCTP")]
+    Cctp,
+    #[serde(rename = "HYPERPLANE")]
+    Hyperplane,
+    #[serde(rename = "OPINIT")]
+    Opinit,
+    #[serde(rename = "GO_FAST")]
+    GoFast,
+    #[serde(rename = "STARGATE")]
+    Stargate,
+    #[serde(rename = "LAYER_ZERO")]
+    LayerZero,
+    #[serde(rename = "EUREKA")]
+    Eureka,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,3 +276,80 @@ async fn try_get_route(req: &SkipGoGetRouteRequest) -> Result<serde_json::Value>
     let json_response = response.json::<serde_json::Value>().await?;
     Ok(json_response)
 }
+
+// -------------------- Get Msgs --------------------
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct SkipGoGetMsgsRequest {
+    pub source_asset_denom: String, 
+    pub source_asset_chain_id: String,
+    pub dest_asset_denom: String,
+    pub dest_asset_chain_id: String,
+    pub amount_in: String,
+    pub amount_out: String,
+    pub address_list : Vec<String>, // Array of address for each chain in the path, corresponding to the required_chain_addresses array returned from a route request
+    pub operations: serde_json::Value, // Array of operations required to perform the transfer or swap, as returned from a route request
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_amount_out: Option<String>, 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slippage_tolerance_percent: Option<String>, // Percent tolerance for slippage on swap, if a swap is performed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_ids_to_affiliates: Option<serde_json::Value>, // Map of chain_id to affiliate address for that chain, for collecting affiliate fees
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_route_handler: Option<serde_json::Value>, 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<String>, // Number of seconds for the IBC transfer timeout (default: 5min)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_gas_warnings: Option<bool>, // Whether to enable gas warnings for intermediate and destination chains (default: false)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_payer_address: Option<String>, // Alternative address to use for paying for fees, currently only for SVM source CCTP transfers, in b58 format.
+}
+
+/*
+post_route_handler is either: 
+    wasm_msg: {
+        contract_address: String (Address of the contract to execute the message on), 
+        msg: String (JSON string of the message) }
+    }
+    OR
+    autopilot_msg: {
+        action: enum<String> ("LIQUID_STAKE" or "CLAIM"),
+        receiver: String
+    }
+*/
+
+pub async fn get_msgs(req: SkipGoGetMsgsRequest) -> Result<serde_json::Value> {
+    let mut last_err = None;
+    for attempt in 1..=MAX_RETRIES {
+        match try_get_msgs(&req).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_err = Some(e);
+                warn!(
+                    attempt,
+                    error = ?last_err.as_ref().unwrap(),
+                    "Attempt to fetch msgs from SkipGo API failed",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
+    error!(
+        attempts = MAX_RETRIES,
+        error = ?last_err.as_ref().unwrap(),
+        "All attempts to fetch msgs from SkipGo API failed",
+    );
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("Unknown error occurred while fetching msgs")))
+}
+
+async fn try_get_msgs(req: &SkipGoGetMsgsRequest) -> Result<serde_json::Value> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let url = format!("{}/fungible/msgs", SKIPGO_BASE_URL);
+    let response = client.post(&url).json(req).send().await?;
+
+    response.error_for_status_ref()?;
+    let json_response = response.json::<serde_json::Value>().await?;
+    Ok(json_response)
+}
+

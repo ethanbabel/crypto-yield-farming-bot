@@ -1,6 +1,6 @@
 use dotenvy::dotenv;
 use eyre::Result;
-use tracing::{info};
+use tracing::{info, error};
 use std::sync::Arc;
 use rust_decimal::prelude::*;
 
@@ -37,24 +37,30 @@ async fn main() -> Result<()> {
     info!("Wallet manager initialized and tokens loaded");
 
     // Initialize dydx client
-    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    let mut dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
     info!("dYdX client initialized successfully");
 
     // Use SkipGo to get route and msgs for a deposit from Arbitrum to dYdX
-    dydx_client.dydx_deposit(
-        Some(Decimal::from_str("10.0")?), // 10 USDC
+    if let Err(e) = dydx_client.dydx_deposit(
         None,
+        Some(Decimal::from_str("5.0")?), // 5 USDC
         false,
         Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
-    ).await?;
+    ).await {
+        error!("Error during dYdX deposit: {}", e);
+        return Err(e);
+    }
 
     // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
-    dydx_client.dydx_withdrawal(
-        Some(Decimal::from_str("10.0")?), // 10 USDC
+    if let Err(e) = dydx_client.dydx_withdrawal(
+        Some(Decimal::from_str("5.0")?), // 5 USDC
         None,
         false,
         Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
-    ).await?;
+    ).await {
+        error!("Error during dYdX withdrawal: {}", e);
+        return Err(e);
+    }
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

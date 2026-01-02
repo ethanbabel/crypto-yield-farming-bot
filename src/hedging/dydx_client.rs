@@ -1,10 +1,10 @@
 use eyre::Result;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{debug, info};
+use tracing::{instrument, debug, info};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
-use ethers::types::U256;
+use ethers::prelude::*;
 use futures::stream::{self, StreamExt};
 use dydx::{
     config::ClientConfig,
@@ -14,7 +14,7 @@ use dydx::{
     },
     indexer::{
         IndexerClient,
-        types::{Ticker, PerpetualMarket},
+        types::{Ticker, PerpetualMarket, Denom},
     },
 };
 use cosmrs::{
@@ -39,6 +39,7 @@ pub struct DydxClient {
     wallet_manager: Arc<WalletManager>,
     node_client: NodeClient,
     indexer_client: IndexerClient,
+    dydx_address: String,
 }
 
 impl DydxClient {
@@ -49,13 +50,13 @@ impl DydxClient {
         let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml")
             .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
-        let mut node_client = NodeClient::connect(config.node)
+        let node_client = NodeClient::connect(config.node)
             .await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let indexer_client = IndexerClient::new(config.indexer);
 
-        // // Manually derive dydx account from private key
-        // let address = derive_cosmos_address_from_key(&cfg, "dydx")?;
+        // Manually derive dydx account from private key
+        let address = derive_cosmos_address_from_key(&cfg, "dydx")?;
 
         // let account = node_client.get_account(&address.to_string().into()).await
         //     .map_err(|e| eyre::eyre!("Failed to fetch dYdX account for address {}: {}", address, e))?;
@@ -66,9 +67,11 @@ impl DydxClient {
             wallet_manager,
             node_client,
             indexer_client,
+            dydx_address: address,
         })
     }
 
+    #[instrument(skip(self))]
     pub async fn get_perpetual_markets(&self) -> Result<HashMap<Ticker, PerpetualMarket>> {
         let markets = self.indexer_client.markets().get_perpetual_markets(None).await
             .map_err(|e| eyre::eyre!("Failed to fetch perpetual markets: {}", e))?;
@@ -92,6 +95,7 @@ impl DydxClient {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn get_token_perp_map(&self) -> Result<HashMap<String, Option<PerpetualMarket>>> {
         let token_symbols: Vec<String> = self.wallet_manager.asset_tokens.values()
             .map(|token| token.symbol.clone())
@@ -120,14 +124,34 @@ impl DydxClient {
         Ok(token_perp_map)
     }
 
+    #[instrument(skip(self))]
     pub async fn dydx_deposit(
-        &self, 
+        &mut self, 
         amount_in: Option<Decimal>, 
         amount_out: Option<Decimal>, 
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
     ) -> Result<()> {
-        let _msgs = self.skip_go_get_route_and_msgs(
+        // Get USDC balances
+        let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
+        let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+
+        // Sanity check request
+        let log_string = self.get_deposit_log_string(
+            initial_arbitrum_usdc_balance,
+            amount_in,
+            amount_out,
+        ).await?;
+
+        info!(
+            initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
+            initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
+            "{} Deposit Initiated", 
+            log_string
+        );
+
+        // Get SkipGo route and msgs
+        let (amount, msgs) = self.skip_go_get_route_and_msgs(
             amount_in,
             amount_out,
             go_fast,
@@ -137,17 +161,53 @@ impl DydxClient {
             DYDX_USDC_DENOM,
             DYDX_CHAIN_ID,
         ).await?;
+
+        // Validate requested transfer amount and estimated fees against balances
+        if amount > initial_arbitrum_usdc_balance {
+            return Err(eyre::eyre!(
+                "Insufficient Arbitrum USDC balance for deposit: have {}, need {}",
+                initial_arbitrum_usdc_balance,
+                amount
+            ));
+        } else {
+            info!(
+                initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
+                deposit_amount_including_fees = ?amount,
+                "{} Deposit Validated", 
+                log_string
+            );
+        }
+
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn dydx_withdrawal(
-        &self, 
+        &mut self, 
         amount_in: Option<Decimal>, 
         amount_out: Option<Decimal>, 
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
     ) -> Result<()> {
-        let _msgs = self.skip_go_get_route_and_msgs(
+        // Get USDC balances
+        let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
+        let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+
+        // Sanity check request
+        let log_string = self.get_withdrawal_log_string(
+            initial_dydx_usdc_balance,
+            amount_in,
+            amount_out,
+        ).await?;
+
+        info!(
+            initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
+            initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
+            "{} Withdrawal Initiated", 
+            log_string
+        );
+
+        let (amount, msgs) = self.skip_go_get_route_and_msgs(
             amount_in,
             amount_out,
             go_fast,
@@ -157,9 +217,95 @@ impl DydxClient {
             ARBITRUM_USDC_DENOM,
             ARBITRUM_CHAIN_ID,
         ).await?;
+
+        // Validate requested transfer amount and estimated fees against balances
+        if amount > initial_dydx_usdc_balance {
+            return Err(eyre::eyre!(
+                "Insufficient dYdX USDC balance for withdrawal: have {}, need {}",
+                initial_dydx_usdc_balance,
+                amount
+            ));
+        } else {
+            info!(
+                initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
+                withdrawal_amount_including_fees = ?amount,
+                "{} Withdrawal Validated", 
+                log_string
+            );
+        }
+
         Ok(())
     }
-        
+
+    async fn get_arbitrum_usdc_balance(&self) -> Result<Decimal> {
+        let balance = self.wallet_manager.get_token_balance(
+            Address::from_str(ARBITRUM_USDC_DENOM)?
+        ).await?;
+        Ok(balance)
+    }
+
+    async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
+        let balance = self.node_client.get_account_balance(
+            &self.dydx_address.to_string().into(),
+            &Denom::Usdc
+        ).await
+        .map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
+        let balance_decimal = Decimal::from_str(&balance.amount)?;
+        Ok(balance_decimal)
+    }
+
+    async fn get_deposit_log_string(
+        &self,
+        arbitrum_usdc_balance: Decimal,
+        amount_in: Option<Decimal>, 
+        amount_out: Option<Decimal>
+    ) -> Result<String> {
+        match (amount_in, amount_out) {
+            (Some(_), Some(_)) => Err(eyre::eyre!("Specify only one of amount_in or amount_out")),
+            (Some(amount), None) => {
+                if amount > arbitrum_usdc_balance {
+                    return Err(eyre::eyre!("Insufficient USDC balance for deposit: have {}, need {}", arbitrum_usdc_balance, amount));
+                }
+                let log_string = format!("DYDX DEPOSIT REQUEST | Deposit {} (amount in) USDC |", amount);
+                Ok(log_string)
+            }
+            (None, Some(amount)) => {
+                if amount > arbitrum_usdc_balance {
+                    return Err(eyre::eyre!("Insufficient USDC balance for deposit: have {}, need {}", arbitrum_usdc_balance, amount));
+                }
+                let log_string = format!("DYDX DEPOSIT REQUEST | Deposit {} (amount out) USDC |", amount);
+                Ok(log_string)
+            }
+            (None, None) => Err(eyre::eyre!("Must specify one of amount_in or amount_out")),
+        }
+    }
+
+    async fn get_withdrawal_log_string(
+        &self,
+        dydx_usdc_balance: Decimal,
+        amount_in: Option<Decimal>, 
+        amount_out: Option<Decimal>
+    ) -> Result<String> {
+        match (amount_in, amount_out) {
+            (Some(_), Some(_)) => Err(eyre::eyre!("Specify only one of amount_in or amount_out")),
+            (Some(amount), None) => {
+                if amount > dydx_usdc_balance {
+                    return Err(eyre::eyre!("Insufficient USDC balance for withdrawal: have {}, need {}", dydx_usdc_balance, amount));
+                }
+                let log_string = format!("DYDX WITHDRAWAL REQUEST | Withdraw {} (amount in) USDC |", amount);
+                Ok(log_string)
+            }
+            (None, Some(amount)) => {
+                if amount > dydx_usdc_balance {
+                    return Err(eyre::eyre!("Insufficient USDC balance for withdrawal: have {}, need {}", dydx_usdc_balance, amount));
+                }
+                let log_string = format!("DYDX WITHDRAWAL REQUEST | Withdraw {} (amount out) USDC |", amount);
+                Ok(log_string)
+            }
+            (None, None) => Err(eyre::eyre!("Must specify one of amount_in or amount_out")),
+        }
+    }
+
     async fn skip_go_get_route_and_msgs(
         &self,
         amount_in: Option<Decimal>,
@@ -170,7 +316,7 @@ impl DydxClient {
         source_asset_chain_id: &str,
         dest_asset_denom: &str,
         dest_asset_chain_id: &str,
-    ) -> Result<skip_go::SkipGoGetMsgsResponse> {
+    ) -> Result<(Decimal, skip_go::SkipGoGetMsgsResponse)> {
         let amount_in: Option<String> = amount_in.map(|d| {
             let amount_u256 = decimal_to_u256(d, USDC_DECIMALS).unwrap();
             amount_u256.to_string()
@@ -227,8 +373,30 @@ impl DydxClient {
         debug!("SkipGo Msgs Request: {:#?}", msg_request);
         let msgs = skip_go::get_msgs(msg_request).await?;
         info!("SkipGo Msgs Response: {:#?}", msgs);
-        Ok(msgs)
+
+        let amount = u256_to_decimal(
+            U256::from_dec_str(true_amount_in).unwrap(),
+            USDC_DECIMALS,
+        )?;
+
+        Ok((amount, msgs))
     }
+
+    // async fn execute_skip_go_transfer(&self, txs: Vec<skip_go::SkipGoTx>) -> Result<()> {
+    //     for tx in txs {
+    //         match tx {
+    //             skip_go::SkipGoTx::CosmosTx(cosmos_tx) => {
+    //                 debug!("Executing Cosmos Tx: {:#?}", cosmos_tx);
+    //             }
+    //             skip_go::SkipGoTx::EvmTx(evm_tx) => {
+    //                 debug!("Executing EVM Tx: {:#?}", evm_tx);
+    //             }
+    //             skip_go::SkipGoTx::SvmTx(svm_tx) => {
+    //                 return Err(eyre::eyre!("No support for SVM transactions: {:#?}", svm_tx));
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 // ==================== Utility methods ====================

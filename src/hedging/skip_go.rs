@@ -359,7 +359,7 @@ pub struct SkipGoGetMsgsResponse {
     pub msgs: Vec<SkipGoMsg>,
     pub txs: Vec<SkipGoTx>,
     pub min_amount_out: String,
-    pub estimated_fees: serde_json::Value,
+    pub estimated_fees: Vec<SkipGoEstimatedFees>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -458,4 +458,44 @@ pub struct TxsEvmTxData {
 pub struct TxsSvmTx {
     pub svm_tx: serde_json::Value, // Catch all for SVM transactions
     pub operations_indices: Vec<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SkipGoEstimatedFees {
+    pub fee_type: String,
+    pub bridge_id: SkipGoBridgeType,
+    pub amount: String,
+    pub usd_amount: String,
+    pub origin_asset: SkipGoFeeOriginAsset,
+    pub chain_id: String,
+    pub tx_index: usize,
+    pub operation_index: Option<usize>,
+    pub fee_behavior: SkipGoFeeBehavior,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SkipGoFeeOriginAsset {
+    pub denom: String,
+    pub chain_id: String,
+    pub origin_denom: String,
+    pub origin_chain_id: String,
+    pub trace: String,
+    pub is_cw20: bool,
+    pub is_evm: bool,
+    pub is_svm: bool,
+    pub symbol: Option<String>,
+    pub logo_uri: Option<String>,
+    pub decimals: Option<u8>,
+    pub token_contract: Option<String>,
+    pub description: Option<String>,
+    pub coingecko_id: Option<String>,
+    pub recommended_symbol: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum SkipGoFeeBehavior {
+    #[serde(rename = "FEE_BEHAVIOR_DEDUCTED")]
+    FeeBehaviorDeducted, // Fee is deducted from the transfer amount
+    #[serde(rename = "FEE_BEHAVIOR_ADDITIONAL")]
+    FeeBehaviorAdditional, // Fee is added on top of the transfer amount
 }

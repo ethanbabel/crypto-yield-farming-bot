@@ -7,7 +7,7 @@ const SKIPGO_BASE_URL: &str = "https://api.skip.build/v2";
 const MAX_RETRIES: usize = 3;
 
 // -------------------- Get Chains --------------------
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SkipGoGetChainsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_ids: Option<Vec<String>>,
@@ -62,7 +62,7 @@ async fn try_get_chains(req: &Option<SkipGoGetChainsRequest>) -> Result<serde_js
 }
 
 // -------------------- Get Assets --------------------
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SkipGoGetAssetsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_ids: Option<Vec<String>>,
@@ -121,7 +121,7 @@ async fn try_get_assets(req: &Option<SkipGoGetAssetsRequest>) -> Result<serde_js
     Ok(json_response)
 }
 // -------------------- Get Assets Between Chains --------------------
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SkipGoGetAssetsBetweenChainsRequest {
     pub source_chain_id: String,
     pub dest_chain_id: String,
@@ -173,7 +173,7 @@ async fn try_get_assets_between_chains(req: &SkipGoGetAssetsBetweenChainsRequest
 
 
 // -------------------- Get Route --------------------
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SkipGoGetRouteRequest {
     pub source_asset_denom: String, 
     pub source_asset_chain_id: String,
@@ -205,7 +205,7 @@ pub struct SkipGoGetRouteRequest {
     pub go_fast: Option<bool>, // Whether to enable Go Fast routes
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SkipGoGetRouteSwapVenue {
     pub chain_id: String,
     pub name: String,
@@ -213,7 +213,7 @@ pub struct SkipGoGetRouteSwapVenue {
     pub logo_uri: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum SkipGoBridgeType {
     #[serde(rename = "IBC")]
     Ibc,
@@ -235,7 +235,7 @@ pub enum SkipGoBridgeType {
     Eureka,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SkipGoGetRouteSmartSwapOptions {
     pub split_routes: bool, // Indicates whether the swap can be split into multiple swap routes
     pub evm_swaps: bool, // Indicates whether to include routes that swap on EVM chains
@@ -278,7 +278,7 @@ async fn try_get_route(req: &SkipGoGetRouteRequest) -> Result<serde_json::Value>
 }
 
 // -------------------- Get Msgs --------------------
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct SkipGoGetMsgsRequest {
     pub source_asset_denom: String, 
     pub source_asset_chain_id: String,
@@ -354,7 +354,7 @@ async fn try_get_msgs(req: &SkipGoGetMsgsRequest) -> Result<SkipGoGetMsgsRespons
     Ok(response)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SkipGoGetMsgsResponse {
     pub msgs: Vec<SkipGoMsg>,
     pub txs: Vec<SkipGoTx>,
@@ -362,7 +362,7 @@ pub struct SkipGoGetMsgsResponse {
     pub estimated_fees: Vec<SkipGoEstimatedFees>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum SkipGoMsg {
     MultiChainMsg(MsgsMultiChainMsg),
@@ -370,12 +370,12 @@ pub enum SkipGoMsg {
     SvmTx(MsgsSvmTx),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MsgsMultiChainMsg {
     pub multi_chain_msg: MsgsMultiChainMsgData,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MsgsMultiChainMsgData {
     pub chain_id: String,
     pub msg: String,
@@ -383,12 +383,12 @@ pub struct MsgsMultiChainMsgData {
     pub path: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MsgsEvmTx {
     pub evm_tx: MsgsEvmTxData,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MsgsEvmTxData {
     pub chain_id: String,
     pub data: String,
@@ -398,19 +398,19 @@ pub struct MsgsEvmTxData {
     pub value: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EvmRequiredErc20Approval {
     pub amount: String,
     pub spender: String,
     pub token_contract: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MsgsSvmTx {
     pub svm_tx: serde_json::Value, // Catch all for SVM transactions
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(untagged)]
 pub enum SkipGoTx {
     CosmosTx(TxsCosmosTx),
@@ -418,13 +418,13 @@ pub enum SkipGoTx {
     SvmTx(TxsSvmTx),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxsCosmosTx {
     pub cosmos_tx: TxsCosmosTxData,
     pub operations_indices: Vec<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxsCosmosTxData {
     pub chain_id: String,
     pub path: Vec<String>,
@@ -432,19 +432,19 @@ pub struct TxsCosmosTxData {
     pub msgs: Vec<CosmosMsg>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CosmosMsg {
     pub msg: String,
     pub msg_type_url: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxsEvmTx {
     pub evm_tx: TxsEvmTxData,
     pub operations_indices: Vec<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxsEvmTxData {
     pub chain_id: String,
     pub data: String,
@@ -454,13 +454,13 @@ pub struct TxsEvmTxData {
     pub value: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxsSvmTx {
     pub svm_tx: serde_json::Value, // Catch all for SVM transactions
     pub operations_indices: Vec<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SkipGoEstimatedFees {
     pub fee_type: String,
     pub bridge_id: SkipGoBridgeType,
@@ -473,7 +473,7 @@ pub struct SkipGoEstimatedFees {
     pub fee_behavior: SkipGoFeeBehavior,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SkipGoFeeOriginAsset {
     pub denom: String,
     pub chain_id: String,
@@ -492,10 +492,105 @@ pub struct SkipGoFeeOriginAsset {
     pub recommended_symbol: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum SkipGoFeeBehavior {
     #[serde(rename = "FEE_BEHAVIOR_DEDUCTED")]
     FeeBehaviorDeducted, // Fee is deducted from the transfer amount
     #[serde(rename = "FEE_BEHAVIOR_ADDITIONAL")]
     FeeBehaviorAdditional, // Fee is added on top of the transfer amount
+}
+
+// -------------------- Submit Transaction --------------------
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SkipGoSubmitTransactionRequest {
+    pub tx: String,  // Signed base64 encoded transaction
+    pub chain_id: String,
+}
+
+pub async fn submit_transaction(req: SkipGoSubmitTransactionRequest) -> Result<SkipGoSubmitTransactionResponse> {
+    let mut last_err = None;
+    for attempt in 1..=MAX_RETRIES {
+        match try_submit_transaction(&req).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_err = Some(e);
+                warn!(
+                    attempt,
+                    error = ?last_err.as_ref().unwrap(),
+                    "Attempt to submit transaction to SkipGo API failed",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
+    error!(
+        attempts = MAX_RETRIES,
+        error = ?last_err.as_ref().unwrap(),
+        "All attempts to submit transaction to SkipGo API failed",
+    );
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("Unknown error occurred while submitting transaction")))
+}
+
+async fn try_submit_transaction(req: &SkipGoSubmitTransactionRequest) -> Result<SkipGoSubmitTransactionResponse> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let url = format!("{}/tx/submit", SKIPGO_BASE_URL);
+    let response = client.post(&url).json(req).send().await?;
+
+    response.error_for_status_ref()?;
+    let json_response = response.json::<serde_json::Value>().await?;
+    let response: SkipGoSubmitTransactionResponse = serde_json::from_value(json_response)?;
+    Ok(response)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SkipGoSubmitTransactionResponse {
+    pub tx_hash: String,
+    pub explorer_link: String, // URL to view the transaction on the relevant block explorer
+}
+
+// -------------------- Get Transaction Status --------------------
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SkipGoGetTransactionStatusRequest {
+    pub tx_hash: String,
+    pub chain_id: String,
+}
+
+pub async fn get_transaction_status(req: SkipGoGetTransactionStatusRequest) -> Result<serde_json::Value> {
+    let mut last_err = None;
+    for attempt in 1..=MAX_RETRIES {
+        match try_get_transaction_status(&req).await {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+                last_err = Some(e);
+                warn!(
+                    attempt,
+                    error = ?last_err.as_ref().unwrap(),
+                    "Attempt to fetch transaction status from SkipGo API failed",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
+    error!(
+        attempts = MAX_RETRIES,
+        error = ?last_err.as_ref().unwrap(),
+        "All attempts to fetch transaction status from SkipGo API failed",
+    );
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("Unknown error occurred while fetching transaction status")))
+}
+
+async fn try_get_transaction_status(req: &SkipGoGetTransactionStatusRequest) -> Result<serde_json::Value> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let query_string = serde_url_params::to_string(req)?;
+    let url = format!("{}/tx/status?{}", SKIPGO_BASE_URL, query_string);
+    let response = client.get(&url).send().await?;
+
+    response.error_for_status_ref()?;
+    let json_response = response.json::<serde_json::Value>().await?;
+    Ok(json_response)
 }

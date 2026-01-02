@@ -34,7 +34,7 @@ abigen!(
     ]"#
 );
 
-const MAX_FEE_PER_GAS_BUFFER: f64 = 1.1; // 10% above the current gas price
+const MAX_FEE_PER_GAS_BUFFER: f64 = 1.05; // 5% above the current gas price
 
 pub struct SwapManager {
     paraswap_client: ParaSwapClient,

@@ -32,6 +32,10 @@ path = "src/bin/spot_swap.rs"
 name = "transact_gm_tokens"
 path = "src/bin/transact_gm_tokens.rs"
 
+[[bin]]        # Utility for depositing/withdrawing from dYdX (via SkipGo from Arbitrum)
+name = "dydx_transfer"
+path = "src/bin/dydx_transfer.rs"
+
 [dependencies]
 dotenvy = "0.15"    # Load environment variables from .env file
 ethers = { version = "2", features = ["ws", "rustls"] } # Ethereum with WebSocket support

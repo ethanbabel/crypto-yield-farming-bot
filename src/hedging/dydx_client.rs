@@ -90,7 +90,7 @@ impl DydxClient {
         })
     }
 
-    pub async fn wait_for_active_transfers(&self) -> Result<()> {
+    pub async fn wait_for_active_transfers(&self) {
         let mut tasks = self.active_transfer_polling_tasks.lock().await;
         info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());
         while let Some(handle) = tasks.pop() {
@@ -99,7 +99,6 @@ impl DydxClient {
             }
         }
         info!("All active transfer polling tasks completed.");
-        Ok(())
     }
 
     #[instrument(skip(self))]

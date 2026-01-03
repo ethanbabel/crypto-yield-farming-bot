@@ -558,7 +558,7 @@ pub struct SkipGoGetTransactionStatusRequest {
     pub chain_id: String,
 }
 
-pub async fn get_transaction_status(req: SkipGoGetTransactionStatusRequest) -> Result<serde_json::Value> {
+pub async fn get_transaction_status(req: SkipGoGetTransactionStatusRequest) -> Result<SkipGoGetTransactionStatusResponse> {
     let mut last_err = None;
     for attempt in 1..=MAX_RETRIES {
         match try_get_transaction_status(&req).await {
@@ -582,7 +582,7 @@ pub async fn get_transaction_status(req: SkipGoGetTransactionStatusRequest) -> R
     Err(last_err.unwrap_or_else(|| eyre::eyre!("Unknown error occurred while fetching transaction status")))
 }
 
-async fn try_get_transaction_status(req: &SkipGoGetTransactionStatusRequest) -> Result<serde_json::Value> {
+async fn try_get_transaction_status(req: &SkipGoGetTransactionStatusRequest) -> Result<SkipGoGetTransactionStatusResponse> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -592,5 +592,33 @@ async fn try_get_transaction_status(req: &SkipGoGetTransactionStatusRequest) -> 
 
     response.error_for_status_ref()?;
     let json_response = response.json::<serde_json::Value>().await?;
-    Ok(json_response)
+    let response: SkipGoGetTransactionStatusResponse = serde_json::from_value(json_response)?;
+    Ok(response)
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SkipGoGetTransactionStatusResponse {
+    pub state: SkipGoTransactionState,
+    pub transfer_sequence: serde_json::Value,
+    pub transfers: serde_json::Value,
+    pub next_blocking_transfer: serde_json::Value,
+    pub transfer_asset_release: serde_json::Value,
+    pub error: serde_json::Value,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum SkipGoTransactionState {
+    #[serde(rename = "STATE_SUBMITTED")]
+    StateSubmitted,
+    #[serde(rename = "STATE_PENDING")]
+    StatePending,
+    #[serde(rename = "STATE_ABANDONED")]
+    StateAbandoned,
+    #[serde(rename = "STATE_COMPLETED_SUCCESS")]
+    StateCompletedSuccess,
+    #[serde(rename = "STATE_COMPLETED_ERROR")]
+    StateCompletedError,
+    #[serde(rename = "STATE_PENDING_ERROR")]
+    StatePendingError,
 }

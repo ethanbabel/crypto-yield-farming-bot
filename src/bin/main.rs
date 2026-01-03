@@ -43,8 +43,8 @@ async fn main() -> Result<()> {
     // Use SkipGo to get route and msgs for a deposit from Arbitrum to dYdX
     if let Err(e) = dydx_client.dydx_deposit(
         None,
-        Some(Decimal::from_str("5.0")?), // 5 USDC
-        true,
+        Some(Decimal::from_str("1.0")?), // 1 USDC
+        false,
         Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
     ).await {
         error!("Error during dYdX deposit: {}", e);
@@ -61,6 +61,9 @@ async fn main() -> Result<()> {
     //     error!("Error during dYdX withdrawal: {}", e);
     //     return Err(e);
     // }
+
+    // Keep the application running until all active transfers are complete
+    dydx_client.wait_for_active_transfers().await;
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

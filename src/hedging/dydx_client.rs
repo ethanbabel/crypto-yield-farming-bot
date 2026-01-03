@@ -1,7 +1,7 @@
 use eyre::Result;
 use std::sync::Arc;
 use std::collections::HashMap;
-use tracing::{instrument, debug, info};
+use tracing::{instrument, debug, info, warn, error};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use ethers::prelude::*;
@@ -10,6 +10,8 @@ use ethers::types::{
     transaction::eip2718::TypedTransaction
 };
 use futures::stream::{self, StreamExt};
+use tokio::time::{sleep, Duration, Instant};
+use tokio::task::JoinHandle;
 use dydx::{
     config::ClientConfig,
     node::{
@@ -55,6 +57,7 @@ pub struct DydxClient {
     node_client: NodeClient,
     indexer_client: IndexerClient,
     dydx_address: String,
+    active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl DydxClient {
@@ -83,7 +86,20 @@ impl DydxClient {
             node_client,
             indexer_client,
             dydx_address: address,
+            active_transfer_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
+    }
+
+    pub async fn wait_for_active_transfers(&self) -> Result<()> {
+        let mut tasks = self.active_transfer_polling_tasks.lock().await;
+        info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());
+        while let Some(handle) = tasks.pop() {
+            if let Err(e) = handle.await {
+                error!("Error in transfer polling task: {}", e);
+            }
+        }
+        info!("All active transfer polling tasks completed.");
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -168,7 +184,7 @@ impl DydxClient {
         );
 
         // Get SkipGo route and msgs
-        let (amount, msgs) = self.skip_go_get_route_and_msgs(
+        let (amount, estimated_time_secs, msgs) = self.skip_go_get_route_and_msgs(
             amount_in,
             amount_out,
             go_fast,
@@ -200,13 +216,19 @@ impl DydxClient {
             info!(
                 initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
                 deposit_amount_including_fees = ?amount,
+                expected_time_to_complete_secs = ?estimated_time_secs,
                 "{} Deposit Validated", 
                 log_string
             );
         }
 
         // Execute SkipGo transfer
-        self.execute_skip_go_transfer(msgs.txs, initial_arbitrum_eth_balance, &log_string).await?;
+        self.execute_skip_go_transfer(
+            msgs.txs, 
+            initial_arbitrum_eth_balance, 
+            &log_string, 
+            estimated_time_secs
+        ).await?;
 
         // Final balances
         let final_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
@@ -219,7 +241,7 @@ impl DydxClient {
             final_arbitrum_usdc_balance = ?final_arbitrum_usdc_balance,
             final_dydx_usdc_balance = ?final_dydx_usdc_balance,
             final_arbitrum_eth_balance = ?final_arbitrum_eth_balance,
-            "{} Deposit Executed Successfully \n Arbitrum USDC Change: {} | dYdX USDC Change: {} | Arbitrum ETH Change: {}", 
+            "{} Deposit Initiated Successfully \n Arbitrum USDC Change: {} | dYdX USDC Change: {} | Arbitrum ETH Change: {}", 
             log_string, 
             arbitrum_usdc_diff,
             dydx_usdc_diff,
@@ -255,7 +277,7 @@ impl DydxClient {
             log_string
         );
 
-        let (amount, msgs) = self.skip_go_get_route_and_msgs(
+        let (amount, estimated_time_secs, msgs) = self.skip_go_get_route_and_msgs(
             amount_in,
             amount_out,
             go_fast,
@@ -277,6 +299,7 @@ impl DydxClient {
             info!(
                 initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
                 withdrawal_amount_including_fees = ?amount,
+                expected_time_to_complete_secs = ?estimated_time_secs,
                 "{} Withdrawal Validated", 
                 log_string
             );
@@ -296,9 +319,9 @@ impl DydxClient {
         let balance = self.node_client.get_account_balance(
             &self.dydx_address.to_string().into(),
             &Denom::Usdc
-        ).await
-        .map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
-        let balance_decimal = Decimal::from_str(&balance.amount)?;
+        ).await.map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
+        let balance_u256 = U256::from_dec_str(&balance.amount)?;
+        let balance_decimal = u256_to_decimal(balance_u256, USDC_DECIMALS)?;
         Ok(balance_decimal)
     }
 
@@ -364,7 +387,7 @@ impl DydxClient {
         source_asset_chain_id: &str,
         dest_asset_denom: &str,
         dest_asset_chain_id: &str,
-    ) -> Result<(Decimal, skip_go::SkipGoGetMsgsResponse)> {
+    ) -> Result<(Decimal, u64, skip_go::SkipGoGetMsgsResponse)> {
         let amount_in: Option<String> = amount_in.map(|d| {
             let amount_u256 = decimal_to_u256(d, USDC_DECIMALS).unwrap();
             amount_u256.to_string()
@@ -392,6 +415,7 @@ impl DydxClient {
         let true_amount_out = route["amount_out"].as_str().unwrap();
         let required_chain_addresses = route["required_chain_addresses"].clone();
         let operations = route["operations"].clone();
+        let estimated_time_secs = route["estimated_route_duration_seconds"].as_u64().unwrap_or(0);
 
         let mut address_list = Vec::<String>::new();
         for chain in required_chain_addresses.as_array().unwrap() {
@@ -420,21 +444,22 @@ impl DydxClient {
         };
         debug!("SkipGo Msgs Request: {:#?}", msg_request);
         let msgs = skip_go::get_msgs(msg_request).await?;
-        info!("SkipGo Msgs Response: {:#?}", msgs);
+        debug!("SkipGo Msgs Response: {:#?}", msgs);
 
         let amount = u256_to_decimal(
             U256::from_dec_str(true_amount_in).unwrap(),
             USDC_DECIMALS,
         )?;
 
-        Ok((amount, msgs))
+        Ok((amount, estimated_time_secs, msgs))
     }
 
     async fn execute_skip_go_transfer(
         &self, 
         txs: Vec<skip_go::SkipGoTx>, 
         arbitrum_native_balance: Decimal,
-        log_string: &String
+        log_string: &String,
+        expected_time_to_complete_secs: u64,
     ) -> Result<()> {
         for tx in txs {
             match tx {
@@ -471,6 +496,13 @@ impl DydxClient {
                         "{} Transaction Executed Successfully", 
                         log_string
                     );
+
+                    // Spawn status polling
+                    self.spawn_status_polling(
+                        tx_hash, 
+                        ARBITRUM_CHAIN_ID.to_string(), 
+                        expected_time_to_complete_secs,
+                    ).await;
                 }
                 skip_go::SkipGoTx::SvmTx(svm_tx) => {
                     return Err(eyre::eyre!("No support for SVM transactions: {:#?}", svm_tx));
@@ -510,7 +542,7 @@ impl DydxClient {
         match receipt {
             Some(receipt) => {
                 if receipt.status == Some(U64::from(1)) {
-                    info!(
+                    debug!(
                         token = ?token_address,
                         spender = ?spender_address,
                         amount = ?required_allowance,
@@ -549,7 +581,7 @@ impl DydxClient {
         // Set tx gas and gas price
         let tx = tx.gas(gas_estimate).gas_price(gas_price_u256);
 
-        info!(
+        debug!(
             to = ?to_address,
             value = ?value,
             gas = ?gas_estimate,
@@ -588,7 +620,7 @@ impl DydxClient {
         // Simulate the transaction using eth_call
         match self.wallet_manager.signer.provider().call(&typed_tx, None).await {
             Ok(_) => {
-                info!("EVM transaction simulation successful");
+                debug!("EVM transaction simulation successful");
                 Ok(())
             }
             Err(e) => Err(eyre::eyre!("EVM transaction simulation failed: {}", e)),
@@ -624,6 +656,107 @@ impl DydxClient {
             None => Err(eyre::eyre!("EVM transaction receipt not found for tx_hash = {:?}", tx_hash)),
         }
     }
+
+    async fn spawn_status_polling(
+        &self, 
+        tx_hash: TxHash, 
+        chain_id: String, 
+        expected_time_to_complete_secs: u64, 
+    ) {     
+        let handle = tokio::spawn(async move {
+            let interval = Duration::from_secs(
+                60.max(expected_time_to_complete_secs / 5)
+            );
+            let start_time = Instant::now();
+            let tenth_expected = expected_time_to_complete_secs / 10;
+            let warn_threshold = expected_time_to_complete_secs + tenth_expected;
+            let error_threshold = expected_time_to_complete_secs + (5 * tenth_expected);
+            let get_status_request = skip_go::SkipGoGetTransactionStatusRequest {
+                tx_hash: format!("{:?}", tx_hash),
+                chain_id: chain_id.clone(),
+            };
+            info!(
+                tx_hash = ?tx_hash,
+                start_time = ?start_time,
+                expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                warn_threshold = ?warn_threshold,
+                error_threshold = ?error_threshold,
+                get_status_request = ?get_status_request,
+                "Starting SkipGo transaction status polling"
+            );
+
+            loop {
+                sleep(interval).await;
+                let elapsed_secs = start_time.elapsed().as_secs();
+                
+                let response = skip_go::get_transaction_status(get_status_request.clone()).await;
+                match response {
+                    Ok(res) => {
+                        match res.state {
+                            skip_go::SkipGoTransactionState::StateCompletedSuccess => {
+                                info!(
+                                    tx_hash = ?tx_hash,
+                                    "SkipGo transaction completed successfully"
+                                );
+                                break;
+                            }
+                            skip_go::SkipGoTransactionState::StateSubmitted | skip_go::SkipGoTransactionState::StatePending => {
+                                if elapsed_secs > (5 * error_threshold) {
+                                    error!(
+                                        tx_hash = ?tx_hash,
+                                        elapsed_secs = ?elapsed_secs,
+                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                        "SkipGo transaction pending for an extremely long time, exceeding 5x error threshold. Stopping polling."
+                                    );
+                                    break;
+                                } else if elapsed_secs > error_threshold {
+                                    error!(
+                                        tx_hash = ?tx_hash,
+                                        elapsed_secs = ?elapsed_secs,
+                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                        "SkipGo transaction pending for too long, exceeding error threshold"
+                                    );
+                                } else if elapsed_secs > warn_threshold {
+                                    warn!(
+                                        tx_hash = ?tx_hash,
+                                        elapsed_secs = ?elapsed_secs,
+                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                        "SkipGo transaction pending for too long, exceeding warning threshold"
+                                    );
+                                } else {
+                                    info!(
+                                        tx_hash = ?tx_hash,
+                                        elapsed_secs = ?elapsed_secs,
+                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                        "SkipGo transaction pending"
+                                    );
+                                }
+                            }
+                            _ => {
+                                error!(
+                                    tx_hash = ?tx_hash,
+                                    state = ?res.state,
+                                    status_response = ?res,
+                                    "SkipGo transaction failed"
+                                );
+                                break;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!(
+                            error = ?e,
+                            "Error fetching SkipGo transaction status for tx_hash: {:?}",
+                            tx_hash
+                        );
+                    }
+                }
+            }
+        });   
+        
+        // Store the handle
+        self.active_transfer_polling_tasks.lock().await.push(handle);
+    }
 }
 
 // ==================== Utility methods ====================
@@ -641,7 +774,7 @@ fn decimal_to_u256(value: Decimal, decimals: u8) -> Result<U256> {
 }
 
 /// Helper to convert U256 to Decimal
-pub fn u256_to_decimal(value: U256, decimals: u8) -> Result<Decimal> {
+fn u256_to_decimal(value: U256, decimals: u8) -> Result<Decimal> {
     let formatted = ethers::utils::format_units(value, decimals as usize)
         .map_err(|e| eyre::eyre!("Failed to format U256 value: {}", e))?;
     Decimal::from_str(&formatted).map_err(|e| eyre::eyre!("Failed to parse formatted value: {}", e))

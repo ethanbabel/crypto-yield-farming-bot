@@ -44,23 +44,23 @@ async fn main() -> Result<()> {
     if let Err(e) = dydx_client.dydx_deposit(
         None,
         Some(Decimal::from_str("5.0")?), // 5 USDC
-        false,
+        true,
         Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
     ).await {
         error!("Error during dYdX deposit: {}", e);
         return Err(e);
     }
 
-    // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
-    if let Err(e) = dydx_client.dydx_withdrawal(
-        Some(Decimal::from_str("5.0")?), // 5 USDC
-        None,
-        false,
-        Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
-    ).await {
-        error!("Error during dYdX withdrawal: {}", e);
-        return Err(e);
-    }
+    // // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
+    // if let Err(e) = dydx_client.dydx_withdrawal(
+    //     Some(Decimal::from_str("5.0")?), // 5 USDC
+    //     None,
+    //     false,
+    //     Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
+    // ).await {
+    //     error!("Error during dYdX withdrawal: {}", e);
+    //     return Err(e);
+    // }
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

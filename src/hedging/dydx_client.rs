@@ -5,6 +5,10 @@ use tracing::{instrument, debug, info};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use ethers::prelude::*;
+use ethers::types::{
+    TransactionRequest, Bytes, TxHash, TransactionReceipt, 
+    transaction::eip2718::TypedTransaction
+};
 use futures::stream::{self, StreamExt};
 use dydx::{
     config::ClientConfig,
@@ -28,11 +32,22 @@ use crate::wallet::WalletManager;
 use super::hedge_utils;
 use super::skip_go;
 
+const MAX_FEE_PER_GAS_BUFFER: f64 = 1.05; // 5% above the current gas price
+
 const ARBITRUM_CHAIN_ID: &str = "42161";
 const DYDX_CHAIN_ID: &str = "dydx-mainnet-1";
 const ARBITRUM_USDC_DENOM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const DYDX_USDC_DENOM: &str = "ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14E9E20E2545B5";
 const USDC_DECIMALS: u8 = 6;
+
+// ERC20 ABI for token approvals
+abigen!(
+    IERC20Approve,
+    r#"[
+        function approve(address spender, uint256 amount) external returns (bool)
+        function allowance(address owner, address spender) external view returns (uint256)
+    ]"#
+);
 
 pub struct DydxClient {
     config: Arc<config::Config>,
@@ -132,9 +147,10 @@ impl DydxClient {
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
     ) -> Result<()> {
-        // Get USDC balances
+        // Get USDC + ETH balances
         let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
         let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+        let initial_arbitrum_eth_balance = self.wallet_manager.get_native_balance().await?;
 
         // Sanity check request
         let log_string = self.get_deposit_log_string(
@@ -146,6 +162,7 @@ impl DydxClient {
         info!(
             initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
             initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
+            initial_arbitrum_eth_balance = ?initial_arbitrum_eth_balance,
             "{} Deposit Initiated", 
             log_string
         );
@@ -163,7 +180,17 @@ impl DydxClient {
         ).await?;
 
         // Validate requested transfer amount and estimated fees against balances
-        if amount > initial_arbitrum_usdc_balance {
+        let mut combined_gas_fees = Decimal::ZERO;
+        for tx in &msgs.txs {
+            if let skip_go::SkipGoTx::EvmTx(evm_tx) = tx {
+                let gas_fee_decimal = u256_to_decimal(
+                    U256::from_dec_str(&evm_tx.evm_tx.value).unwrap(),
+                    USDC_DECIMALS,
+                )?;
+                combined_gas_fees += gas_fee_decimal;
+            }
+        }
+        if amount > initial_arbitrum_usdc_balance || combined_gas_fees > initial_arbitrum_eth_balance {
             return Err(eyre::eyre!(
                 "Insufficient Arbitrum USDC balance for deposit: have {}, need {}",
                 initial_arbitrum_usdc_balance,
@@ -177,6 +204,27 @@ impl DydxClient {
                 log_string
             );
         }
+
+        // Execute SkipGo transfer
+        self.execute_skip_go_transfer(msgs.txs, initial_arbitrum_eth_balance, &log_string).await?;
+
+        // Final balances
+        let final_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
+        let final_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+        let final_arbitrum_eth_balance = self.wallet_manager.get_native_balance().await?;
+        let arbitrum_usdc_diff = final_arbitrum_usdc_balance - initial_arbitrum_usdc_balance;
+        let dydx_usdc_diff = final_dydx_usdc_balance - initial_dydx_usdc_balance;
+        let arbitrum_eth_diff = final_arbitrum_eth_balance - initial_arbitrum_eth_balance;
+        info!(
+            final_arbitrum_usdc_balance = ?final_arbitrum_usdc_balance,
+            final_dydx_usdc_balance = ?final_dydx_usdc_balance,
+            final_arbitrum_eth_balance = ?final_arbitrum_eth_balance,
+            "{} Deposit Executed Successfully \n Arbitrum USDC Change: {} | dYdX USDC Change: {} | Arbitrum ETH Change: {}", 
+            log_string, 
+            arbitrum_usdc_diff,
+            dydx_usdc_diff,
+            arbitrum_eth_diff
+        );
 
         Ok(())
     }
@@ -382,21 +430,200 @@ impl DydxClient {
         Ok((amount, msgs))
     }
 
-    // async fn execute_skip_go_transfer(&self, txs: Vec<skip_go::SkipGoTx>) -> Result<()> {
-    //     for tx in txs {
-    //         match tx {
-    //             skip_go::SkipGoTx::CosmosTx(cosmos_tx) => {
-    //                 debug!("Executing Cosmos Tx: {:#?}", cosmos_tx);
-    //             }
-    //             skip_go::SkipGoTx::EvmTx(evm_tx) => {
-    //                 debug!("Executing EVM Tx: {:#?}", evm_tx);
-    //             }
-    //             skip_go::SkipGoTx::SvmTx(svm_tx) => {
-    //                 return Err(eyre::eyre!("No support for SVM transactions: {:#?}", svm_tx));
-    //             }
-    //         }
-    //     }
-    // }
+    async fn execute_skip_go_transfer(
+        &self, 
+        txs: Vec<skip_go::SkipGoTx>, 
+        arbitrum_native_balance: Decimal,
+        log_string: &String
+    ) -> Result<()> {
+        for tx in txs {
+            match tx {
+                skip_go::SkipGoTx::CosmosTx(cosmos_tx) => {
+                    debug!("Executing Cosmos Tx: {:#?}", cosmos_tx);
+
+                    // Not yet implemented
+                    return Err(eyre::eyre!("No support for Cosmos transactions yet: {:#?}", cosmos_tx));
+
+                }
+                skip_go::SkipGoTx::EvmTx(evm_tx) => {
+                    debug!("Executing EVM Tx: {:#?}", evm_tx);
+
+                    for required_approval in &evm_tx.evm_tx.required_erc20_approvals {
+                        self.approve_erc20(required_approval.clone()).await?;
+                    }
+
+                    let evm_transaction = self.build_evm_transaction(evm_tx).await?;
+                    debug!(transaction = ?evm_transaction, "{} Transaction Built", log_string);
+
+                    self.simulate_evm_transaction(&evm_transaction, arbitrum_native_balance).await?;
+                    debug!(transaction = ?evm_transaction, "{} Transaction Simulated", log_string);
+
+                    let (tx_hash, receipt) = self.execute_evm_transaction(evm_transaction).await?;
+                    let gas_used = u256_to_decimal(receipt.gas_used.unwrap_or(U256::zero()), 0)?;
+                    let gas_price = u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
+                    let total_gas_cost = gas_used * gas_price;
+                    info!(
+                        tx_hash = ?tx_hash,
+                        gas_used = ?gas_used,
+                        gas_price = ?gas_price,
+                        total_gas_cost = ?total_gas_cost,
+                        total_gas_cost_usd = ?(total_gas_cost * self.wallet_manager.native_token.last_mid_price_usd),
+                        "{} Transaction Executed Successfully", 
+                        log_string
+                    );
+                }
+                skip_go::SkipGoTx::SvmTx(svm_tx) => {
+                    return Err(eyre::eyre!("No support for SVM transactions: {:#?}", svm_tx));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn approve_erc20(&self, approval: skip_go::EvmRequiredErc20Approval) -> Result<()> {
+        let token_address = Address::from_str(&approval.token_contract)?;
+        let spender_address = Address::from_str(&approval.spender)?;
+        let required_allowance = U256::from_dec_str(&approval.amount)?;
+
+        let erc20_contract = IERC20Approve::new(token_address, self.wallet_manager.signer.clone());
+
+        // Check current allowance
+        let current_allowance = erc20_contract
+            .allowance(self.wallet_manager.address, spender_address)
+            .call()
+            .await?;
+        if current_allowance >= required_allowance {
+            info!(
+                token = ?token_address,
+                spender = ?spender_address,
+                current_allowance = ?current_allowance,
+                "Sufficient allowance already granted, no approval needed"
+            );
+            return Ok(());
+        }
+
+        // Send approval transaction
+        let approve_tx = erc20_contract.approve(spender_address, required_allowance);
+        let pending_tx = approve_tx.send().await?;
+        let receipt = pending_tx.await?;
+
+        match receipt {
+            Some(receipt) => {
+                if receipt.status == Some(U64::from(1)) {
+                    info!(
+                        token = ?token_address,
+                        spender = ?spender_address,
+                        amount = ?required_allowance,
+                        tx_hash = ?receipt.transaction_hash,
+                        "ERC20 approval successful"
+                    );
+                    Ok(())
+                } else {
+                    Err(eyre::eyre!(
+                        "ERC20 approval transaction failed: tx_hash = {:?}",
+                        receipt.transaction_hash
+                    ))
+                }
+            }
+            None => Err(eyre::eyre!("ERC20 approval receipt not found")),
+        }
+    }
+    
+    async fn build_evm_transaction(&self, evm_tx_wrapper: skip_go::TxsEvmTx) -> Result<TransactionRequest> {
+        let to_address = Address::from_str(&evm_tx_wrapper.evm_tx.to)?;
+        let data = Bytes::from_str(&evm_tx_wrapper.evm_tx.data)?;
+        let value = U256::from_dec_str(&evm_tx_wrapper.evm_tx.value)?;
+
+        let tx = TransactionRequest::new()
+            .to(to_address)
+            .from(self.wallet_manager.address)
+            .data(data)
+            .value(value);
+
+        // Estimate gas using the provider
+        let gas_estimate = self.wallet_manager.signer.provider().estimate_gas(&tx.clone().into(), None).await?;
+        let gas_price_decimal = u256_to_decimal(self.wallet_manager.signer.provider().get_gas_price().await?, 0)?;
+        let gas_price_with_buf = gas_price_decimal * Decimal::from_f64(MAX_FEE_PER_GAS_BUFFER).unwrap();
+        let gas_price_u256 = decimal_to_u256(gas_price_with_buf, 0)?;
+
+        // Set tx gas and gas price
+        let tx = tx.gas(gas_estimate).gas_price(gas_price_u256);
+
+        info!(
+            to = ?to_address,
+            value = ?value,
+            gas = ?gas_estimate,
+            gas_price = ?gas_price_u256,
+            "EVM transaction built successfully"
+        );
+
+        Ok(tx)
+    }
+
+    async fn simulate_evm_transaction(&self, tx: &TransactionRequest, native_balance: Decimal) -> Result<()> {
+        // Get gas limits from transaction request
+        let gas_dec = u256_to_decimal(tx.gas.unwrap_or(U256::zero()), 0)?;
+        let gas_price_dec = u256_to_decimal(tx.gas_price.unwrap_or(U256::zero()), 18)?;
+        let gas_cost_limit = gas_dec * gas_price_dec;
+
+        if native_balance < gas_cost_limit {
+            return Err(eyre::eyre!(
+                "Insufficient native balance for gas: have {}, need {}",
+                native_balance,
+                gas_cost_limit
+            ));
+        }
+
+        debug!(
+            gas_limit = %gas_dec,
+            gas_price = %gas_price_dec,
+            gas_cost_limit = %gas_cost_limit,
+            native_balance = %native_balance,
+            "Simulating transaction with gas limits"
+        );
+
+        // Convert TransactionRequest to TypedTransaction
+        let typed_tx: TypedTransaction = tx.clone().into();
+
+        // Simulate the transaction using eth_call
+        match self.wallet_manager.signer.provider().call(&typed_tx, None).await {
+            Ok(_) => {
+                info!("EVM transaction simulation successful");
+                Ok(())
+            }
+            Err(e) => Err(eyre::eyre!("EVM transaction simulation failed: {}", e)),
+        }
+    }
+
+    async fn execute_evm_transaction(&self, tx: TransactionRequest) -> Result<(TxHash, TransactionReceipt)> {
+        let pending_tx = self.wallet_manager.signer.send_transaction(tx, None).await?;
+        let tx_hash = pending_tx.tx_hash();
+
+        debug!(
+            tx_hash = ?tx_hash,
+            "EVM transaction sent, awaiting confirmation"
+        );
+
+        // Wait for confirmation
+        match pending_tx.await? {
+            Some(receipt) => {
+                if receipt.status == Some(U64::from(1)) {
+                    debug!(
+                        tx_hash = ?tx_hash,
+                        "EVM transaction confirmed successfully"
+                    );
+                    Ok((tx_hash, receipt))
+                } else {
+                    Err(eyre::eyre!(
+                        "EVM transaction failed: tx_hash = {:?}, receipt = {:#?}",
+                        tx_hash,
+                        receipt
+                    ))
+                }
+            }
+            None => Err(eyre::eyre!("EVM transaction receipt not found for tx_hash = {:?}", tx_hash)),
+        }
+    }
 }
 
 // ==================== Utility methods ====================

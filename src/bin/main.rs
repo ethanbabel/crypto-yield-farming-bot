@@ -2,7 +2,6 @@ use dotenvy::dotenv;
 use eyre::Result;
 use tracing::{info, error};
 use std::sync::Arc;
-use rust_decimal::prelude::*;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
@@ -37,33 +36,10 @@ async fn main() -> Result<()> {
     info!("Wallet manager initialized and tokens loaded");
 
     // Initialize dydx client
-    let mut dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
-    info!("dYdX client initialized successfully");
-
-    // Use SkipGo to get route and msgs for a deposit from Arbitrum to dYdX
-    if let Err(e) = dydx_client.dydx_deposit(
-        None,
-        Some(Decimal::from_str("1.0")?), // 1 USDC
-        false,
-        Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
-    ).await {
-        error!("Error during dYdX deposit: {}", e);
+    if let Err(e) = DydxClient::new(cfg.clone(), wallet_manager.clone()).await {
+        error!("Error initializing dYdX client: {}", e);
         return Err(e);
     }
-
-    // // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
-    // if let Err(e) = dydx_client.dydx_withdrawal(
-    //     Some(Decimal::from_str("5.0")?), // 5 USDC
-    //     None,
-    //     false,
-    //     Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
-    // ).await {
-    //     error!("Error during dYdX withdrawal: {}", e);
-    //     return Err(e);
-    // }
-
-    // Keep the application running until all active transfers are complete
-    dydx_client.wait_for_active_transfers().await;
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

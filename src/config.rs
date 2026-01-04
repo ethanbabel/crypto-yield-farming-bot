@@ -13,6 +13,7 @@ pub struct Config {
     pub alchemy_provider: Arc<Provider<Http>>,
     pub alchemy_ws_url: String,
     pub wallet_private_key: String,
+    pub wallet_mnemonic: String,
     pub network_mode: String,
     pub chain_id: u64,
     pub gmx_datastore: Address,
@@ -58,6 +59,13 @@ impl Config {
         let wallet_private_key = match network_mode.as_str() {
             "test" => env::var("WALLET_PRIVATE_KEY_TEST").expect("Missing WALLET_PRIVATE_KEY_TEST"),
             "prod" => env::var("WALLET_PRIVATE_KEY_PROD").expect("Missing WALLET_PRIVATE_KEY_PROD"),
+            _ => panic!("Invalid NETWORK_MODE"),
+        };
+
+        // Load wallet mnemonic based on network mode
+        let wallet_mnemonic = match network_mode.as_str() {
+            "test" => env::var("WALLET_MNEMONIC_TEST").expect("Missing WALLET_MNEMONIC_TEST"),
+            "prod" => env::var("WALLET_MNEMONIC_PROD").expect("Missing WALLET_MNEMONIC_PROD"),
             _ => panic!("Invalid NETWORK_MODE"),
         };
 
@@ -115,6 +123,7 @@ impl Config {
             alchemy_provider: Arc::new(provider),
             alchemy_ws_url,
             wallet_private_key,
+            wallet_mnemonic,
             network_mode,
             chain_id,
             gmx_datastore: gmx_datastore.parse().expect("Invalid GMX DataStore address"),

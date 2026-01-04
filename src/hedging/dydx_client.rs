@@ -16,7 +16,8 @@ use dydx::{
     config::ClientConfig,
     node::{
         NodeClient,
-        // Account,
+        Wallet,
+        Account,
     },
     indexer::{
         IndexerClient,
@@ -25,9 +26,8 @@ use dydx::{
 };
 use cosmrs::{
     crypto::secp256k1,
-    // AccountId,
+    bip32::{Mnemonic, DerivationPath, Language},
 };
-use hex;
 
 use crate::config;
 use crate::wallet::WalletManager;
@@ -56,7 +56,7 @@ pub struct DydxClient {
     wallet_manager: Arc<WalletManager>,
     node_client: NodeClient,
     indexer_client: IndexerClient,
-    dydx_address: String,
+    dydx_account: Account,
     active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -68,24 +68,29 @@ impl DydxClient {
         let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml")
             .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
-        let node_client = NodeClient::connect(config.node)
+        let mut node_client = NodeClient::connect(config.node)
             .await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let indexer_client = IndexerClient::new(config.indexer);
 
-        // Manually derive dydx account from private key
-        let address = derive_cosmos_address_from_key(&cfg, "dydx")?;
-
-        // let account = node_client.get_account(&address.to_string().into()).await
-        //     .map_err(|e| eyre::eyre!("Failed to fetch dYdX account for address {}: {}", address, e))?;
-        // info!(account = ?account, "dYdX account fetched successfully");
+        // Instantiate dYdX wallet from mnemonic
+        let dydx_wallet = Wallet::from_mnemonic(&cfg.wallet_mnemonic)
+            .map_err(|e| eyre::eyre!("Failed to create dYdX wallet from mnemonic: {}", e))?;
+        // Instantiate dYdX Account from wallet
+        let dydx_account = dydx_wallet.account(0, &mut node_client)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to create dYdX account from wallet: {}", e))?;
+        info!(
+            dydx_address = %dydx_account.address(),
+            "dYdX wallet instantiated from mnemonic"
+        );
         
         Ok(Self {
             config: cfg,
             wallet_manager,
             node_client,
             indexer_client,
-            dydx_address: address,
+            dydx_account,
             active_transfer_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
     }
@@ -316,7 +321,7 @@ impl DydxClient {
 
     async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
         let balance = self.node_client.get_account_balance(
-            &self.dydx_address.to_string().into(),
+            &self.dydx_account.address(),
             &Denom::Usdc
         ).await.map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
         let balance_u256 = U256::from_dec_str(&balance.amount)?;
@@ -421,7 +426,7 @@ impl DydxClient {
             let chain_str = chain.as_str().unwrap();
             if !chain_str.chars().all(|c| c.is_numeric()) {
                 let chain_prefix = chain_str.find('-').map(|idx| &chain_str[..idx]).unwrap_or(chain_str);
-                let address = derive_cosmos_address_from_key(&self.config, chain_prefix)?;
+                let address = derive_cosmos_address_from_mnemonic(&self.config, chain_prefix, None)?;
                 address_list.push(address);
             } else {
                 address_list.push(ethers::utils::to_checksum(&self.wallet_manager.address, None));
@@ -779,12 +784,20 @@ fn u256_to_decimal(value: U256, decimals: u8) -> Result<Decimal> {
     Decimal::from_str(&formatted).map_err(|e| eyre::eyre!("Failed to parse formatted value: {}", e))
 }
     
-/// Derive Cosmos address from private key for a given chain
-fn derive_cosmos_address_from_key(config: &config::Config, chain_prefix: &str) -> Result<String> {
-    let private_key_str = &config.wallet_private_key.clone()[2..]; // Remove "0x" prefix
-    let private_key_bytes = hex::decode(&private_key_str)?;
-    let signing_key = secp256k1::SigningKey::from_slice(&private_key_bytes)?;
-    let public_key = signing_key.public_key();
-    let address = public_key.account_id(chain_prefix)?;
-    Ok(address.to_string())
+/// Derive Cosmos address from mnemonic for a given chain
+fn derive_cosmos_address_from_mnemonic(
+    config: &config::Config, 
+    chain_prefix: &str, 
+    index: Option<u32>,
+) -> Result<String> {
+    let index = index.unwrap_or(0);
+    let mnemonic = Mnemonic::new(config.wallet_mnemonic.clone(), Language::English)?;
+    let seed = mnemonic.to_seed("");
+    let derivation_str = format!("m/44'/118'/0'/0/{}", index);
+    let derivation_path = DerivationPath::from_str(&derivation_str)?;
+    let private_key = secp256k1::SigningKey::derive_from_path(&seed, &derivation_path)?;
+    let public_key = private_key.public_key();
+    let account_id = public_key.account_id(chain_prefix)?;
+    let address = account_id.to_string();
+    Ok(address)
 }

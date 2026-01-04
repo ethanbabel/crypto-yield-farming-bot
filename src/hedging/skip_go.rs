@@ -622,3 +622,45 @@ pub enum SkipGoTransactionState {
     #[serde(rename = "STATE_PENDING_ERROR")]
     StatePendingError,
 }
+
+// -------------------- Track Transaction --------------------
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SkipGoTrackTransactionRequest {
+    pub tx_hash: String,
+    pub chain_id: String,
+}
+
+pub async fn track_transaction(req: SkipGoTrackTransactionRequest) -> Result<()> {
+    let mut last_err = None;
+    for attempt in 1..=MAX_RETRIES {
+        match try_track_transaction(&req).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                warn!(
+                    attempt,
+                    error = ?last_err.as_ref().unwrap(),
+                    "Attempt to track transaction with SkipGo API failed",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+    }
+    error!(
+        attempts = MAX_RETRIES,
+        error = ?last_err.as_ref().unwrap(),
+        "All attempts to track transaction with SkipGo API failed",
+    );
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("Unknown error occurred while tracking transaction")))
+}
+
+async fn try_track_transaction(req: &SkipGoTrackTransactionRequest) -> Result<()> {
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let url = format!("{}/tx/track", SKIPGO_BASE_URL);
+    let response = client.post(&url).json(req).send().await?;
+
+    response.error_for_status_ref()?;
+    Ok(())
+}

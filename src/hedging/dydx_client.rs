@@ -26,10 +26,8 @@ use dydx::{
 use cosmrs::{
     crypto::secp256k1,
     bip32::{Mnemonic, DerivationPath, Language},
-    tx::{Body, SignDoc, SignerInfo, Fee, Raw},
     Any,
 };
-use base64::{engine::general_purpose, Engine as _};
 use ibc_proto::ibc::applications::transfer::v1::MsgTransfer;
 use prost::Message as ProstMessage;
 
@@ -62,7 +60,6 @@ pub struct DydxClient {
     indexer_client: IndexerClient,
     dydx_wallet: Wallet,
     dydx_address: String,
-    dydx_signing_key: secp256k1::SigningKey,
     active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -80,8 +77,6 @@ impl DydxClient {
         let indexer_client = IndexerClient::new(config.indexer);
         let dydx_wallet = Wallet::from_mnemonic(&cfg.wallet_mnemonic)
             .map_err(|e| eyre::eyre!("Failed to create dYdX wallet from mnemonic: {}", e))?;
-        let dydx_signing_key = get_dydx_signing_key_from_mnemonic(&cfg)
-            .map_err(|e| eyre::eyre!("Failed to derive dYdX signing key from mnemonic: {}", e))?;
         let dydx_address = derive_cosmos_address_from_mnemonic(&cfg, "dydx", None)
             .map_err(|e| eyre::eyre!("Failed to derive dYdX address from mnemonic: {}", e))?;
         
@@ -92,7 +87,6 @@ impl DydxClient {
             indexer_client,
             dydx_wallet,
             dydx_address,
-            dydx_signing_key,
             active_transfer_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
     }
@@ -234,7 +228,6 @@ impl DydxClient {
             initial_arbitrum_eth_balance, 
             &log_string, 
             estimated_time_secs,
-            msgs.estimated_fees[0].amount.parse::<u64>()?,
         ).await?;
 
         // Final balances
@@ -318,7 +311,6 @@ impl DydxClient {
             Decimal::ZERO, // No Arbitrum native balance needed for withdrawal
             &log_string, 
             estimated_time_secs,
-            msgs.estimated_fees[0].amount.parse::<u64>()?,
         ).await?;
 
         // Final balances
@@ -474,7 +466,7 @@ impl DydxClient {
         };
         debug!("SkipGo Msgs Request: {:#?}", msg_request);
         let msgs = skip_go::get_msgs(msg_request).await?;
-        info!("SkipGo Msgs Response: {:#?}", msgs);
+        debug!("SkipGo Msgs Response: {:#?}", msgs);
 
         let amount = u256_to_decimal(
             U256::from_dec_str(true_amount_in).unwrap(),
@@ -490,36 +482,28 @@ impl DydxClient {
         arbitrum_native_balance: Decimal,
         log_string: &String,
         expected_time_to_complete_secs: u64,
-        estimated_fee: u64,
     ) -> Result<()> {
         for tx in txs {
             match tx {
                 skip_go::SkipGoTx::CosmosTx(cosmos_tx) => {
                     debug!("Executing Cosmos Tx: {:#?}", cosmos_tx);
 
-                    // let signed_tx = self.construct_signed_cosmos_tx(cosmos_tx, estimated_fee).await?;
-                    // info!(
-                    //     signed_tx = ?signed_tx,
-                    //     "{} Cosmos Transaction Signed", 
-                    //     log_string
-                    // );
-
-                    // let submit_request = skip_go::SkipGoSubmitTransactionRequest {
-                    //     tx: signed_tx,
-                    //     chain_id: DYDX_CHAIN_ID.to_string(),
-                    // };
-                    // let response = skip_go::submit_transaction(submit_request).await?;
-                    // let tx_hash = response.tx_hash;
-                    // info!(
-                    //     tx_hash = ?tx_hash,
-                    //     "{} Cosmos Transaction Submitted Successfully", 
-                    //     log_string
-                    // );
-
-                    let tx_hash = self.construct_and_execute4_cosmos_tx(cosmos_tx, estimated_fee).await?;
+                    let tx_hash = self.construct_and_execute4_cosmos_tx(cosmos_tx).await?;
                     info!(
                         tx_hash = ?tx_hash,
                         "{} Cosmos Transaction Submitted Successfully", 
+                        log_string
+                    );
+
+                    // Track transaction 
+                    let track_transaction_request = skip_go::SkipGoTrackTransactionRequest {
+                        tx_hash: tx_hash.clone(),
+                        chain_id: DYDX_CHAIN_ID.to_string(),
+                    };
+                    skip_go::track_transaction(track_transaction_request).await?;
+                    info!(
+                        tx_hash = ?tx_hash,
+                        "{} Cosmos Transaction Tracked Successfully", 
                         log_string
                     );
 
@@ -559,7 +543,7 @@ impl DydxClient {
 
                     // Spawn status polling
                     self.spawn_status_polling(
-                        tx_hash.to_string(),
+                        format!("{:#x}", tx_hash),
                         ARBITRUM_CHAIN_ID.to_string(), 
                         expected_time_to_complete_secs,
                     ).await;
@@ -720,7 +704,6 @@ impl DydxClient {
     async fn construct_and_execute4_cosmos_tx(
         &mut self,
         cosmos_tx_wrapper: skip_go::TxsCosmosTx,
-        estimated_fee: u64,
     ) -> Result<String> {
         // Construct messages
         let mut tx_msgs: Vec<Any> = Vec::new();
@@ -800,7 +783,7 @@ impl DydxClient {
 
         // Broadcast transaction
         let tx_hash = self.node_client.broadcast_transaction(final_tx_raw).await
-                        .map_err(|e| eyre::eyre!("Failed to broadcast Cosmos transaction: {}", e))?;
+            .map_err(|e| eyre::eyre!("Failed to broadcast Cosmos transaction: {}", e))?;
 
         Ok(tx_hash)
     }
@@ -820,7 +803,7 @@ impl DydxClient {
             let warn_threshold = expected_time_to_complete_secs + tenth_expected;
             let error_threshold = expected_time_to_complete_secs + (5 * tenth_expected);
             let get_status_request = skip_go::SkipGoGetTransactionStatusRequest {
-                tx_hash: format!("{:?}", tx_hash),
+                tx_hash: tx_hash.clone(),
                 chain_id: chain_id.clone(),
             };
             info!(
@@ -946,15 +929,3 @@ fn derive_cosmos_address_from_mnemonic(
     let address = account_id.to_string();
     Ok(address)
 }
-
-/// Get dydx signing key from mnemonic
-fn get_dydx_signing_key_from_mnemonic(
-    config: &config::Config,
-) -> Result<secp256k1::SigningKey> {
-    let mnemonic = Mnemonic::new(config.wallet_mnemonic.clone(), Language::English)?;
-    let seed = mnemonic.to_seed("");
-    let derivation_path = DerivationPath::from_str("m/44'/118'/0'/0/0")?;
-    let private_key = secp256k1::SigningKey::derive_from_path(&seed, &derivation_path)?;
-    Ok(private_key)
-}
-

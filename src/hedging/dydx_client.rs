@@ -17,7 +17,6 @@ use dydx::{
     node::{
         NodeClient,
         Wallet,
-        Account,
     },
     indexer::{
         IndexerClient,
@@ -27,7 +26,12 @@ use dydx::{
 use cosmrs::{
     crypto::secp256k1,
     bip32::{Mnemonic, DerivationPath, Language},
+    tx::{Body, SignDoc, SignerInfo, Fee, Raw},
+    Any,
 };
+use base64::{engine::general_purpose, Engine as _};
+use ibc_proto::ibc::applications::transfer::v1::MsgTransfer;
+use prost::Message as ProstMessage;
 
 use crate::config;
 use crate::wallet::WalletManager;
@@ -56,7 +60,9 @@ pub struct DydxClient {
     wallet_manager: Arc<WalletManager>,
     node_client: NodeClient,
     indexer_client: IndexerClient,
-    dydx_account: Account,
+    dydx_wallet: Wallet,
+    dydx_address: String,
+    dydx_signing_key: secp256k1::SigningKey,
     active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -68,29 +74,25 @@ impl DydxClient {
         let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml")
             .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
-        let mut node_client = NodeClient::connect(config.node)
+        let node_client = NodeClient::connect(config.node)
             .await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let indexer_client = IndexerClient::new(config.indexer);
-
-        // Instantiate dYdX wallet from mnemonic
         let dydx_wallet = Wallet::from_mnemonic(&cfg.wallet_mnemonic)
             .map_err(|e| eyre::eyre!("Failed to create dYdX wallet from mnemonic: {}", e))?;
-        // Instantiate dYdX Account from wallet
-        let dydx_account = dydx_wallet.account(0, &mut node_client)
-            .await
-            .map_err(|e| eyre::eyre!("Failed to create dYdX account from wallet: {}", e))?;
-        info!(
-            dydx_address = %dydx_account.address(),
-            "dYdX wallet instantiated from mnemonic"
-        );
+        let dydx_signing_key = get_dydx_signing_key_from_mnemonic(&cfg)
+            .map_err(|e| eyre::eyre!("Failed to derive dYdX signing key from mnemonic: {}", e))?;
+        let dydx_address = derive_cosmos_address_from_mnemonic(&cfg, "dydx", None)
+            .map_err(|e| eyre::eyre!("Failed to derive dYdX address from mnemonic: {}", e))?;
         
         Ok(Self {
             config: cfg,
             wallet_manager,
             node_client,
             indexer_client,
-            dydx_account,
+            dydx_wallet,
+            dydx_address,
+            dydx_signing_key,
             active_transfer_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
     }
@@ -231,7 +233,8 @@ impl DydxClient {
             msgs.txs, 
             initial_arbitrum_eth_balance, 
             &log_string, 
-            estimated_time_secs
+            estimated_time_secs,
+            msgs.estimated_fees[0].amount.parse::<u64>()?,
         ).await?;
 
         // Final balances
@@ -309,6 +312,29 @@ impl DydxClient {
             );
         }
 
+        // Execute SkipGo transfer
+        self.execute_skip_go_transfer(
+            msgs.txs, 
+            Decimal::ZERO, // No Arbitrum native balance needed for withdrawal
+            &log_string, 
+            estimated_time_secs,
+            msgs.estimated_fees[0].amount.parse::<u64>()?,
+        ).await?;
+
+        // Final balances
+        let final_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
+        let final_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+        let arbitrum_usdc_diff = final_arbitrum_usdc_balance - initial_arbitrum_usdc_balance;
+        let dydx_usdc_diff = final_dydx_usdc_balance - initial_dydx_usdc_balance;
+        info!(
+            final_arbitrum_usdc_balance = ?final_arbitrum_usdc_balance,
+            final_dydx_usdc_balance = ?final_dydx_usdc_balance,
+            "{} Withdrawal Initiated Successfully \n Arbitrum USDC Change: {} | dYdX USDC Change: {}", 
+            log_string, 
+            arbitrum_usdc_diff,
+            dydx_usdc_diff,
+        );
+
         Ok(())
     }
 
@@ -321,7 +347,7 @@ impl DydxClient {
 
     async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
         let balance = self.node_client.get_account_balance(
-            &self.dydx_account.address(),
+            &self.dydx_address.clone().into(),
             &Denom::Usdc
         ).await.map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
         let balance_u256 = U256::from_dec_str(&balance.amount)?;
@@ -448,7 +474,7 @@ impl DydxClient {
         };
         debug!("SkipGo Msgs Request: {:#?}", msg_request);
         let msgs = skip_go::get_msgs(msg_request).await?;
-        debug!("SkipGo Msgs Response: {:#?}", msgs);
+        info!("SkipGo Msgs Response: {:#?}", msgs);
 
         let amount = u256_to_decimal(
             U256::from_dec_str(true_amount_in).unwrap(),
@@ -459,20 +485,50 @@ impl DydxClient {
     }
 
     async fn execute_skip_go_transfer(
-        &self, 
+        &mut self, 
         txs: Vec<skip_go::SkipGoTx>, 
         arbitrum_native_balance: Decimal,
         log_string: &String,
         expected_time_to_complete_secs: u64,
+        estimated_fee: u64,
     ) -> Result<()> {
         for tx in txs {
             match tx {
                 skip_go::SkipGoTx::CosmosTx(cosmos_tx) => {
                     debug!("Executing Cosmos Tx: {:#?}", cosmos_tx);
 
-                    // Not yet implemented
-                    return Err(eyre::eyre!("No support for Cosmos transactions yet: {:#?}", cosmos_tx));
+                    // let signed_tx = self.construct_signed_cosmos_tx(cosmos_tx, estimated_fee).await?;
+                    // info!(
+                    //     signed_tx = ?signed_tx,
+                    //     "{} Cosmos Transaction Signed", 
+                    //     log_string
+                    // );
 
+                    // let submit_request = skip_go::SkipGoSubmitTransactionRequest {
+                    //     tx: signed_tx,
+                    //     chain_id: DYDX_CHAIN_ID.to_string(),
+                    // };
+                    // let response = skip_go::submit_transaction(submit_request).await?;
+                    // let tx_hash = response.tx_hash;
+                    // info!(
+                    //     tx_hash = ?tx_hash,
+                    //     "{} Cosmos Transaction Submitted Successfully", 
+                    //     log_string
+                    // );
+
+                    let tx_hash = self.construct_and_execute4_cosmos_tx(cosmos_tx, estimated_fee).await?;
+                    info!(
+                        tx_hash = ?tx_hash,
+                        "{} Cosmos Transaction Submitted Successfully", 
+                        log_string
+                    );
+
+                    // Spawn status polling
+                    self.spawn_status_polling(
+                        tx_hash,
+                        DYDX_CHAIN_ID.to_string(), 
+                        expected_time_to_complete_secs,
+                    ).await;
                 }
                 skip_go::SkipGoTx::EvmTx(evm_tx) => {
                     debug!("Executing EVM Tx: {:#?}", evm_tx);
@@ -503,7 +559,7 @@ impl DydxClient {
 
                     // Spawn status polling
                     self.spawn_status_polling(
-                        tx_hash, 
+                        tx_hash.to_string(),
                         ARBITRUM_CHAIN_ID.to_string(), 
                         expected_time_to_complete_secs,
                     ).await;
@@ -661,9 +717,97 @@ impl DydxClient {
         }
     }
 
+    async fn construct_and_execute4_cosmos_tx(
+        &mut self,
+        cosmos_tx_wrapper: skip_go::TxsCosmosTx,
+        estimated_fee: u64,
+    ) -> Result<String> {
+        // Construct messages
+        let mut tx_msgs: Vec<Any> = Vec::new();
+        for m in cosmos_tx_wrapper.cosmos_tx.msgs {
+            let tx_msg = match m.msg_type_url.as_str() {
+                "/ibc.applications.transfer.v1.MsgTransfer" => {
+                    let json_value: serde_json::Value = serde_json::from_str(&m.msg)?;
+                    let source_port = json_value["source_port"].as_str().ok_or_else(|| eyre::eyre!("Missing source_port in MsgTransfer"))?;
+                    let source_channel = json_value["source_channel"].as_str().ok_or_else(|| eyre::eyre!("Missing source_channel in MsgTransfer"))?;
+                    let token_denom = json_value["token"]["denom"].as_str().ok_or_else(|| eyre::eyre!("Missing token denom in MsgTransfer"))?;
+                    let token_amount = json_value["token"]["amount"].as_str().ok_or_else(|| eyre::eyre!("Missing token amount in MsgTransfer"))?;
+                    let sender = json_value["sender"].as_str().ok_or_else(|| eyre::eyre!("Missing sender in MsgTransfer"))?;
+                    let receiver = json_value["receiver"].as_str().ok_or_else(|| eyre::eyre!("Missing receiver in MsgTransfer"))?;
+                    let timeout_timestamp = json_value["timeout_timestamp"].as_u64().ok_or_else(|| eyre::eyre!("Missing timeout_timestamp in MsgTransfer"))?;
+                    let memo = json_value["memo"].as_str().unwrap_or("");
+                    let msg = MsgTransfer {
+                        source_port: source_port.to_string(),
+                        source_channel: source_channel.to_string(),
+                        token: Some(cosmrs::proto::cosmos::base::v1beta1::Coin {
+                            denom: token_denom.to_string(),
+                            amount: token_amount.to_string(),
+                        }),
+                        sender: sender.to_string(),
+                        receiver: receiver.to_string(),
+                        timeout_height: None,
+                        timeout_timestamp: timeout_timestamp,
+                        memo: memo.to_string(),
+                    };
+                    
+                    Any {
+                        type_url: m.msg_type_url.clone(),
+                        value: msg.encode_to_vec(),
+                    }
+                }
+                _ => {
+                    return Err(eyre::eyre!("Unsupported message type: {}", m.msg_type_url));
+                }
+            };
+            tx_msgs.push(tx_msg);
+        }
+        // Fetch dYdX account info
+        let dydx_account = self.node_client.get_account(&self.dydx_address.clone().into()).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
+
+        // Get dYdX account
+        let mut account = self.dydx_wallet.account(0, &mut self.node_client)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
+        
+        // Set next nonce
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account.sequence));
+
+        // Build transaction
+        let init_tx_raw = self.node_client
+            .builder
+            .build_transaction(&account, tx_msgs.clone(), None, None)
+            .map_err(|e| eyre::eyre!("Failed to build dYdX transaction: {}", e))?;
+        
+        
+        // Simulate transaction
+        let gas_info = self.node_client.simulate(&init_tx_raw).await
+            .map_err(|e| eyre::eyre!("Failed to simulate Cosmos transaction: {}", e))?;
+        let fee = self.node_client.builder.calculate_fee(Some(gas_info.gas_used))
+            .map_err(|e| eyre::eyre!("Failed to calculate fee for Cosmos transaction: {}", e))?;
+        info!(
+            gas_used = ?gas_info.gas_used,
+            gas_wanted = ?gas_info.gas_wanted,
+            estimated_fee = ?fee,
+            "Cosmos transaction simulation successful"
+        );
+        
+        // Create new tx with adjusted fee
+        let final_tx_raw = self.node_client
+            .builder
+            .build_transaction(&account, tx_msgs, Some(fee), None)
+            .map_err(|e| eyre::eyre!("Failed to build final Cosmos transaction: {}", e))?;
+
+        // Broadcast transaction
+        let tx_hash = self.node_client.broadcast_transaction(final_tx_raw).await
+                        .map_err(|e| eyre::eyre!("Failed to broadcast Cosmos transaction: {}", e))?;
+
+        Ok(tx_hash)
+    }
+
     async fn spawn_status_polling(
         &self, 
-        tx_hash: TxHash, 
+        tx_hash: String,
         chain_id: String, 
         expected_time_to_complete_secs: u64, 
     ) {     
@@ -753,6 +897,7 @@ impl DydxClient {
                             "Error fetching SkipGo transaction status for tx_hash: {:?}",
                             tx_hash
                         );
+                        break;
                     }
                 }
             }
@@ -801,3 +946,15 @@ fn derive_cosmos_address_from_mnemonic(
     let address = account_id.to_string();
     Ok(address)
 }
+
+/// Get dydx signing key from mnemonic
+fn get_dydx_signing_key_from_mnemonic(
+    config: &config::Config,
+) -> Result<secp256k1::SigningKey> {
+    let mnemonic = Mnemonic::new(config.wallet_mnemonic.clone(), Language::English)?;
+    let seed = mnemonic.to_seed("");
+    let derivation_path = DerivationPath::from_str("m/44'/118'/0'/0/0")?;
+    let private_key = secp256k1::SigningKey::derive_from_path(&seed, &derivation_path)?;
+    Ok(private_key)
+}
+

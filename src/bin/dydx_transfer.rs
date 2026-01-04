@@ -40,27 +40,27 @@ async fn main() -> Result<()> {
     let mut dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
     info!("dYdX client initialized successfully");
 
-    // Use SkipGo to get route and msgs for a deposit from Arbitrum to dYdX
-    if let Err(e) = dydx_client.dydx_deposit(
-        None,
-        Some(Decimal::from_str("1.0")?), // 1 USDC
-        false,
-        Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
-    ).await {
-        error!("Error during dYdX deposit: {}", e);
-        return Err(e);
-    }
-
-    // // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
-    // if let Err(e) = dydx_client.dydx_withdrawal(
-    //     Some(Decimal::from_str("5.0")?), // 5 USDC
+    // // Use SkipGo to get route and msgs for a deposit from Arbitrum to dYdX
+    // if let Err(e) = dydx_client.dydx_deposit(
+    //     Some(Decimal::from_str("1.0")?), // 1 USDC
     //     None,
     //     false,
     //     Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
     // ).await {
-    //     error!("Error during dYdX withdrawal: {}", e);
+    //     error!("Error during dYdX deposit: {}", e);
     //     return Err(e);
     // }
+
+    // Use SkipGo to get route and msgs for a withdrawal from dYdX to Arbitrum
+    if let Err(e) = dydx_client.dydx_withdrawal(
+        Some(Decimal::from_str("1.0")?), // 1 USDC
+        None,
+        false,
+        Some(Decimal::from_str("1.0")?), // 1% slippage tolerance
+    ).await {
+        error!("Error during dYdX withdrawal: {}", e);
+        return Err(e);
+    }
 
     // Keep the application running until all active transfers are complete
     dydx_client.wait_for_active_transfers().await;

@@ -75,3 +75,6 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] } # TLS library
 cosmrs = "0.22" # Cosmos SDK client
 hex = "0.4" # Hex encoding and decoding
 bip39 = "2.2" # BIP-39 mnemonic handling
+base64 = "0.22" # Base64 encoding and decoding
+ibc-proto = "0.52" # IBC protocol buffers
+prost = "0.13" # Protocol Buffers implementation

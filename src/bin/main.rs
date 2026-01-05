@@ -36,10 +36,28 @@ async fn main() -> Result<()> {
     info!("Wallet manager initialized and tokens loaded");
 
     // Initialize dydx client
-    if let Err(e) = DydxClient::new(cfg.clone(), wallet_manager.clone()).await {
-        error!("Error initializing dYdX client: {}", e);
-        return Err(e);
-    }
+    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    info!("dYdX client initialized");
+
+    // Get ETH perp market info
+    match dydx_client.get_perpetual_market("ETH").await {
+        Ok(market_info) => {
+            info!("ETH Perp Market Info: {:#?}", market_info);
+        }
+        Err(e) => {
+            error!("Failed to get ETH perp market info: {}", e);
+        }
+    };
+
+    // Get BTC perp market info
+    match dydx_client.get_perpetual_market("BTC").await {
+        Ok(market_info) => {
+            info!("BTC Perp Market Info: {:#?}", market_info);
+        }
+        Err(e) => {
+            error!("Failed to get BTC perp market info: {}", e);
+        }
+    };
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

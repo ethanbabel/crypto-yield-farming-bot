@@ -1,4 +1,4 @@
-use tracing::{debug, info, error};
+use tracing::{instrument, debug, info, error};
 use std::sync::Arc;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
@@ -23,6 +23,7 @@ use super::{
 use crate::db::db_manager::DbManager;
 
 /// Entry point for the strategy engine — run on each data refresh
+#[instrument(name = "strategy_engine", skip(db_manager))]
 pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<PortfolioData> {
     info!("Starting strategy engine...");
 
@@ -155,6 +156,7 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
 }
 
 /// Fetch market state slices from the database
+#[instrument(name = "fetch_market_state_slices", skip(db_manager))]
 async fn fetch_market_state_slices(db_manager: Arc<DbManager>) -> Vec<MarketStateSlice> {
     let start = chrono::Utc::now() - chrono::Duration::days(30); // 30 days for now, to be adjusted later
     let end = chrono::Utc::now();

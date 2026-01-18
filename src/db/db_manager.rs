@@ -360,15 +360,11 @@ impl DbManager {
         // Get display names for all markets upfront
         let display_names = self.get_market_display_names().await?;
 
-        // Fetch all market states in one query
-        let states_by_market = market_states_queries::get_all_market_states_in_range(
-            &self.pool, start, end
-        ).await?;
-
-        // Fetch all token prices in one query
-        let prices_by_token = token_prices_queries::get_all_token_prices_in_range(
-            &self.pool, start, end
-        ).await?;
+        // Fetch all market states and token prices concurrently
+        let (states_by_market, prices_by_token) = tokio::try_join!(
+            market_states_queries::get_all_market_states_in_range(&self.pool, start, end),
+            token_prices_queries::get_all_token_prices_in_range(&self.pool, start, end),
+        )?;
 
         // Get market-to-index-token mapping
         let market_index_tokens = markets_queries::get_all_market_index_tokens(&self.pool).await?;

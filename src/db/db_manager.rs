@@ -470,26 +470,24 @@ impl DbManager {
         let display_names = self.get_market_display_names().await?;
 
         // Fetch all market states in one query
-        let all_market_states = market_states_queries::get_all_market_states_in_range(
-            &self.pool, start, end
-        ).await?;
+        // let all_market_states = market_states_queries::get_all_market_states_in_range(
+        //     &self.pool, start, end
+        // ).await?;
 
         // Group by market_id
-        let mut states_by_market: HashMap<i32, Vec<MarketStateModel>> = HashMap::new();
-        for state in all_market_states {
-            states_by_market.entry(state.market_id).or_insert_with(Vec::new).push(state);
-        }
-
-        // Fetch all token prices in one query
-        let all_token_prices = token_prices_queries::get_all_token_prices_in_range(
+        let states_by_market = market_states_queries::get_all_market_states_in_range(
             &self.pool, start, end
         ).await?;
 
+        // Fetch all token prices in one query
+        // let all_token_prices = token_prices_queries::get_all_token_prices_in_range(
+        //     &self.pool, start, end
+        // ).await?;
+
         // Group by token_id
-        let mut prices_by_token: HashMap<i32, Vec<TokenPriceModel>> = HashMap::new();
-        for price in all_token_prices {
-            prices_by_token.entry(price.token_id).or_insert_with(Vec::new).push(price);
-        }
+        let prices_by_token = token_prices_queries::get_all_token_prices_in_range(
+            &self.pool, start, end
+        ).await?;
 
         // Get market-to-index-token mapping
         let market_index_tokens = markets_queries::get_all_market_index_tokens(&self.pool).await?;

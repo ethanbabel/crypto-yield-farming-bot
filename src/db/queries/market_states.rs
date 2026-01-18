@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use ethers::types::Address;
@@ -175,31 +175,117 @@ pub async fn get_market_state_history_in_range(
 }
 
 /// Fetch all market states across all markets in a time range
+// pub async fn get_all_market_states_in_range(
+//     pool: &PgPool,
+//     start: DateTime<Utc>,
+//     end: DateTime<Utc>,
+// ) -> Result<HashMap<i32, Vec<MarketStateModel>>, sqlx::Error> {
+//     let mut states_by_market: HashMap<i32, Vec<MarketStateModel>> = HashMap::new();
+
+//     let mut stream = sqlx::query_as!(
+//         MarketStateModel,
+//         r#"
+//         SELECT 
+//             id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
+//             pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
+//             pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+//             pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+//             open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+//             utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
+//             fees_borrowing, fees_total
+//         FROM market_states
+//         WHERE timestamp >= $1 AND timestamp <= $2
+//         ORDER BY market_id, timestamp
+//         "#,
+//         start,
+//         end
+//     )
+//     .fetch(pool);
+
+//     // Process rows as they arrive instead of waiting for all
+//     while let Some(state) = stream.try_next().await? {
+//         states_by_market
+//             .entry(state.market_id)
+//             .or_insert_with(Vec::new)
+//             .push(state);
+//     }
+
+//     Ok(states_by_market)
+// }
+
+/// Fetch using explicit binary protocol
 pub async fn get_all_market_states_in_range(
     pool: &PgPool,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-) -> Result<Vec<MarketStateModel>, sqlx::Error> {
-    sqlx::query_as!(
-        MarketStateModel,
+) -> Result<HashMap<i32, Vec<MarketStateModel>>, sqlx::Error> {
+    // Use query() instead of query_as!() for binary protocol
+    let rows = sqlx::query(
         r#"
-        SELECT 
-            id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
-            pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
-            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
-            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
-            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
-            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
-            fees_borrowing, fees_total
+        SELECT
+            id, market_id, timestamp,
+            borrowing_factor_long, borrowing_factor_short,
+            pnl_long, pnl_short, pnl_net,
+            gm_price_min, gm_price_max, gm_price_mid,
+            pool_long_amount, pool_short_amount, pool_impact_amount,
+            pool_long_token_usd, pool_short_token_usd, pool_impact_token_usd,
+            open_interest_long, open_interest_short,
+            open_interest_long_amount, open_interest_short_amount,
+            open_interest_long_via_tokens, open_interest_short_via_tokens,
+            utilization, swap_volume, trading_volume,
+            fees_position, fees_liquidation, fees_swap, fees_borrowing, fees_total
         FROM market_states
         WHERE timestamp >= $1 AND timestamp <= $2
         ORDER BY market_id, timestamp
-        "#,
-        start,
-        end
+        "#
     )
+    .bind(start)
+    .bind(end)
     .fetch_all(pool)
-    .await
+    .await?;
+
+    // Manual deserialization (faster than text protocol)
+    let mut result = HashMap::new();
+    for row in rows {
+        let state = MarketStateModel {
+            id: row.get(0),
+            market_id: row.get(1),
+            timestamp: row.get(2),
+            borrowing_factor_long: row.get(3),
+            borrowing_factor_short: row.get(4),
+            pnl_long: row.get(5),
+            pnl_short: row.get(6),
+            pnl_net: row.get(7),
+            gm_price_min: row.get(8),
+            gm_price_max: row.get(9),
+            gm_price_mid: row.get(10),
+            pool_long_amount: row.get(11),
+            pool_short_amount: row.get(12),
+            pool_impact_amount: row.get(13),
+            pool_long_token_usd: row.get(14),
+            pool_short_token_usd: row.get(15),
+            pool_impact_token_usd: row.get(16),
+            open_interest_long: row.get(17),
+            open_interest_short: row.get(18),
+            open_interest_long_amount: row.get(19),
+            open_interest_short_amount: row.get(20),
+            open_interest_long_via_tokens: row.get(21),
+            open_interest_short_via_tokens: row.get(22),
+            utilization: row.get(23),
+            swap_volume: row.get(24),
+            trading_volume: row.get(25),
+            fees_position: row.get(26),
+            fees_liquidation: row.get(27),
+            fees_swap: row.get(28),
+            fees_borrowing: row.get(29),
+            fees_total: row.get(30),
+        };
+        result
+            .entry(state.market_id)
+            .or_insert_with(Vec::new)
+            .push(state);
+    }
+    Ok(result)
 }
 
 /// Get market display names by joining markets and tokens tables

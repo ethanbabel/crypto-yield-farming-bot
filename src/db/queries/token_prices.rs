@@ -1,6 +1,8 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use futures::TryStreamExt;
+use std::collections::HashMap;
 
 use crate::db::models::token_prices::{NewTokenPriceModel, TokenPriceModel};
 
@@ -99,20 +101,37 @@ pub async fn get_all_token_prices_in_range(
     pool: &PgPool,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
-    sqlx::query_as!(
-        TokenPriceModel,
+) -> Result<HashMap<i32, Vec<TokenPriceModel>>, sqlx::Error> {
+    // Use query() instead of query_as!() for binary protocol
+    let rows = sqlx::query(
         r#"
         SELECT id, token_id, timestamp, min_price, max_price, mid_price
         FROM token_prices
         WHERE timestamp >= $1 AND timestamp <= $2
         ORDER BY token_id, timestamp
-        "#,
-        start,
-        end
+        "#
     )
+    .bind(start)
+    .bind(end)
     .fetch_all(pool)
-    .await
+    .await?;
+
+    // Manual deserialization (faster than text protocol)
+    let mut result = HashMap::new();
+    for row in rows {
+        let token_price = TokenPriceModel {
+            id: row.get(0),
+            token_id: row.get(1),
+            timestamp: row.get(2),
+            min_price: row.get(3),
+            max_price: row.get(4),
+            mid_price: row.get(5),
+        };
+        result.entry(token_price.token_id)
+            .or_insert_with(Vec::new)
+            .push(token_price);
+    }
+    Ok(result)
 }
 
 /// Fetch the latest token price for a specific token

@@ -1,9 +1,10 @@
 use dotenvy::dotenv;
 use tracing::{instrument, info};
+use std::sync::Arc;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::wallet::WalletManager;
+// use crypto_yield_farming_bot::wallet::WalletManager;
 use crypto_yield_farming_bot::db::db_manager::DbManager;
 use crypto_yield_farming_bot::strategy::engine;
 
@@ -25,15 +26,17 @@ async fn main() -> eyre::Result<()> {
 
     // Initialize db manager
     let db = DbManager::init(&cfg).await?;
+    let db = Arc::new(db);
     info!("Database manager initialized");
 
     // Initialize and load wallet manager
-    let mut wallet_manager = WalletManager::new(&cfg)?;
-    wallet_manager.load_tokens(&db).await?;
-    info!("Wallet manager initialized");
+    // let mut wallet_manager = WalletManager::new(&cfg)?;
+    // wallet_manager.load_tokens(&db).await?;
+    // let wallet_manager = Arc::new(wallet_manager);
+    // info!("Wallet manager initialized");
 
     // Run strategy engine
-    let portfolio_data = match engine::run_strategy_engine(&db).await {
+    let portfolio_data = match engine::run_strategy_engine(db.clone()).await {
         Some(data) => data,
         None => {
             info!("No portfolio data available");

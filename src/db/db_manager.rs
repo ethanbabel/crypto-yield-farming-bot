@@ -349,6 +349,115 @@ impl DbManager {
         Ok(display_names)
     }
 
+    // /// Fetch full history for each market and construct MarketStateSlice objects
+    // pub async fn get_market_state_slices(
+    //     &self,
+    //     start: DateTime<Utc>,
+    //     end: DateTime<Utc>,
+    // ) -> Result<Vec<MarketStateSlice>, sqlx::Error> {
+    //     let mut slices = Vec::new();
+
+    //     // Get display names for all markets upfront
+    //     let display_names = self.get_market_display_names().await?;
+
+    //     for (address, market_id) in &self.market_id_map {
+    //         let history = market_states_queries::get_market_state_history_in_range(
+    //             &self.pool, *market_id, start, end
+    //         ).await?;
+
+    //         // Skip markets with no historical data
+    //         if history.is_empty() {
+    //             continue;
+    //         }
+
+    //         // Get index token data
+    //         let (index_token_address, index_token_symbol, index_token_timestamps, index_prices) = match self.get_index_token_prices_for_market(
+    //             *market_id, start, end
+    //         ).await {
+    //             Ok(prices) => prices,
+    //             Err(e) => {
+    //                 tracing::warn!(
+    //                     market_id = *market_id,
+    //                     address = ?address,
+    //                     error = ?e,
+    //                     "Failed to get index token prices for market, skipping"
+    //                 );
+    //                 continue;
+    //             }
+    //         };
+
+    //         // Get the proper display name or fallback to address
+    //         let display_name = display_names.get(address).cloned().unwrap_or_else(|| format!("{}/USD [Unknown]", address));
+            
+    //         // --- HISTORICAL DATA ---
+    //         let timestamps = history.iter().map(|x| x.timestamp).collect();
+    //         let fees_usd = history.iter().map(|x| x.fees_total.unwrap_or_default()).collect();
+
+    //         // --- CURRENT STATE ---
+    //         let last_state = history.last().unwrap(); // Safe since is_empty() was checked above
+
+    //         // PnL data
+    //         let pnl_long = last_state.pnl_long.unwrap_or_default();
+    //         let pnl_short = last_state.pnl_short.unwrap_or_default();
+    //         let pnl_net = last_state.pnl_net.unwrap_or_default();
+
+    //         // Open interest data
+    //         let oi_long = last_state.open_interest_long.unwrap_or_default();
+    //         let oi_short = last_state.open_interest_short.unwrap_or_default();
+    //         let oi_long_via_tokens = last_state.open_interest_long_via_tokens.unwrap_or_default();
+    //         let oi_short_via_tokens = last_state.open_interest_short_via_tokens.unwrap_or_default();
+    //         let last_index_price = match index_prices.last().cloned() {
+    //             Some(price) => price,
+    //             None => {
+    //                 tracing::warn!(
+    //                     market_id = *market_id,
+    //                     address = ?address,
+    //                     "No index prices available for market, skipping"
+    //                 );
+    //                 continue;
+    //             }
+    //         };
+    //         let oi_long_token_amount = oi_long_via_tokens / last_index_price;
+    //         let oi_short_token_amount = oi_short_via_tokens / last_index_price;
+
+    //         // Pool composition data
+    //         let pool_long_collateral_usd = last_state.pool_long_token_usd.unwrap_or_default();
+    //         let pool_short_collateral_usd = last_state.pool_short_token_usd.unwrap_or_default();
+    //         let pool_long_collateral_token_amount = last_state.pool_long_amount.unwrap_or_default();
+    //         let pool_short_collateral_token_amount = last_state.pool_short_amount.unwrap_or_default();
+    //         let impact_pool_usd = last_state.pool_impact_token_usd.unwrap_or_default();
+    //         let impact_pool_token_amount = last_state.pool_impact_amount.unwrap_or_default();
+
+    //         slices.push(MarketStateSlice {
+    //             market_address: *address,
+    //             display_name,
+    //             timestamps,
+    //             fees_usd,
+    //             index_token_address,
+    //             index_token_symbol,
+    //             index_prices,
+    //             index_token_timestamps,
+    //             pnl_long,
+    //             pnl_short,
+    //             pnl_net,
+    //             oi_long,
+    //             oi_short,
+    //             oi_long_via_tokens,
+    //             oi_short_via_tokens,
+    //             oi_long_token_amount,
+    //             oi_short_token_amount,
+    //             pool_long_collateral_usd,
+    //             pool_short_collateral_usd,
+    //             pool_long_collateral_token_amount,
+    //             pool_short_collateral_token_amount,
+    //             impact_pool_usd,
+    //             impact_pool_token_amount,
+    //         });
+    //     }
+
+    //     Ok(slices)
+    // }
+
     /// Fetch full history for each market and construct MarketStateSlice objects
     pub async fn get_market_state_slices(
         &self,
@@ -360,34 +469,64 @@ impl DbManager {
         // Get display names for all markets upfront
         let display_names = self.get_market_display_names().await?;
 
+        // Fetch all market states in one query
+        let all_market_states = market_states_queries::get_all_market_states_in_range(
+            &self.pool, start, end
+        ).await?;
+
+        // Group by market_id
+        let mut states_by_market: HashMap<i32, Vec<MarketStateModel>> = HashMap::new();
+        for state in all_market_states {
+            states_by_market.entry(state.market_id).or_insert_with(Vec::new).push(state);
+        }
+
+        // Fetch all token prices in one query
+        let all_token_prices = token_prices_queries::get_all_token_prices_in_range(
+            &self.pool, start, end
+        ).await?;
+
+        // Group by token_id
+        let mut prices_by_token: HashMap<i32, Vec<TokenPriceModel>> = HashMap::new();
+        for price in all_token_prices {
+            prices_by_token.entry(price.token_id).or_insert_with(Vec::new).push(price);
+        }
+
+        // Get market-to-index-token mapping
+        let market_index_tokens = markets_queries::get_all_market_index_tokens(&self.pool).await?;
+
         for (address, market_id) in &self.market_id_map {
-            let history = market_states_queries::get_market_state_history_in_range(
-                &self.pool, *market_id, start, end
-            ).await?;
-
-            // Skip markets with no historical data
-            if history.is_empty() {
-                continue;
-            }
-
-            // Get index token data
-            let (index_token_address, index_token_symbol, index_token_timestamps, index_prices) = match self.get_index_token_prices_for_market(
-                *market_id, start, end
-            ).await {
-                Ok(prices) => prices,
-                Err(e) => {
-                    tracing::warn!(
-                        market_id = *market_id,
-                        address = ?address,
-                        error = ?e,
-                        "Failed to get index token prices for market, skipping"
-                    );
-                    continue;
-                }
+            let history = match states_by_market.get(market_id) {
+                Some(h) if !h.is_empty() => h,
+                _ => continue,
             };
 
-            // Get the proper display name or fallback to address
-            let display_name = display_names.get(address).cloned().unwrap_or_else(|| format!("{}/USD [Unknown]", address));
+            // Get index token ID for this market
+            let index_token_id = match market_index_tokens.get(market_id) {
+                Some(&id) => id,
+                None => continue,
+            };
+
+            // Get index token prices
+            let index_token_prices_objects = match prices_by_token.get(&index_token_id) {
+                Some(prices) if !prices.is_empty() => prices,
+                _ => continue,
+            };
+
+            // Get token info
+            let index_token = match tokens_queries::get_token_by_id(&self.pool, index_token_id).await? {
+                Some(token) => token,
+                None => continue,
+            };
+
+            // --- INDEX TOKEN DATA ---
+            let index_token_address = Address::from_str(&index_token.address)
+                .map_err(|_| sqlx::Error::Decode("Invalid token address".into()))?;
+            let index_token_symbol = index_token.symbol;
+            let index_token_prices: Vec<Decimal> = index_token_prices_objects.iter().map(|p| p.mid_price).collect();
+            let index_token_timestamps: Vec<DateTime<Utc>> = index_token_prices_objects.iter().map(|p| p.timestamp).collect();
+
+            let display_name = display_names.get(address).cloned()
+                .unwrap_or_else(|| format!("{}/USD [Unknown]", address));
             
             // --- HISTORICAL DATA ---
             let timestamps = history.iter().map(|x| x.timestamp).collect();
@@ -406,7 +545,7 @@ impl DbManager {
             let oi_short = last_state.open_interest_short.unwrap_or_default();
             let oi_long_via_tokens = last_state.open_interest_long_via_tokens.unwrap_or_default();
             let oi_short_via_tokens = last_state.open_interest_short_via_tokens.unwrap_or_default();
-            let last_index_price = match index_prices.last().cloned() {
+            let last_index_price = match index_token_prices.last().cloned() {
                 Some(price) => price,
                 None => {
                     tracing::warn!(
@@ -435,7 +574,7 @@ impl DbManager {
                 fees_usd,
                 index_token_address,
                 index_token_symbol,
-                index_prices,
+                index_prices: index_token_prices,
                 index_token_timestamps,
                 pnl_long,
                 pnl_short,
@@ -458,39 +597,39 @@ impl DbManager {
         Ok(slices)
     }
 
-    /// Get index token prices for a specific market within a time range
-    pub async fn get_index_token_prices_for_market(
-        &self,
-        market_id: i32,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<(Address, String, Vec<DateTime<Utc>>, Vec<Decimal>), sqlx::Error> {
-        // Get the index token ID for this market
-        let index_token_id = markets_queries::get_market_index_token_id(&self.pool, market_id)
-            .await?
-            .ok_or_else(|| sqlx::Error::RowNotFound)?;
+    // /// Get index token prices for a specific market within a time range
+    // pub async fn get_index_token_prices_for_market(
+    //     &self,
+    //     market_id: i32,
+    //     start: DateTime<Utc>,
+    //     end: DateTime<Utc>,
+    // ) -> Result<(Address, String, Vec<DateTime<Utc>>, Vec<Decimal>), sqlx::Error> {
+    //     // Get the index token ID for this market
+    //     let index_token_id = markets_queries::get_market_index_token_id(&self.pool, market_id)
+    //         .await?
+    //         .ok_or_else(|| sqlx::Error::RowNotFound)?;
 
-        // Get the index token address and symbol
-        let index_token = tokens_queries::get_token_by_id(&self.pool, index_token_id)
-            .await?
-            .ok_or_else(|| sqlx::Error::RowNotFound)?;
-        let index_token_address = Address::from_str(&index_token.address)
-            .map_err(|_| sqlx::Error::Decode("Invalid token address".into()))?;
+    //     // Get the index token address and symbol
+    //     let index_token = tokens_queries::get_token_by_id(&self.pool, index_token_id)
+    //         .await?
+    //         .ok_or_else(|| sqlx::Error::RowNotFound)?;
+    //     let index_token_address = Address::from_str(&index_token.address)
+    //         .map_err(|_| sqlx::Error::Decode("Invalid token address".into()))?;
 
-        // Fetch the token price history
-        let price_history = token_prices_queries::get_token_price_history_in_range(
-            &self.pool, 
-            index_token_id, 
-            start, 
-            end
-        ).await?;
+    //     // Fetch the token price history
+    //     let price_history = token_prices_queries::get_token_price_history_in_range(
+    //         &self.pool, 
+    //         index_token_id, 
+    //         start, 
+    //         end
+    //     ).await?;
 
-        // Extract timestamps and mid prices
-        let timestamps = price_history.iter().map(|p| p.timestamp).collect();
-        let prices = price_history.iter().map(|p| p.mid_price).collect();
+    //     // Extract timestamps and mid prices
+    //     let timestamps = price_history.iter().map(|p| p.timestamp).collect();
+    //     let prices = price_history.iter().map(|p| p.mid_price).collect();
 
-        Ok((index_token_address, index_token.symbol, timestamps, prices))
-    }
+    //     Ok((index_token_address, index_token.symbol, timestamps, prices))
+    // }
 
     /// Fetch all tokens
     #[instrument(skip(self))]

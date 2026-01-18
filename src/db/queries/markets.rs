@@ -84,3 +84,21 @@ pub async fn get_all_markets(pool: &PgPool) -> Result<Vec<MarketModel>, Error> {
     .fetch_all(pool)
     .await
 }
+
+/// Get mapping of market_id to index_token_id for all markets
+pub async fn get_all_market_index_tokens(pool: &PgPool) -> Result<HashMap<i32, i32>, Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, index_token_id
+        FROM markets
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let map = rows.into_iter()
+        .map(|row| (row.id, row.index_token_id))
+        .collect();
+    
+    Ok(map)
+}

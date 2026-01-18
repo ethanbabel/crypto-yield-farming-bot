@@ -174,6 +174,34 @@ pub async fn get_market_state_history_in_range(
     .await
 }
 
+/// Fetch all market states across all markets in a time range
+pub async fn get_all_market_states_in_range(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<MarketStateModel>, sqlx::Error> {
+    sqlx::query_as!(
+        MarketStateModel,
+        r#"
+        SELECT 
+            id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
+            pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
+            pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
+            pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
+            open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
+            utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
+            fees_borrowing, fees_total
+        FROM market_states
+        WHERE timestamp >= $1 AND timestamp <= $2
+        ORDER BY market_id, timestamp
+        "#,
+        start,
+        end
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Get market display names by joining markets and tokens tables
 pub async fn get_market_display_names(pool: &PgPool) -> Result<HashMap<Address, String>, sqlx::Error> {
     let rows = sqlx::query!(

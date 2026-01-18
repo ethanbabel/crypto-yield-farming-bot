@@ -94,6 +94,27 @@ pub async fn get_token_price_history_in_range(
     .await
 }
 
+/// Fetch all token prices across all tokens in a time range
+pub async fn get_all_token_prices_in_range(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
+    sqlx::query_as!(
+        TokenPriceModel,
+        r#"
+        SELECT id, token_id, timestamp, min_price, max_price, mid_price
+        FROM token_prices
+        WHERE timestamp >= $1 AND timestamp <= $2
+        ORDER BY token_id, timestamp
+        "#,
+        start,
+        end
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Fetch the latest token price for a specific token
 pub async fn get_latest_token_price_for_token(pool: &PgPool, token_id: i32) -> Result<Option<TokenPriceModel>, sqlx::Error> {
     sqlx::query_as!(

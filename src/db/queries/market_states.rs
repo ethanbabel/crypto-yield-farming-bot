@@ -175,45 +175,6 @@ pub async fn get_market_state_history_in_range(
 }
 
 /// Fetch all market states across all markets in a time range
-// pub async fn get_all_market_states_in_range(
-//     pool: &PgPool,
-//     start: DateTime<Utc>,
-//     end: DateTime<Utc>,
-// ) -> Result<HashMap<i32, Vec<MarketStateModel>>, sqlx::Error> {
-//     let mut states_by_market: HashMap<i32, Vec<MarketStateModel>> = HashMap::new();
-
-//     let mut stream = sqlx::query_as!(
-//         MarketStateModel,
-//         r#"
-//         SELECT 
-//             id, market_id, timestamp, borrowing_factor_long, borrowing_factor_short, pnl_long,
-//             pnl_short, pnl_net, gm_price_min, gm_price_max, gm_price_mid, pool_long_amount,
-//             pool_short_amount, pool_impact_amount, pool_long_token_usd, pool_short_token_usd, 
-//             pool_impact_token_usd, open_interest_long, open_interest_short, open_interest_long_amount, 
-//             open_interest_short_amount, open_interest_long_via_tokens, open_interest_short_via_tokens, 
-//             utilization, swap_volume, trading_volume, fees_position, fees_liquidation, fees_swap, 
-//             fees_borrowing, fees_total
-//         FROM market_states
-//         WHERE timestamp >= $1 AND timestamp <= $2
-//         ORDER BY market_id, timestamp
-//         "#,
-//         start,
-//         end
-//     )
-//     .fetch(pool);
-
-//     // Process rows as they arrive instead of waiting for all
-//     while let Some(state) = stream.try_next().await? {
-//         states_by_market
-//             .entry(state.market_id)
-//             .or_insert_with(Vec::new)
-//             .push(state);
-//     }
-
-//     Ok(states_by_market)
-// }
-
-/// Fetch using explicit binary protocol
 pub async fn get_all_market_states_in_range(
     pool: &PgPool,
     start: DateTime<Utc>,

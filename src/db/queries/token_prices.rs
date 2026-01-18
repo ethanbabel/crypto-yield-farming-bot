@@ -1,7 +1,6 @@
 use sqlx::{PgPool, Row};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use futures::TryStreamExt;
 use std::collections::HashMap;
 
 use crate::db::models::token_prices::{NewTokenPriceModel, TokenPriceModel};

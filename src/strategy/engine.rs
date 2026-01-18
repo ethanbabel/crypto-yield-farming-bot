@@ -34,31 +34,59 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
         return None;
     }
 
-    // // Filter market slices
+    // Filter market slices
+    let mut filtered_markets = String::new();
     let market_slices: Vec<MarketStateSlice> = market_slices
         .into_iter()
         .filter(|slice| {
+
+            let name = &slice.display_name;
             // Filter out slices without at least one day of market observations
-            slice.timestamps.len() >= 288 &&
+            if slice.timestamps.len() < 288 {
+                filtered_markets.push_str(&format!("{} --> insufficient market timestamps ({} < 288)\n", name, slice.timestamps.len()));
+                return false;
+            }
             // Filter out slices without at least one day of index token prices
-            slice.index_prices.len() >= 288 &&
+            if slice.index_prices.len() < 288 {
+                filtered_markets.push_str(&format!("{} --> insufficient index token timestamps ({} < 288)\n", name, slice.index_prices.len()));
+                return false;
+            }
             // Filter out slices where the oldest market timestamp is too recent 
-            slice.timestamps.first().map_or(false, |t| *t < (chrono::Utc::now() - chrono::Duration::days(1))) &&
+            if !slice.timestamps.first().map_or(false, |t| *t < (chrono::Utc::now() - chrono::Duration::days(1))) {
+                filtered_markets.push_str(&format!("{} --> oldest market timestamp too recent ({:?})\n", name, slice.timestamps.first()));
+                return false;
+            }
             // Filter out slices where the oldest index token timestamp is too recent
-            slice.index_token_timestamps.first().map_or(false, |t| *t < (chrono::Utc::now() - chrono::Duration::days(1))) &&
+            if !slice.index_token_timestamps.first().map_or(false, |t| *t < (chrono::Utc::now() - chrono::Duration::days(1))) {
+                filtered_markets.push_str(&format!("{} --> oldest index token timestamp too recent ({:?})\n", name, slice.index_token_timestamps.first()));
+                return false;
+            }
             // Filter out slices where the newest market timestamp is too old
-            slice.timestamps.last().map_or(false, |t| *t > (chrono::Utc::now() - chrono::Duration::hours(1))) &&
+            if !slice.timestamps.last().map_or(false, |t| *t > (chrono::Utc::now() - chrono::Duration::hours(1))) {
+                filtered_markets.push_str(&format!("{} --> newest market timestamp too old ({:?})\n", name, slice.timestamps.last()));
+                return false;
+            }
             // Filter out slices where the newest index token timestamp is too old
-            slice.index_token_timestamps.last().map_or(false, |t| *t > (chrono::Utc::now() - chrono::Duration::hours(1))) &&
+            if !slice.index_token_timestamps.last().map_or(false, |t| *t > (chrono::Utc::now() - chrono::Duration::hours(1))) {
+                filtered_markets.push_str(&format!("{} --> newest index token timestamp too old ({:?})\n", name, slice.index_token_timestamps.last()));
+                return false;
+            }
             // Filter out slices without high enough total OI
-            slice.oi_long + slice.oi_short > Decimal::from_f64(10000.0).unwrap() 
+            let total_oi = slice.oi_long + slice.oi_short;
+            if total_oi <= Decimal::from_f64(10000.0).unwrap() {
+                filtered_markets.push_str(&format!("{} --> insufficient total OI ({} <= 10000)\n", name, total_oi));
+                return false;
+            }
+            
+            true
         })
         .collect();
     if market_slices.is_empty() {
         tracing::warn!("No market slices passed filtering criteria");
         return None;
+    } else {
+        debug!("Filtered out markets: {} available\nRemoved markets:\n{}", market_slices.len(), filtered_markets);
     }
-    debug!("Filtered market slices: {} available", market_slices.len());
 
     // Calculate covariance matrix using the same ordering as market_slices
     let covariance_matrix = match covariance::calculate_covariance_matrix(&market_slices) {
@@ -119,10 +147,9 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
         }
     };
 
-    info!("Optimal portfolio weights calculated");
+    debug!("Optimal portfolio weights calculated");
 
     let portfolio_data = PortfolioData::new(market_addresses, display_names, expected_returns, covariance_matrix, weights);
-    info!("Strategy engine completed.");
 
     Some(portfolio_data)
 }

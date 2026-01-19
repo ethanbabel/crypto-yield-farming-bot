@@ -91,6 +91,7 @@ impl DydxClient {
         })
     }
 
+    #[instrument(skip(self))]
     pub async fn wait_for_active_transfers(&self) {
         let mut tasks = self.active_transfer_polling_tasks.lock().await;
         info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());

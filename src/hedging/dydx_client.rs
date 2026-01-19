@@ -156,6 +156,21 @@ impl DydxClient {
         Ok(token_perp_map)
     }
 
+    pub async fn get_max_leverage(&self, token: &str) -> Result<Decimal> {
+        if hedge_utils::STABLE_COINS.contains(&token) {
+            return Err(eyre::eyre!("No hedging for stablecoins"));
+        }
+        let market = match self.get_perpetual_market(token).await? {
+            Some(market) => market,
+            None => return Err(eyre::eyre!("No perpetual market found for token {}", token)),
+        };
+        let initial_margin_frac = Decimal::from_str(&market.initial_margin_fraction.to_plain_string())?;
+        let maintenance_margin_frac = Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string())?;
+        let margin_frac = initial_margin_frac.max(maintenance_margin_frac); // Should always be initial margin but just in case
+        let max_leverage = Decimal::ONE / (Decimal::from_str("2")? * margin_frac);
+        Ok(max_leverage)
+    }
+
     #[instrument(skip(self))]
     pub async fn dydx_deposit(
         &mut self, 

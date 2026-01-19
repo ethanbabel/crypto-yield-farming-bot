@@ -49,13 +49,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Get BTC perp market info
-    match dydx_client.get_perpetual_market("BTC").await {
-        Ok(market_info) => {
-            info!("BTC Perp Market Info: {:#?}", market_info);
+    // Get ETH max leverage
+    match dydx_client.get_max_leverage("ETH").await {
+        Ok(max_leverage) => {
+            info!("ETH Max Leverage: {}", max_leverage);
         }
         Err(e) => {
-            error!("Failed to get BTC perp market info: {}", e);
+            error!("Failed to get ETH max leverage: {}", e);
         }
     };
 

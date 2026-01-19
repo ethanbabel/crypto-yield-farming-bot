@@ -164,6 +164,10 @@ impl DydxClient {
             Some(market) => market,
             None => return Err(eyre::eyre!("No perpetual market found for token {}", token)),
         };
+        self.calculate_max_leverage(market).await
+    }
+
+    async fn calculate_max_leverage(&self, market: PerpetualMarket) -> Result<Decimal> {
         let initial_margin_frac = Decimal::from_str(&market.initial_margin_fraction.to_plain_string())?;
         let maintenance_margin_frac = Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string())?;
         let margin_frac = initial_margin_frac.max(maintenance_margin_frac); // Should always be initial margin but just in case

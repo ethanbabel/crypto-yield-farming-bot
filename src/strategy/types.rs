@@ -142,17 +142,3 @@ impl PortfolioData {
         );
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TokenCategory {
-    BlueChip,     // e.g. BTC, ETH
-    MidCap,       // e.g. LINK, UNI
-    Unreliable,   // e.g. low liquidity or high volatility tokens
-}
-
-/// Configuration for PnL simulation
-pub struct PnLSimulationConfig {
-    pub time_horizon_hrs: u64,       // e.g. 72 for 3 days
-    pub n_simulations: usize,        // e.g. 1000
-    pub token_category: TokenCategory,
-}

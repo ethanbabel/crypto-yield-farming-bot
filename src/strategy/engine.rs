@@ -6,19 +6,11 @@ use ndarray::Array1;
 use rayon::prelude::*;
 
 use super::{
-    // pnl_model,
     fee_model, allocator, covariance,
     types::{
         MarketStateSlice, 
-        // PnLSimulationConfig,
-        // TokenCategory,
         PortfolioData,
     },
-    // strategy_constants::{
-    //     TIME_HORIZON_HRS,
-    //     BLUE_CHIP_MARKETS,
-    //     MID_CAP_MARKETS,
-    // }
 };
 use crate::db::db_manager::DbManager;
 
@@ -109,20 +101,7 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
         .par_iter()
         .enumerate()
         .map(|(i, slice)| {
-            // let token_category = get_token_category(slice);
-
-            // let config = PnLSimulationConfig {
-            //     time_horizon_hrs: TIME_HORIZON_HRS,
-            //     n_simulations: 10000,
-            //     token_category,
-            // };
-
-            // let pnl_return = pnl_model::simulate_trader_pnl(slice, &config).unwrap_or(Decimal::ZERO);
             let fee_return = fee_model::simulate_fee_return(slice).unwrap_or(Decimal::ZERO);
-
-            // let total_return = (pnl_return + fee_return).to_f64().unwrap_or(0.0);
-            
-            // (i, total_return)
             (i, fee_return.to_f64().unwrap_or(0.0))
         })
         .collect();
@@ -170,14 +149,3 @@ async fn fetch_market_state_slices(db_manager: Arc<DbManager>) -> Vec<MarketStat
     }
 }
 
-// fn get_token_category(slice: &MarketStateSlice) -> TokenCategory {
-//     let address_str = slice.market_address.to_string();
-
-//     if BLUE_CHIP_MARKETS.contains(&address_str.as_str()) {
-//         TokenCategory::BlueChip
-//     } else if MID_CAP_MARKETS.contains(&address_str.as_str()) {
-//         TokenCategory::MidCap
-//     } else {
-//         TokenCategory::Unreliable
-//     }
-// }

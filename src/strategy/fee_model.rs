@@ -21,9 +21,7 @@ pub fn simulate_fee_return(slice: &MarketStateSlice) -> Option<Decimal> {
 
     let expected_return = total_expected_fees / pool_value;
 
-    // Scale
-    let scale = Decimal::from_f64(12.0).unwrap();
-    Some(expected_return / scale)
+    Some(expected_return)
 }
 
 /// Aggregates ~5-min fee data into hourly fee buckets

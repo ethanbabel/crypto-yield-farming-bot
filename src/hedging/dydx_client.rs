@@ -156,6 +156,34 @@ impl DydxClient {
         Ok(token_perp_map)
     }
 
+    pub async fn get_token_hedgeinfo_map(&self) -> Result<HashMap<String, Option<(Decimal, Decimal)>>> {
+        let token_perp_map = self.get_token_perp_map().await?;
+        let mut token_hedgeinfo_map = HashMap::new();
+
+        for (token_symbol, market_option) in token_perp_map {
+            if let Some(market) = market_option {
+                let funding_rate = Decimal::from_str(&market.next_funding_rate.to_plain_string())?;
+                let max_leverage = self.calculate_max_leverage(market).await?;
+                token_hedgeinfo_map.insert(token_symbol, Some((funding_rate, max_leverage)));
+            } else {
+                token_hedgeinfo_map.insert(token_symbol, None);
+            }
+        }
+        Ok(token_hedgeinfo_map)
+    }
+
+    pub async fn get_funding_rate(&self, token: &str) -> Result<Decimal> {
+        if hedge_utils::STABLE_COINS.contains(&token) {
+            return Err(eyre::eyre!("No hedging for stablecoins"));
+        }
+        let market = match self.get_perpetual_market(token).await? {
+            Some(market) => market,
+            None => return Err(eyre::eyre!("No perpetual market found for token {}", token)),
+        };
+        let funding_rate = Decimal::from_str(&market.next_funding_rate.to_plain_string())?;
+        Ok(funding_rate)
+    }
+
     pub async fn get_max_leverage(&self, token: &str) -> Result<Decimal> {
         if hedge_utils::STABLE_COINS.contains(&token) {
             return Err(eyre::eyre!("No hedging for stablecoins"));
@@ -171,7 +199,7 @@ impl DydxClient {
         let initial_margin_frac = Decimal::from_str(&market.initial_margin_fraction.to_plain_string())?;
         let maintenance_margin_frac = Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string())?;
         let margin_frac = initial_margin_frac.max(maintenance_margin_frac); // Should always be initial margin but just in case
-        let max_leverage = Decimal::ONE / (Decimal::from_str("2")? * margin_frac);
+        let max_leverage = Decimal::ONE / (Decimal::from_str("2")? * margin_frac); // Only use 50% of max leverage to provide buffer
         Ok(max_leverage)
     }
 

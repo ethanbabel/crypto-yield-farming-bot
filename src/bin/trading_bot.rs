@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-// use crypto_yield_farming_bot::wallet::WalletManager;
+use crypto_yield_farming_bot::wallet::WalletManager;
 use crypto_yield_farming_bot::db::db_manager::DbManager;
+use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
 use crypto_yield_farming_bot::strategy::engine;
 
 #[instrument(name = "trading_bot_main")]
@@ -30,19 +31,18 @@ async fn main() -> eyre::Result<()> {
     info!("Database manager initialized");
 
     // Initialize and load wallet manager
-    // let mut wallet_manager = WalletManager::new(&cfg)?;
-    // wallet_manager.load_tokens(&db).await?;
-    // let wallet_manager = Arc::new(wallet_manager);
-    // info!("Wallet manager initialized");
+    let mut wallet_manager = WalletManager::new(&cfg)?;
+    wallet_manager.load_tokens(&db).await?;
+    let wallet_manager = Arc::new(wallet_manager);
+    info!("Wallet manager initialized");
+
+    // Initialize dydx client
+    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    let dydx_client = Arc::new(dydx_client);
+    info!("dYdX client initialized");
 
     // Run strategy engine
-    let portfolio_data = match engine::run_strategy_engine(db.clone()).await {
-        Some(data) => data,
-        None => {
-            info!("No portfolio data available");
-            return Ok(());
-        }
-    };
+    let portfolio_data = engine::run_strategy_engine(db.clone(), dydx_client.clone()).await?;
     
     // Log basic diagnostics
     info!("Strategy engine completed with {} markets", portfolio_data.market_addresses.len());

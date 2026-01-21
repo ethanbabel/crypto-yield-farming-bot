@@ -1,9 +1,9 @@
 use tracing::{instrument, debug, info, error};
+use eyre::Result;
 use std::sync::Arc;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use ndarray::Array1;
-use rayon::prelude::*;
 
 use super::{
     fee_model, allocator, covariance,
@@ -13,18 +13,19 @@ use super::{
     },
 };
 use crate::db::db_manager::DbManager;
+use crate::hedging::dydx_client::DydxClient;
 
 /// Entry point for the strategy engine — run on each data refresh
-#[instrument(name = "strategy_engine", skip(db_manager))]
-pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<PortfolioData> {
+#[instrument(name = "strategy_engine", skip(db_manager, dydx_client))]
+pub async fn run_strategy_engine(db_manager: Arc<DbManager>, dydx_client: Arc<DydxClient>) -> Result<PortfolioData> {
     info!("Starting strategy engine...");
 
     // Fetch all data from DB
-    let market_slices = fetch_market_state_slices(db_manager).await;
+    let market_slices = fetch_market_state_slices(db_manager).await?;
 
     if market_slices.is_empty() {
-        tracing::warn!("No market slices available");
-        return None;
+        error!("No market slices fetched from database");
+        return Err(eyre::eyre!("No market slices fetched from database"));
     }
 
     // Filter market slices
@@ -75,8 +76,8 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
         })
         .collect();
     if market_slices.is_empty() {
-        tracing::warn!("No market slices passed filtering criteria");
-        return None;
+        error!("All markets filtered out:\n{}", filtered_markets);
+        return Err(eyre::eyre!("All markets filtered out"));
     } else {
         debug!("Filtered out markets: {} available\nRemoved markets:\n{}", market_slices.len(), filtered_markets);
     }
@@ -86,7 +87,7 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
         Some(matrix) => matrix,
         None => {
             error!("Failed to calculate covariance matrix");
-            return None;
+            return Err(eyre::eyre!("Failed to calculate covariance matrix"));
         }
     };
     debug!("Covariance matrix calculated");
@@ -96,56 +97,75 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>) -> Option<Portfolio
     let mut display_names = Vec::with_capacity(n_markets);
     let mut expected_returns = Array1::zeros(n_markets);
 
-    // Run models on each market in parallel - maintaining same ordering as covariance matrix
-    let results: Vec<(usize, f64)> = market_slices
-        .par_iter()
-        .enumerate()
-        .map(|(i, slice)| {
-            let fee_return = fee_model::simulate_fee_return(slice).unwrap_or(Decimal::ZERO);
-            (i, fee_return.to_f64().unwrap_or(0.0))
-        })
-        .collect();
+    let token_hedgeinfo_map = dydx_client.get_token_hedgeinfo_map().await?;
 
-    // Populate arrays maintaining the original market_slices order
-    for slice in market_slices.iter() {
+    // Run models on each market sequentially to respect rate limits
+    for (i, slice) in market_slices.iter().enumerate() {
         market_addresses.push(slice.market_address);
         display_names.push(slice.display_name.clone());
-    }
-    
-    // Set expected returns using the parallel computation results
-    for (i, return_value) in results {
-        expected_returns[i] = return_value;
+        
+        let fee_return = fee_model::simulate_fee_return(&slice).unwrap_or(Decimal::ZERO);
+        
+        let (long_token_symbol, short_token_symbol) = get_collateral_tokens_from_display_name(slice.display_name.clone())?;
+        let long_token_hedgeinfo_opt = token_hedgeinfo_map.get(&long_token_symbol);
+        let short_token_hedgeinfo_opt = token_hedgeinfo_map.get(&short_token_symbol);
+        if let Some(Some(long_token_hedgeinfo)) = long_token_hedgeinfo_opt {
+            let exposed_capital_frac = if short_token_hedgeinfo_opt.unwrap_or(&None).is_some() {
+                Decimal::ONE // short token is stablecoin
+            } else {
+                Decimal::from_str("0.5").unwrap() // short token is not stablecoin
+            };
+            let funding_rate = long_token_hedgeinfo.0;
+            let leverage = long_token_hedgeinfo.1;
+            let funding_cost = exposed_capital_frac * (- funding_rate); // funding rate > 0 ==> longs pay shorts ==> income for our short position
+            let opportunity_cost = (exposed_capital_frac / leverage) * fee_return;
+            let total_return = fee_return - funding_cost - opportunity_cost;
+            info!(
+                market = %slice.display_name,
+                fee_return = %fee_return,
+                exposed_capital_frac = %exposed_capital_frac,
+                leverage = %leverage,
+                funding_rate = %funding_rate,
+                funding_cost = %funding_cost,
+                opportunity_cost = %opportunity_cost,
+                total_return = %total_return,
+                "Adjusted expected returns with hedge"
+            );
+            expected_returns[i] = total_return.to_f64().unwrap_or(0.0);
+        } else {
+            expected_returns[i] = fee_return.to_f64().unwrap_or(0.0); // No hedge info for long token indicates stablecoin or unsupported by dYdX
+            continue;
+        }
     }
     debug!("Market returns calculated");
 
     // Create PortfolioData with consistent ordering
-    let weights = match allocator::maximize_sharpe(expected_returns.clone(), covariance_matrix.clone()) {
-        Ok(weights) => weights,
-        Err(e) => {
-            error!("Failed to solve MPT QP: {}", e);
-            return None;
-        }
-    };
+    let weights = allocator::maximize_sharpe(expected_returns.clone(), covariance_matrix.clone())?;
 
     debug!("Optimal portfolio weights calculated");
 
     let portfolio_data = PortfolioData::new(market_addresses, display_names, expected_returns, covariance_matrix, weights);
 
-    Some(portfolio_data)
+    Ok(portfolio_data)
 }
 
 /// Fetch market state slices from the database
 #[instrument(name = "fetch_market_state_slices", skip(db_manager))]
-async fn fetch_market_state_slices(db_manager: Arc<DbManager>) -> Vec<MarketStateSlice> {
+async fn fetch_market_state_slices(db_manager: Arc<DbManager>) -> Result<Vec<MarketStateSlice>> {
     let start = chrono::Utc::now() - chrono::Duration::days(30); // 30 days for now, to be adjusted later
     let end = chrono::Utc::now();
     
-    match db_manager.get_market_state_slices(start, end).await {
-        Ok(slices) => slices,
-        Err(e) => {
-            error!(err = ?e, "Failed to fetch market state slices");
-            Vec::new()
-        }
-    }
+    let slices = db_manager.get_market_state_slices(start, end).await?;
+    Ok(slices)
 }
 
+// --- HELPERS ---
+
+fn get_collateral_tokens_from_display_name(display_name: String) -> Result<(String, String)> {
+    let collateral_tokens_start_idx = display_name.find('[')
+        .ok_or_else(|| eyre::eyre!("Invalid display name format: {}", display_name))? + 1;
+    let collateral_tokens_substr = &display_name[collateral_tokens_start_idx..display_name.len()-1];
+    let (long_token, short_token) = collateral_tokens_substr.split_once('-')
+        .ok_or_else(|| eyre::eyre!("Invalid collateral token format in display name: {}", display_name))?;
+    Ok((long_token[..long_token.len()-1].to_string(), short_token[1..].to_string()))
+}

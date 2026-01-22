@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 use ndarray::{Array1, Array2};
 use tracing::info;
 
@@ -47,13 +48,13 @@ pub struct MarketStateSlice {
 pub struct PortfolioData {
     pub market_addresses: Vec<Address>,
     pub display_names: Vec<String>,
-    pub expected_returns: Array1<f64>,
-    pub covariance_matrix: Array2<f64>,
-    pub weights: Array1<f64>,
+    pub expected_returns: Array1<Decimal>,
+    pub covariance_matrix: Array2<Decimal>,
+    pub weights: Array1<Decimal>,
 }
 
 impl PortfolioData {
-    pub fn new(market_addresses: Vec<Address>, display_names: Vec<String>, expected_returns: Array1<f64>, covariance_matrix: Array2<f64>, weights: Array1<f64>) -> Self {
+    pub fn new(market_addresses: Vec<Address>, display_names: Vec<String>, expected_returns: Array1<Decimal>, covariance_matrix: Array2<Decimal>, weights: Array1<Decimal>) -> Self {
         assert_eq!(market_addresses.len(), display_names.len());
         assert_eq!(market_addresses.len(), expected_returns.len());
         assert_eq!(market_addresses.len(), covariance_matrix.nrows());
@@ -73,40 +74,40 @@ impl PortfolioData {
         self.market_addresses.iter().position(|&addr| addr == address)
     }
     
-    pub fn get_expected_return(&self, address: Address) -> Option<f64> {
+    pub fn get_expected_return(&self, address: Address) -> Option<Decimal> {
         let index = self.get_market_index(address)?;
         Some(self.expected_returns[index])
     }
     
-    pub fn get_variance(&self, address: Address) -> Option<f64> {
+    pub fn get_variance(&self, address: Address) -> Option<Decimal> {
         let index = self.get_market_index(address)?;
         Some(self.covariance_matrix[[index, index]])
     }
     
-    pub fn get_covariance(&self, address_a: Address, address_b: Address) -> Option<f64> {
+    pub fn get_covariance(&self, address_a: Address, address_b: Address) -> Option<Decimal> {
         let index_a = self.get_market_index(address_a)?;
         let index_b = self.get_market_index(address_b)?;
         Some(self.covariance_matrix[[index_a, index_b]])
     }
 
-    pub fn get_weight(&self, address: Address) -> Option<f64> {
+    pub fn get_weight(&self, address: Address) -> Option<Decimal> {
         let index = self.get_market_index(address)?;
         Some(self.weights[index])
     }
 
     pub fn log_portfolio_data(&self) {
         // Calculate Sharpe ratios and create sorted data
-        let mut market_data: Vec<(usize, String, f64, f64, f64, f64)> = self.market_addresses
+        let mut market_data: Vec<(usize, String, Decimal, Decimal, Decimal, Decimal)> = self.market_addresses
             .iter()
             .enumerate()
             .map(|(i, &addr)| {
                 let expected_return = self.expected_returns[i];
-                let variance = self.get_variance(addr).unwrap_or(0.0);
-                let std_dev = variance.sqrt();
-                let sharpe = if std_dev > 0.0 { expected_return / std_dev } else { 0.0 };
+                let variance = self.get_variance(addr).unwrap_or(Decimal::ZERO);
+                let std_dev = variance.sqrt().unwrap_or(Decimal::ZERO);
+                let sharpe = if std_dev > Decimal::ZERO { expected_return / std_dev } else { Decimal::ZERO };
                 let weight = self.weights[i];
                 
-                (i, self.display_names[i].clone(), expected_return * 10000.0, std_dev * 10000.0, sharpe, weight)
+                (i, self.display_names[i].clone(), expected_return * Decimal::from_f64(10000.0).unwrap(), std_dev * Decimal::from_f64(10000.0).unwrap(), sharpe, weight)
             })
             .collect();
         
@@ -119,7 +120,7 @@ impl PortfolioData {
             .map(|(_, name, return_pct, vol_pct, sharpe, weight)| {
                 format!(
                     "{}: Weight={:.2}%, Return={:.5}bps, Vol={:.5}bps, Sharpe={:.3}",
-                    name, weight * 100.0, return_pct, vol_pct, sharpe
+                    name, weight * Decimal::from_f64(100.0).unwrap(), return_pct, vol_pct, sharpe
                 )
             })
             .collect::<Vec<_>>()
@@ -129,15 +130,15 @@ impl PortfolioData {
         let total_weight = self.weights.sum();
         let portfolio_return = self.weights.dot(&self.expected_returns);
         let portfolio_variance = self.weights.dot(&self.covariance_matrix.dot(&self.weights));
-        let portfolio_volatility = portfolio_variance.sqrt();
-        let portfolio_sharpe = if portfolio_volatility > 0.0 { portfolio_return / portfolio_volatility } else { 0.0 };
+        let portfolio_volatility = portfolio_variance.sqrt().unwrap_or(Decimal::ZERO);
+        let portfolio_sharpe = if portfolio_volatility > Decimal::ZERO { portfolio_return / portfolio_volatility } else { Decimal::ZERO };
         
         info!(
             "Optimal Portfolio (sorted by weight):\n  {}\n\nPortfolio Summary:\n  Total Weight: {:.2}%\n  Expected Return: {:.5}bps\n  Volatility: {:.5}bps\n  Sharpe Ratio: {:.3}",
             market_summary,
-            total_weight * 100.0,
-            portfolio_return * 10000.0,
-            portfolio_volatility * 10000.0,
+            total_weight * Decimal::from_f64(100.0).unwrap(),
+            portfolio_return * Decimal::from_f64(10000.0).unwrap(),
+            portfolio_volatility * Decimal::from_f64(10000.0).unwrap(),
             portfolio_sharpe
         );
     }

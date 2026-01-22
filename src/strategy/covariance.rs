@@ -7,7 +7,7 @@ use super::types::{
 };
 
 /// Calculate covariance matrix from market slices with consistent ordering
-pub fn calculate_covariance_matrix(market_slices: &[MarketStateSlice]) -> Option<Array2<f64>> {
+pub fn calculate_covariance_matrix(market_slices: &[MarketStateSlice]) -> Option<Array2<Decimal>> {
     if market_slices.is_empty() {
         return None;
     }
@@ -19,11 +19,11 @@ pub fn calculate_covariance_matrix(market_slices: &[MarketStateSlice]) -> Option
 }
 
 /// Calculate historical covariance matrix from PnL returns
-fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option<Array2<f64>> {
+fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option<Array2<Decimal>> {
         let n_markets = market_slices.len();
         
         // Extract PnL returns for each market
-        let mut returns_matrix: Vec<Vec<f64>> = Vec::with_capacity(n_markets);
+        let mut returns_matrix: Vec<Vec<Decimal>> = Vec::with_capacity(n_markets);
         let mut min_length = usize::MAX;
 
         for slice in market_slices {
@@ -42,7 +42,7 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
         }
 
         // Calculate covariance matrix
-        let mut cov_matrix = Array2::zeros((n_markets, n_markets));
+        let mut cov_matrix: Array2<Decimal> = Array2::zeros((n_markets, n_markets));
         
         for i in 0..n_markets {
             for j in 0..n_markets {
@@ -52,14 +52,14 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
                 let pool_value_i = market_slices[i].pool_long_collateral_usd + market_slices[i].pool_short_collateral_usd - market_slices[i].impact_pool_usd;
                 let pool_value_j = market_slices[j].pool_long_collateral_usd + market_slices[j].pool_short_collateral_usd - market_slices[j].impact_pool_usd;
                 let net_oi_exposure_i = if pool_value_i > Decimal::ZERO {
-                    (net_oi_i / pool_value_i).to_f64().unwrap_or(0.0)
+                    net_oi_i / pool_value_i
                 } else {
-                    0.0
+                    Decimal::ZERO
                 };
                 let net_oi_exposure_j = if pool_value_j > Decimal::ZERO {
-                    (net_oi_j / pool_value_j).to_f64().unwrap_or(0.0)
+                    net_oi_j / pool_value_j
                 } else {
-                    0.0
+                    Decimal::ZERO
                 };
                 cov_matrix[[i, j]] = covariance * net_oi_exposure_i * net_oi_exposure_j;
             }
@@ -69,7 +69,7 @@ fn calculate_historical_covariance(market_slices: &[MarketStateSlice]) -> Option
     }
 
 /// Calculate PnL returns for a single market from historical data
-fn calculate_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
+fn calculate_returns(slice: &MarketStateSlice) -> Option<Vec<Decimal>> {
         if slice.index_prices.len() < 2 {
             return None;
         }
@@ -87,7 +87,7 @@ fn calculate_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
             let p1 = slice.index_prices[i];
             
             if p0 > Decimal::ZERO && p1 > Decimal::ZERO {
-                let token_return = ((p1 - p0) / p0).to_f64().unwrap_or(0.0);
+                let token_return = (p1 - p0) / p0;
                 returns.push(token_return);
             }
         }
@@ -100,19 +100,19 @@ fn calculate_returns(slice: &MarketStateSlice) -> Option<Vec<f64>> {
     }
 
 /// Calculate sample covariance between two return series
-fn calculate_covariance(returns_x: &[f64], returns_y: &[f64]) -> f64 {
+fn calculate_covariance(returns_x: &[Decimal], returns_y: &[Decimal]) -> Decimal {
     if returns_x.len() != returns_y.len() || returns_x.len() < 2 {
-        return 0.0;
+        return Decimal::ZERO;
     }
 
-    let n = returns_x.len() as f64;
-    let mean_x = returns_x.iter().sum::<f64>() / n;
-    let mean_y = returns_y.iter().sum::<f64>() / n;
+    let n = Decimal::from_i64(returns_x.len() as i64).unwrap();
+    let mean_x = returns_x.iter().sum::<Decimal>() / n;
+    let mean_y = returns_y.iter().sum::<Decimal>() / n;
 
     let covariance = returns_x.iter()
         .zip(returns_y.iter())
         .map(|(x, y)| (x - mean_x) * (y - mean_y))
-        .sum::<f64>() / (n - 1.0); // Sample covariance (divide by n-1)
+        .sum::<Decimal>() / (n - Decimal::ONE); // Sample covariance (divide by n-1)
 
     covariance
 }

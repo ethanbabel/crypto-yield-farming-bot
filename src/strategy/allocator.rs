@@ -1,3 +1,5 @@
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 use ndarray::{Array1, Array2};
 use argmin::core::{CostFunction, Executor, Gradient, State};
 use argmin::solver::gradientdescent::SteepestDescent;
@@ -6,9 +8,9 @@ use eyre::Result;
 
 /// Maximize Sharpe ratio subject to weights summing to 1 and being non-negative
 pub fn maximize_sharpe(
-    expected_returns: Array1<f64>,
-    covariance_matrix: Array2<f64>,
-) -> Result<Array1<f64>> {
+    expected_returns: Array1<Decimal>,
+    covariance_matrix: Array2<Decimal>,
+) -> Result<Array1<Decimal>> {
     let n_assets = expected_returns.len();
     
     // Validate inputs
@@ -22,7 +24,7 @@ pub fn maximize_sharpe(
 
     // Check if covariance matrix is positive definite by ensuring all diagonal elements are positive
     for i in 0..n_assets {
-        if covariance_matrix[[i, i]] <= 0.0 {
+        if covariance_matrix[[i, i]] <= Decimal::ZERO {
             return Err(eyre::eyre!("Covariance matrix is not positive definite"));
         }
     }
@@ -35,9 +37,9 @@ pub fn maximize_sharpe(
 
 /// Solve the unconstrained MPT problem analytically and project to valid weights
 fn solve_unconstrained_mpt(
-    expected_returns: &Array1<f64>,
-    covariance_matrix: &Array2<f64>,
-) -> Result<Array1<f64>> {
+    expected_returns: &Array1<Decimal>,
+    covariance_matrix: &Array2<Decimal>,
+) -> Result<Array1<Decimal>> {
     let n = expected_returns.len();
     
     // For the mean-variance optimization problem, we want to maximize:
@@ -47,33 +49,32 @@ fn solve_unconstrained_mpt(
     // The analytical solution is: w = (Σ^-1 * μ) / (1^T * Σ^-1 * μ)
     // But since matrix inversion is complex, we'll use a simpler heuristic approach
     
-    // Simple heuristic: weight by risk-adjusted returns (Sharpe ratios)
+    // Simple heuristic: set initial weights by normalized Sharpe ratios prior to optimization
     let mut weights = Array1::zeros(n);
-    let mut total_score = 0.0;
+    let mut total_score = Decimal::ZERO;
     
     for i in 0..n {
         let variance = covariance_matrix[[i, i]];
         let expected_return = expected_returns[i];
         
         // Calculate individual Sharpe ratio (assuming zero risk-free rate)
-        let sharpe_ratio = if variance > 0.0 {
-            expected_return / variance.sqrt()
-        } else {
-            0.0
-        };
+        let std_dev = variance.sqrt().unwrap_or(Decimal::ZERO);
+        let sharpe_ratio = if std_dev > Decimal::ZERO { expected_return / std_dev } else { Decimal::ZERO };
         
         // Use max(0, sharpe_ratio) to ensure non-negative weights
-        let score = sharpe_ratio.max(0.0);
+        let score = sharpe_ratio.max(Decimal::ZERO);
         weights[i] = score;
         total_score += score;
     }
     
     // Normalize weights to sum to 1
-    if total_score > 1e-10 {
-        weights /= total_score;
+    if total_score > Decimal::from_f64(1e-10).unwrap() {
+        for weight in weights.iter_mut() {
+            *weight = *weight / total_score;
+        }
     } else {
         // Fallback to zero weights if all Sharpe ratios are non-positive
-        weights.fill(0.0);
+        weights.fill(Decimal::ZERO);
     }
     
     // Apply minimum variance optimization as a refinement
@@ -84,16 +85,24 @@ fn solve_unconstrained_mpt(
 
 /// Refine weights using a simple gradient descent approach
 fn refine_with_minimum_variance(
-    initial_weights: &Array1<f64>,
-    expected_returns: &Array1<f64>,
-    covariance_matrix: &Array2<f64>,
-) -> Result<Array1<f64>> {
+    initial_weights: &Array1<Decimal>,
+    expected_returns: &Array1<Decimal>,
+    covariance_matrix: &Array2<Decimal>,
+) -> Result<Array1<Decimal>> {
     let n = initial_weights.len();
+    
+    // Convert Decimal to f64 for optimization (argmin doesn't support Decimal)
+    let initial_weights_f64: Vec<f64> = initial_weights.iter()
+        .map(|d| d.to_f64().unwrap_or(0.0))
+        .collect();
+    
+    let expected_returns_f64 = expected_returns.mapv(|d| d.to_f64().unwrap_or(0.0));
+    let covariance_matrix_f64 = covariance_matrix.mapv(|d| d.to_f64().unwrap_or(0.0));
     
     // Define the optimization problem
     let problem = SharpeRatioProblem {
-        expected_returns: expected_returns.clone(),
-        covariance_matrix: covariance_matrix.clone(),
+        expected_returns: expected_returns_f64,
+        covariance_matrix: covariance_matrix_f64,
     };
 
     // Use steepest descent with backtracking line search
@@ -106,43 +115,50 @@ fn refine_with_minimum_variance(
     let result = Executor::new(problem, solver)
         .configure(|state| {
             state
-                .param(initial_weights.to_vec())
-                .max_iters(100)
+                .param(initial_weights_f64)
+                .max_iters(1000)
                 .target_cost(1e-6)
         })
         .run()
         .map_err(|e| eyre::eyre!("Optimization failed: {}", e))?;
 
-    // Get the optimal weights
+    // Get the optimal weights and convert back to Decimal
     let optimal_weights_vec = result.state().get_best_param().unwrap().clone();
-    let mut optimal_weights = Array1::from_vec(optimal_weights_vec);
+    let mut optimal_weights: Array1<Decimal> = Array1::from_vec(
+        optimal_weights_vec.iter()
+            .map(|&f| Decimal::from_f64(f).unwrap_or(Decimal::ZERO))
+            .collect()
+    );
 
     // Ensure weights are non-negative (project negative weights to zero)
-    optimal_weights.mapv_inplace(|w| w.max(0.0));
+    optimal_weights.mapv_inplace(|w| w.max(Decimal::ZERO));
 
     // Normalize weights to sum to 1
     let weight_sum = optimal_weights.sum();
-    if weight_sum > 1e-10 {
-        optimal_weights /= weight_sum;
+    if weight_sum > Decimal::from_f64(1e-10).unwrap() {
+        for weight in optimal_weights.iter_mut() {
+            *weight = *weight / weight_sum;
+        }
     } else {
         // Fallback to zero weights if all weights are near zero
-        optimal_weights = Array1::from_vec(vec![0.0; n]);
+        optimal_weights = Array1::from_vec(vec![Decimal::ZERO; n]);
     }
 
     // Apply minimum weight filter first (eliminate tiny positions)
-    optimal_weights = apply_minimum_weight_filter(optimal_weights, 0.01); // 1% min weight or zero
+    optimal_weights = apply_minimum_weight_filter(optimal_weights, Decimal::from_f64(0.01).unwrap()); // 1% min weight or zero
 
     // Then apply maximum position size limits
-    optimal_weights = apply_position_limits(optimal_weights, 0.25); // 25% max weight per asset
+    optimal_weights = apply_position_limits(optimal_weights, Decimal::from_f64(0.25).unwrap()); // 25% max weight per asset
 
     Ok(optimal_weights)
 }
 
 /// Apply position size limits by capping weights and redistributing excess
-fn apply_position_limits(mut weights: Array1<f64>, max_weight: f64) -> Array1<f64> {
+fn apply_position_limits(mut weights: Array1<Decimal>, max_weight: Decimal) -> Array1<Decimal> {
     let n = weights.len();
     let mut iterations = 0;
     const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
+    let epsilon = Decimal::from_f64(1e-10).unwrap();
     
     loop {
         iterations += 1;
@@ -151,9 +167,9 @@ fn apply_position_limits(mut weights: Array1<f64>, max_weight: f64) -> Array1<f6
         }
         
         // Find assets that exceed the limit
-        let mut total_excess = 0.0;
+        let mut total_excess = Decimal::ZERO;
         let mut capped_indices = Vec::new();
-        let mut uncapped_weight_sum = 0.0;
+        let mut uncapped_weight_sum = Decimal::ZERO;
         
         for (i, &weight) in weights.iter().enumerate() {
             if weight > max_weight {
@@ -165,7 +181,7 @@ fn apply_position_limits(mut weights: Array1<f64>, max_weight: f64) -> Array1<f6
         }
         
         // If no assets exceed the limit, we're done
-        if total_excess <= 1e-10 {
+        if total_excess <= epsilon {
             break;
         }
         
@@ -175,7 +191,7 @@ fn apply_position_limits(mut weights: Array1<f64>, max_weight: f64) -> Array1<f6
         }
         
         // Redistribute excess proportionally to uncapped assets
-        if uncapped_weight_sum > 1e-10 {
+        if uncapped_weight_sum > epsilon {
             for i in 0..n {
                 if !capped_indices.contains(&i) {
                     let proportion = weights[i] / uncapped_weight_sum;
@@ -186,7 +202,7 @@ fn apply_position_limits(mut weights: Array1<f64>, max_weight: f64) -> Array1<f6
             // If all uncapped assets have zero weight, distribute equally among them
             let uncapped_count = n - capped_indices.len();
             if uncapped_count > 0 {
-                let equal_share = total_excess / uncapped_count as f64;
+                let equal_share = total_excess / Decimal::from(uncapped_count);
                 for i in 0..n {
                     if !capped_indices.contains(&i) {
                         weights[i] += equal_share;
@@ -200,10 +216,11 @@ fn apply_position_limits(mut weights: Array1<f64>, max_weight: f64) -> Array1<f6
 }
 
 /// Apply minimum weight filter by zeroing out tiny positions and redistributing their weight
-fn apply_minimum_weight_filter(mut weights: Array1<f64>, min_weight: f64) -> Array1<f64> {
+fn apply_minimum_weight_filter(mut weights: Array1<Decimal>, min_weight: Decimal) -> Array1<Decimal> {
     let n = weights.len();
     let mut iterations = 0;
     const MAX_ITERATIONS: usize = 100; // Prevent infinite loops
+    let epsilon = Decimal::from_f64(1e-10).unwrap();
     
     loop {
         iterations += 1;
@@ -212,12 +229,12 @@ fn apply_minimum_weight_filter(mut weights: Array1<f64>, min_weight: f64) -> Arr
         }
         
         // Find assets below the minimum threshold (but not already zero)
-        let mut total_to_redistribute = 0.0;
+        let mut total_to_redistribute = Decimal::ZERO;
         let mut zeroed_indices = Vec::new();
-        let mut remaining_weight_sum = 0.0;
+        let mut remaining_weight_sum = Decimal::ZERO;
         
         for (i, &weight) in weights.iter().enumerate() {
-            if weight > 0.0 && weight < min_weight {
+            if weight > Decimal::ZERO && weight < min_weight {
                 total_to_redistribute += weight;
                 zeroed_indices.push(i);
             } else if weight >= min_weight {
@@ -227,16 +244,16 @@ fn apply_minimum_weight_filter(mut weights: Array1<f64>, min_weight: f64) -> Arr
 
         // Zero out the tiny positions
         for &i in &zeroed_indices {
-            weights[i] = 0.0;
+            weights[i] = Decimal::ZERO;
         }
         
         // If no assets are below the threshold, we're done
-        if total_to_redistribute <= 1e-10 {
+        if total_to_redistribute <= epsilon {
             break;
         }
         
         // Redistribute their weight proportionally to assets above the threshold
-        if remaining_weight_sum > 1e-10 {
+        if remaining_weight_sum > epsilon {
             for i in 0..n {
                 if weights[i] >= min_weight {
                     let proportion = weights[i] / remaining_weight_sum;
@@ -246,11 +263,11 @@ fn apply_minimum_weight_filter(mut weights: Array1<f64>, min_weight: f64) -> Arr
         } else {
             // If no assets are above the threshold, this shouldn't happen after normalization
             // But as a safety, distribute equally among all non-zero positions
-            let non_zero_count = weights.iter().filter(|&&w| w > 0.0).count();
+            let non_zero_count = weights.iter().filter(|&&w| w > Decimal::ZERO).count();
             if non_zero_count > 0 {
-                let equal_share = total_to_redistribute / non_zero_count as f64;
+                let equal_share = total_to_redistribute / Decimal::from(non_zero_count);
                 for weight in weights.iter_mut() {
-                    if *weight > 0.0 {
+                    if *weight > Decimal::ZERO {
                         *weight += equal_share;
                     }
                 }

@@ -131,9 +131,9 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>, dydx_client: Arc<Dy
                 total_return = %total_return,
                 "Adjusted expected returns with hedge"
             );
-            expected_returns[i] = total_return.to_f64().unwrap_or(0.0);
+            expected_returns[i] = total_return;
         } else {
-            expected_returns[i] = fee_return.to_f64().unwrap_or(0.0); // No hedge info for long token indicates stablecoin or unsupported by dYdX
+            expected_returns[i] = fee_return; // No hedge info for long token indicates stablecoin or unsupported by dYdX
             continue;
         }
     }

@@ -119,8 +119,14 @@ impl PortfolioData {
             .iter()
             .map(|(_, name, return_pct, vol_pct, sharpe, weight)| {
                 format!(
-                    "{}: Weight={:.2}%, Return={:.5}bps, Vol={:.5}bps, Sharpe={:.3}",
-                    name, weight * Decimal::from_f64(100.0).unwrap(), return_pct, vol_pct, sharpe
+                    "{}: Weight={:.2}%, Return={:.5}bps ({:.2}% ann), Vol={:.5}bps ({:.2}% ann), Sharpe={:.3}",
+                    name, 
+                    weight * Decimal::from_f64(100.0).unwrap(), 
+                    return_pct,
+                    (return_pct * Decimal::from_f64(24.0 * 365.0).unwrap()) / Decimal::from_f64(100.0).unwrap(), // annualized in %
+                    vol_pct, 
+                    (vol_pct * Decimal::from_f64(24.0 * 365.0).unwrap()) / Decimal::from_f64(100.0).unwrap(), // annualized in %
+                    sharpe
                 )
             })
             .collect::<Vec<_>>()

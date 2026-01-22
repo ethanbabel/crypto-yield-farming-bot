@@ -123,12 +123,16 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>, dydx_client: Arc<Dy
             info!(
                 market = %slice.display_name,
                 fee_return = %fee_return,
+                fee_return_annualized = %((fee_return * Decimal::from_f64(24.0 * 365.0).unwrap())),
                 exposed_capital_frac = %exposed_capital_frac,
                 leverage = %leverage,
                 funding_rate = %funding_rate,
                 funding_cost = %funding_cost,
+                funding_cost_annualized = %((funding_cost * Decimal::from_f64(24.0 * 365.0).unwrap())),
                 opportunity_cost = %opportunity_cost,
+                opportunity_cost_annualized = %((opportunity_cost * Decimal::from_f64(24.0 * 365.0).unwrap())),
                 total_return = %total_return,
+                total_return_annualized = %((total_return * Decimal::from_f64(24.0 * 365.0).unwrap())),
                 "Adjusted expected returns with hedge"
             );
             expected_returns[i] = total_return;

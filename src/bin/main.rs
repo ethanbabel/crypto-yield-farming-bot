@@ -36,28 +36,18 @@ async fn main() -> Result<()> {
     info!("Wallet manager initialized and tokens loaded");
 
     // Initialize dydx client
-    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    let mut dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
     info!("dYdX client initialized");
 
-    // Get ETH perp market info
-    match dydx_client.get_perpetual_market("ETH").await {
-        Ok(market_info) => {
-            info!("ETH Perp Market Info: {:#?}", market_info);
+    // Get and log subaccount info
+    match dydx_client.get_subaccount().await {
+        Ok(subaccount) => {
+            info!("dYdX Subaccount Info: {:?}", subaccount);
         }
         Err(e) => {
-            error!("Failed to get ETH perp market info: {}", e);
+            error!("Failed to get dYdX subaccount info: {}", e);
         }
-    };
-
-    // Get ETH max leverage
-    match dydx_client.get_max_leverage("ETH").await {
-        Ok(max_leverage) => {
-            info!("ETH Max Leverage: {}", max_leverage);
-        }
-        Err(e) => {
-            error!("Failed to get ETH max leverage: {}", e);
-        }
-    };
+    }
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

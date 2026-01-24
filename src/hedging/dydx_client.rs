@@ -17,11 +17,17 @@ use dydx::{
     node::{
         NodeClient,
         Wallet,
+        OrderBuilder,
+        OrderId,
     },
     indexer::{
         IndexerClient,
-        types::{Ticker, PerpetualMarket, Denom},
+        types::{Ticker, PerpetualMarket, Denom, Subaccount, SubaccountNumber},
     },
+};
+use dydx_proto::dydxprotocol::{
+    clob::Order,
+    subaccounts::Subaccount as SubaccountInfo,
 };
 use cosmrs::{
     crypto::secp256k1,
@@ -43,6 +49,8 @@ const DYDX_CHAIN_ID: &str = "dydx-mainnet-1";
 const ARBITRUM_USDC_DENOM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const DYDX_USDC_DENOM: &str = "ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14E9E20E2545B5";
 const USDC_DECIMALS: u8 = 6;
+
+const DYDX_SUBACCOUNT_NUM: u32 = 0;
 
 // ERC20 ABI for token approvals
 abigen!(
@@ -201,6 +209,18 @@ impl DydxClient {
         let margin_frac = initial_margin_frac.max(maintenance_margin_frac); // Should always be initial margin but just in case
         let max_leverage = Decimal::ONE / (Decimal::from_str("2")? * margin_frac); // Only use 50% of max leverage to provide buffer
         Ok(max_leverage)
+    }
+
+    pub async fn get_subaccount(&mut self) -> Result<SubaccountInfo> {
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+
+        let subaccount_info = self.node_client.get_subaccount(&subaccount).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount info: {}", e))?;
+        Ok(subaccount_info)
     }
 
     #[instrument(skip(self))]

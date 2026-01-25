@@ -223,6 +223,113 @@ impl DydxClient {
         Ok(subaccount_info)
     }
 
+    pub async fn deposit_to_subaccount(&mut self, amount: Decimal) -> Result<()> {
+        // Fetch dYdX account info
+        let dydx_account_info = self.node_client.get_account(&self.dydx_address.clone().into()).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
+        // Get dYdX account
+        let mut account = self.dydx_wallet.account(0, &mut self.node_client).await
+            .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
+        // Set next nonce
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account_info.sequence));
+
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+
+        let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
+        let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
+
+        let tx_hash = self.node_client.deposit(
+            &mut account,
+            self.dydx_address.clone().into(),
+            subaccount,
+            dydx::indexer::tokens::Usdc::from_quantums(
+                decimal_to_u256(amount, USDC_DECIMALS)?.as_u64()
+            )
+        ).await.map_err(|e| eyre::eyre!("Failed to deposit to dYdX subaccount: {}", e))?;
+
+        info!(
+            tx_hash = ?tx_hash,
+            amount = ?amount,
+            dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
+            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_usdc_balance_initial,
+            "Deposit to dYdX subaccount submitted successfully"
+        );
+
+        let _tx_result = self.node_client.query_transaction(&tx_hash).await
+            .map_err(|e| eyre::eyre!("Failed to query dYdX deposit transaction result: {}", e))?;
+
+        let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
+        let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
+
+        info!(
+            tx_hash = ?tx_hash,
+            amount = ?amount,
+            dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+            "Deposit to dYdX subaccount confirmed successfully"
+        );
+
+        Ok(())
+    }
+
+    pub async fn withdraw_from_subaccount(&mut self, amount: Decimal) -> Result<()> {
+        // Fetch dYdX account info
+        let dydx_account_info = self.node_client.get_account(&self.dydx_address.clone().into()).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
+        // Get dYdX account
+        let mut account = self.dydx_wallet.account(0, &mut self.node_client).await
+            .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
+        // Set next nonce
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account_info.sequence));
+
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+
+        let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
+        let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
+
+        let tx_hash = self.node_client.withdraw(
+            &mut account,
+            subaccount,
+            self.dydx_address.clone().into(),
+            dydx::indexer::tokens::Usdc::from_quantums(
+                decimal_to_u256(amount, USDC_DECIMALS)?.as_u64()
+            )
+        ).await.map_err(|e| eyre::eyre!("Failed to withdraw from dYdX subaccount: {}", e))?;
+
+        info!(
+            tx_hash = ?tx_hash,
+            amount = ?amount,
+            dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
+            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_usdc_balance_initial,
+            "Withdrawal from dYdX subaccount submitted successfully"
+        );
+
+        let _tx_result = self.node_client.query_transaction(&tx_hash).await
+            .map_err(|e| eyre::eyre!("Failed to query dYdX withdrawal transaction result: {}", e))?;
+
+        let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
+        let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
+
+        info!(
+            tx_hash = ?tx_hash,
+            amount = ?amount,
+            dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+            "Withdrawal from dYdX subaccount confirmed successfully"
+        );
+
+        Ok(())
+    }
+        
+
     #[instrument(skip(self))]
     pub async fn dydx_deposit(
         &mut self, 
@@ -413,6 +520,29 @@ impl DydxClient {
         let balance_u256 = U256::from_dec_str(&balance.amount)?;
         let balance_decimal = u256_to_decimal(balance_u256, USDC_DECIMALS)?;
         Ok(balance_decimal)
+    }
+
+    async fn get_dydx_subaccount_usdc_balance(&self) -> Result<Decimal> {
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+
+        let asset_positions = self.indexer_client.accounts()
+            .get_subaccount_asset_positions(&subaccount).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount asset positions: {}", e))?;
+        for position in asset_positions {
+            if position.symbol.0 == "USDC" {
+                let balance = Decimal::from_str(&position.size.to_plain_string())?;
+                if position.side == dydx::indexer::types::PositionSide::Short {
+                    return Ok(-balance);
+                } else {
+                    return Ok(balance);
+                }
+            }
+        }
+        Ok(Decimal::ZERO)
     }
 
     async fn get_deposit_log_string(

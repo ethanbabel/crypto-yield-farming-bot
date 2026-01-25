@@ -1,7 +1,9 @@
 use dotenvy::dotenv;
 use eyre::Result;
-use tracing::{info, error};
+use tracing::{info};
 use std::sync::Arc;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
@@ -39,15 +41,13 @@ async fn main() -> Result<()> {
     let mut dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
     info!("dYdX client initialized");
 
-    // Get and log subaccount info
-    match dydx_client.get_subaccount().await {
-        Ok(subaccount) => {
-            info!("dYdX Subaccount Info: {:?}", subaccount);
-        }
-        Err(e) => {
-            error!("Failed to get dYdX subaccount info: {}", e);
-        }
-    }
+    // Deposit funds into dYdX subaccount
+    dydx_client.deposit_to_subaccount(Decimal::from_str("1")?).await?; // Deposit 1 USDC
+    info!("Deposited 1 USDC into dYdX subaccount");
+
+    // Withdraw funds from dYdX subaccount
+    dydx_client.withdraw_from_subaccount(Decimal::from_str("1")?).await?; // Withdraw 1 USDC
+    info!("Withdrew 1 USDC from dYdX subaccount");
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

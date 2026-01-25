@@ -9,7 +9,6 @@ use ethers::types::{
     TransactionRequest, Bytes, TxHash, TransactionReceipt, 
     transaction::eip2718::TypedTransaction
 };
-use futures::stream::{self, StreamExt};
 use tokio::time::{sleep, Duration, Instant};
 use tokio::task::JoinHandle;
 use dydx::{
@@ -141,23 +140,26 @@ impl DydxClient {
             .map(|token| token.symbol.clone())
             .collect();
 
-        let results: Vec<_> = stream::iter(token_symbols)
-            .map(|token_symbol| async move {
-                let market = self.get_perpetual_market(&token_symbol).await;
-                (token_symbol, market)
-            })
-            .buffer_unordered(10)
-            .collect()
-            .await;
+        // let results: Vec<_> = stream::iter(token_symbols)
+        //     .map(|token_symbol| async move {
+        //         let market = self.get_perpetual_market(&token_symbol).await;
+        //         (token_symbol, market)
+        //     })
+        //     .buffer_unordered(10)
+        //     .collect()
+        //     .await;
 
+        let all_perp_markets = self.get_perpetual_markets().await?;
         let mut token_perp_map = HashMap::new();
-        for (token_symbol, market_result) in results {
-            match market_result {
-                Ok(market) => {
-                    token_perp_map.insert(token_symbol, market);
-                }
-                Err(e) => {
-                    return Err(eyre::eyre!("Error fetching market for {}: {}", token_symbol, e));
+        for token_symbol in token_symbols {
+            if hedge_utils::STABLE_COINS.contains(&token_symbol.as_str()) {
+                token_perp_map.insert(token_symbol.clone(), None);
+            } else {
+                let ticker = hedge_utils::get_dydx_perp_ticker(&token_symbol);
+                if let Some(market) = all_perp_markets.get(&ticker.into()) {
+                    token_perp_map.insert(token_symbol.clone(), Some(market.clone()));
+                } else {
+                    token_perp_map.insert(token_symbol.clone(), None);
                 }
             }
         }

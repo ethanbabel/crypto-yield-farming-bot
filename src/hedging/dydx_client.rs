@@ -423,7 +423,7 @@ impl DydxClient {
                             },
                             dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Open) |
                             dydx::indexer::ApiOrderStatus::BestEffort(dydx::indexer::types::BestEffortOpenedStatus::BestEffortOpened) => {
-                                info!(
+                                debug!(
                                     order_id_indexer = ?order_id_indexer,
                                     "{} | Order Still Open...", log_string
                                 );
@@ -624,7 +624,6 @@ impl DydxClient {
         }
         Ok(())
     }
-        
 
     #[instrument(skip(self))]
     pub async fn dydx_deposit(
@@ -696,27 +695,17 @@ impl DydxClient {
         // Execute SkipGo transfer
         self.execute_skip_go_transfer(
             msgs.txs, 
+            initial_dydx_usdc_balance,
+            initial_arbitrum_usdc_balance,
             initial_arbitrum_eth_balance, 
-            &log_string, 
+            log_string.clone(),
             estimated_time_secs,
         ).await?;
 
-        // Final balances
-        let final_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
-        let final_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
-        let final_arbitrum_eth_balance = self.wallet_manager.get_native_balance().await?;
-        let arbitrum_usdc_diff = final_arbitrum_usdc_balance - initial_arbitrum_usdc_balance;
-        let dydx_usdc_diff = final_dydx_usdc_balance - initial_dydx_usdc_balance;
-        let arbitrum_eth_diff = final_arbitrum_eth_balance - initial_arbitrum_eth_balance;
+        // Final log
         info!(
-            final_arbitrum_usdc_balance = ?final_arbitrum_usdc_balance,
-            final_dydx_usdc_balance = ?final_dydx_usdc_balance,
-            final_arbitrum_eth_balance = ?final_arbitrum_eth_balance,
-            "{} Deposit Initiated Successfully \n Arbitrum USDC Change: {} | dYdX USDC Change: {} | Arbitrum ETH Change: {}", 
+            "{} Deposit Initiated Successfully",
             log_string, 
-            arbitrum_usdc_diff,
-            dydx_usdc_diff,
-            arbitrum_eth_diff
         );
 
         Ok(())
@@ -733,6 +722,7 @@ impl DydxClient {
         // Get USDC balances
         let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
         let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+        let initial_arbitrum_native_balance = self.wallet_manager.get_native_balance().await?;
 
         // Sanity check request
         let log_string = self.get_withdrawal_log_string(
@@ -779,23 +769,17 @@ impl DydxClient {
         // Execute SkipGo transfer
         self.execute_skip_go_transfer(
             msgs.txs, 
-            Decimal::ZERO, // No Arbitrum native balance needed for withdrawal
-            &log_string, 
+            initial_dydx_usdc_balance,
+            initial_arbitrum_usdc_balance,
+            initial_arbitrum_native_balance,
+            log_string.clone(),
             estimated_time_secs,
         ).await?;
 
-        // Final balances
-        let final_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
-        let final_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
-        let arbitrum_usdc_diff = final_arbitrum_usdc_balance - initial_arbitrum_usdc_balance;
-        let dydx_usdc_diff = final_dydx_usdc_balance - initial_dydx_usdc_balance;
+        // Final log
         info!(
-            final_arbitrum_usdc_balance = ?final_arbitrum_usdc_balance,
-            final_dydx_usdc_balance = ?final_dydx_usdc_balance,
-            "{} Withdrawal Initiated Successfully \n Arbitrum USDC Change: {} | dYdX USDC Change: {}", 
+            "{} Withdrawal Initiated Successfully",
             log_string, 
-            arbitrum_usdc_diff,
-            dydx_usdc_diff,
         );
 
         Ok(())
@@ -995,8 +979,10 @@ impl DydxClient {
     async fn execute_skip_go_transfer(
         &mut self, 
         txs: Vec<skip_go::SkipGoTx>, 
-        arbitrum_native_balance: Decimal,
-        log_string: &String,
+        dydx_usdc_balance_initial: Decimal,
+        arbitrum_usdc_balance_initial: Decimal,
+        arbitrum_native_balance_initial: Decimal,
+        log_string: String,
         expected_time_to_complete_secs: u64,
     ) -> Result<()> {
         for tx in txs {
@@ -1028,7 +1014,11 @@ impl DydxClient {
                         tx_hash,
                         DYDX_CHAIN_ID.to_string(), 
                         expected_time_to_complete_secs,
-                    ).await;
+                        dydx_usdc_balance_initial,
+                        arbitrum_usdc_balance_initial,
+                        arbitrum_native_balance_initial,
+                        log_string.clone(),
+                    ).await?;
                 }
                 skip_go::SkipGoTx::EvmTx(evm_tx) => {
                     debug!("Executing EVM Tx: {:#?}", evm_tx);
@@ -1040,7 +1030,7 @@ impl DydxClient {
                     let evm_transaction = self.build_evm_transaction(evm_tx).await?;
                     debug!(transaction = ?evm_transaction, "{} Transaction Built", log_string);
 
-                    self.simulate_evm_transaction(&evm_transaction, arbitrum_native_balance).await?;
+                    self.simulate_evm_transaction(&evm_transaction, arbitrum_native_balance_initial).await?;
                     debug!(transaction = ?evm_transaction, "{} Transaction Simulated", log_string);
 
                     let (tx_hash, receipt) = self.execute_evm_transaction(evm_transaction).await?;
@@ -1062,7 +1052,11 @@ impl DydxClient {
                         format!("{:#x}", tx_hash),
                         ARBITRUM_CHAIN_ID.to_string(), 
                         expected_time_to_complete_secs,
-                    ).await;
+                        dydx_usdc_balance_initial,
+                        arbitrum_usdc_balance_initial,
+                        arbitrum_native_balance_initial,
+                        log_string.clone(),
+                    ).await?;
                 }
                 skip_go::SkipGoTx::SvmTx(svm_tx) => {
                     return Err(eyre::eyre!("No support for SVM transactions: {:#?}", svm_tx));
@@ -1309,7 +1303,18 @@ impl DydxClient {
         tx_hash: String,
         chain_id: String, 
         expected_time_to_complete_secs: u64, 
-    ) {     
+        dydx_usdc_balance_initial: Decimal,
+        arbitrum_usdc_balance_initial: Decimal,
+        arbitrum_native_balance_initial: Decimal,
+        log_string: String,
+    ) -> Result<()> {
+        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
+            .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
+        let mut node_client_clone = NodeClient::connect(config.node).await
+            .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
+        let dydx_address_clone = self.dydx_address.clone();
+        let wallet_manager_clone = self.wallet_manager.clone();
+
         let handle = tokio::spawn(async move {
             let interval = Duration::from_secs(
                 60.max(expected_time_to_complete_secs / 5)
@@ -1341,9 +1346,54 @@ impl DydxClient {
                     Ok(res) => {
                         match res.state {
                             skip_go::SkipGoTransactionState::StateCompletedSuccess => {
+                                let dydx_usdc_balance_final = match node_client_clone.get_account_balance(
+                                    &dydx_address_clone.clone().into(),
+                                    &Denom::Usdc,
+                                ).await {
+                                    Ok(balance) => Decimal::from_str(&balance.amount.to_string()).unwrap_or(Decimal::ZERO) * Decimal::from_str("0.000001").unwrap(),
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} Failed to fetch dYdX USDC balance: {}", log_string, e
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+                                let arbitrum_usdc_balance_final = match wallet_manager_clone.get_token_balance(
+                                    Address::from_str(ARBITRUM_USDC_DENOM).unwrap(),
+                                ).await {
+                                    Ok(balance) => balance,
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} Failed to fetch Arbitrum USDC balance: {}", log_string, e
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+                                let arbitrum_native_balance_final = match wallet_manager_clone.get_native_balance().await {
+                                    Ok(balance) => balance,
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} Failed to fetch Arbitrum native balance: {}", log_string, e
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+                                let dydx_usdc_change = dydx_usdc_balance_final - dydx_usdc_balance_initial;
+                                let arbitrum_usdc_change = arbitrum_usdc_balance_final - arbitrum_usdc_balance_initial;
+                                let arbitrum_native_change = arbitrum_native_balance_final - arbitrum_native_balance_initial;
                                 info!(
                                     tx_hash = ?tx_hash,
-                                    "SkipGo transaction completed successfully"
+                                    dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+                                    arbitrum_usdc_balance_final = ?arbitrum_usdc_balance_final,
+                                    arbitrum_native_balance_final = ?arbitrum_native_balance_final,
+                                    "{} SkipGo transaction completed successfully \n dYdX USDC change: {} Arbitrum USDC change: {} Arbitrum Native change: {}",
+                                    log_string,
+                                    dydx_usdc_change,
+                                    arbitrum_usdc_change,
+                                    arbitrum_native_change
                                 );
                                 break;
                             }
@@ -1353,7 +1403,8 @@ impl DydxClient {
                                         tx_hash = ?tx_hash,
                                         elapsed_secs = ?elapsed_secs,
                                         expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "SkipGo transaction pending for an extremely long time, exceeding 5x error threshold. Stopping polling."
+                                        "{} SkipGo transaction pending for an extremely long time, exceeding 5x error threshold. Stopping polling.",
+                                        log_string
                                     );
                                     break;
                                 } else if elapsed_secs > error_threshold {
@@ -1361,21 +1412,24 @@ impl DydxClient {
                                         tx_hash = ?tx_hash,
                                         elapsed_secs = ?elapsed_secs,
                                         expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "SkipGo transaction pending for too long, exceeding error threshold"
+                                        "{} SkipGo transaction pending for too long, exceeding error threshold",
+                                        log_string
                                     );
                                 } else if elapsed_secs > warn_threshold {
                                     warn!(
                                         tx_hash = ?tx_hash,
                                         elapsed_secs = ?elapsed_secs,
                                         expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "SkipGo transaction pending for too long, exceeding warning threshold"
+                                        "{} SkipGo transaction pending for too long, exceeding warning threshold",
+                                        log_string
                                     );
                                 } else {
                                     info!(
                                         tx_hash = ?tx_hash,
                                         elapsed_secs = ?elapsed_secs,
                                         expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "SkipGo transaction pending"
+                                        "{} SkipGo transaction pending",
+                                        log_string
                                     );
                                 }
                             }
@@ -1384,7 +1438,8 @@ impl DydxClient {
                                     tx_hash = ?tx_hash,
                                     state = ?res.state,
                                     status_response = ?res,
-                                    "SkipGo transaction failed"
+                                    "{} SkipGo transaction failed",
+                                    log_string
                                 );
                                 break;
                             }
@@ -1393,8 +1448,9 @@ impl DydxClient {
                     Err(e) => {
                         error!(
                             error = ?e,
-                            "Error fetching SkipGo transaction status for tx_hash: {:?}",
-                            tx_hash
+                            tx_hash = ?tx_hash,
+                            "{} Error fetching SkipGo transaction status",
+                            log_string
                         );
                         break;
                     }
@@ -1404,6 +1460,7 @@ impl DydxClient {
         
         // Store the handle
         self.active_transfer_polling_tasks.lock().await.push(handle);
+        Ok(())
     }
 }
 

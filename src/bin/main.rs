@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     info!("dYdX client initialized");
 
     // Set subaccount balance
-    dydx_client.set_subaccount_usdc_balance(Decimal::from_str("1")?).await?; // Will deposit/withdraw as needed to reach this balance
+    dydx_client.set_subaccount_usdc_balance(Decimal::from_str("1")?, true).await?; // Will deposit/withdraw as needed to reach this balance
     info!("dYdX subaccount USDC balance set");
 
     // Place order to short ETH-USD perp

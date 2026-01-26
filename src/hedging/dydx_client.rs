@@ -595,7 +595,7 @@ impl DydxClient {
         Ok(())
     }
 
-    pub async fn set_subaccount_usdc_balance(&mut self, target_balance: Decimal) -> Result<()> {
+    pub async fn set_subaccount_usdc_balance(&mut self, target_balance: Decimal, deposit_only: bool) -> Result<()> {
         let current_balance = self.get_dydx_subaccount_usdc_balance().await?;
         if target_balance > current_balance {
             let deposit_amount = target_balance - current_balance;
@@ -606,7 +606,7 @@ impl DydxClient {
                 "Increasing dYdX subaccount USDC balance via deposit"
             );
             self.deposit_to_subaccount(deposit_amount).await?;
-        } else if target_balance < current_balance {
+        } else if target_balance < current_balance && !deposit_only {
             let withdrawal_amount = current_balance - target_balance;
             info!(
                 current_balance = ?current_balance,
@@ -619,7 +619,7 @@ impl DydxClient {
             info!(
                 current_balance = ?current_balance,
                 target_balance = ?target_balance,
-                "dYdX subaccount USDC balance already at target, no action taken"
+                "dYdX subaccount USDC balance already at target or deposit_only = true; no action taken"
             );
         }
         Ok(())

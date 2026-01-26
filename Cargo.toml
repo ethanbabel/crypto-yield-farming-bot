@@ -78,3 +78,4 @@ bip39 = "2.2" # BIP-39 mnemonic handling
 base64 = "0.22" # Base64 encoding and decoding
 ibc-proto = "0.52" # IBC protocol buffers
 prost = "0.13" # Protocol Buffers implementation
+bigdecimal = "0.4" # Arbitrary-precision decimal arithmetic, compatible with dYdX

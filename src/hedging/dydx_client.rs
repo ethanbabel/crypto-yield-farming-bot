@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use tracing::{instrument, debug, info, warn, error};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use bigdecimal::BigDecimal;
+use std::str::FromStr;
 use ethers::prelude::*;
 use ethers::types::{
     TransactionRequest, Bytes, TxHash, TransactionReceipt, 
@@ -17,15 +19,26 @@ use dydx::{
         NodeClient,
         Wallet,
         OrderBuilder,
+        OrderSide,
+        OrderTimeInForce,
+        OrderGoodUntil,
         OrderId,
     },
     indexer::{
         IndexerClient,
-        types::{Ticker, PerpetualMarket, Denom, Subaccount, SubaccountNumber},
+        types::{
+            Ticker, 
+            PerpetualMarket, 
+            Denom, 
+            Subaccount, 
+            SubaccountNumber, 
+            ClientId, 
+            OrderStatus, 
+            Height
+        },
     },
 };
 use dydx_proto::dydxprotocol::{
-    clob::Order,
     subaccounts::Subaccount as SubaccountInfo,
 };
 use cosmrs::{
@@ -99,7 +112,7 @@ impl DydxClient {
     }
 
     #[instrument(skip(self))]
-    pub async fn wait_for_active_transfers(&self) {
+    pub async fn wait_for_active_tasks(&self) {
         let mut tasks = self.active_transfer_polling_tasks.lock().await;
         info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());
         while let Some(handle) = tasks.pop() {
@@ -139,15 +152,6 @@ impl DydxClient {
         let token_symbols: Vec<String> = self.wallet_manager.asset_tokens.values()
             .map(|token| token.symbol.clone())
             .collect();
-
-        // let results: Vec<_> = stream::iter(token_symbols)
-        //     .map(|token_symbol| async move {
-        //         let market = self.get_perpetual_market(&token_symbol).await;
-        //         (token_symbol, market)
-        //     })
-        //     .buffer_unordered(10)
-        //     .collect()
-        //     .await;
 
         let all_perp_markets = self.get_perpetual_markets().await?;
         let mut token_perp_map = HashMap::new();
@@ -211,6 +215,221 @@ impl DydxClient {
         let margin_frac = initial_margin_frac.max(maintenance_margin_frac); // Should always be initial margin but just in case
         let max_leverage = Decimal::ONE / (Decimal::from_str("2")? * margin_frac); // Only use 50% of max leverage to provide buffer
         Ok(max_leverage)
+    }
+
+    pub async fn submit_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool) -> Result<()> {
+        let log_string = self.get_perp_order_log_string(&token, size, side_is_buy, false)?;
+
+        self.execute_perp_order(&token, size, side_is_buy, log_string).await
+    }
+
+    pub async fn reduce_perp_position(&mut self, token: &str, reduce_by: Option<Decimal>) -> Result<()> {
+        let ticker = hedge_utils::get_dydx_perp_ticker(token);
+        let dydx_subaccount_perp_positions_initial = self.get_dydx_subaccount_perp_positions().await?;
+        let perp_position_size = dydx_subaccount_perp_positions_initial.get(&ticker)
+            .ok_or(eyre::eyre!("No existing perp position for token {}", token))?;
+        let side_is_buy = !perp_position_size.is_sign_positive();
+        let reduce_by = match reduce_by {
+            Some(amount) => amount,
+            None => perp_position_size.abs().clone(),
+        };
+        let log_string = self.get_perp_order_log_string(&token, reduce_by, side_is_buy, true)?;
+
+        self.execute_perp_order(token, reduce_by, side_is_buy, log_string).await
+    }
+
+    async fn execute_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool, log_string: String) -> Result<()> {
+        let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
+        let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
+        let dydx_subaccount_perp_positions_initial = self.get_dydx_subaccount_perp_positions().await?;
+        info!(
+            dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
+            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_usdc_balance_initial,
+            dydx_subaccount_perp_positions_initial = ?dydx_subaccount_perp_positions_initial,
+            "{} | Order Initiated", log_string
+        );
+
+        let market = match self.get_perpetual_market(token).await? {
+            Some(market) => market,
+            None => return Err(eyre::eyre!("No perpetual market found for token {}", token)),
+        };
+        let market_order_params = market.order_params();
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+        let side = match side_is_buy {
+            true => OrderSide::Buy,
+            false => OrderSide::Sell,
+        };
+        let current_block_height = self.node_client.latest_block_height().await
+            .map_err(|e| eyre::eyre!("Failed to fetch latest block height: {}", e))?;
+
+        let (order_id, order) = OrderBuilder::new(market_order_params, subaccount)
+            .market(side, BigDecimal::from_str(&size.to_string())?)
+            .short_term()
+            .time_in_force(OrderTimeInForce::Unspecified)
+            .until(OrderGoodUntil::Block(current_block_height.ahead(40))) // Order valid for 40 blocks
+            .build(ClientId::random())
+            .map_err(|e| eyre::eyre!("Failed to build dYdX order: {}", e))?;
+        info!(
+            order_id = ?order_id,
+            order = ?order,
+            "{} | Order Built Successfully", log_string
+        );
+
+        // Fetch dYdX account info
+        let dydx_account_info = self.node_client.get_account(&self.dydx_address.clone().into()).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
+        // Get dYdX account
+        let mut account = self.dydx_wallet.account(0, &mut self.node_client).await
+            .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
+        // Set next nonce
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account_info.sequence));
+
+        let tx_hash = self.node_client.place_order(&mut account, order).await
+            .map_err(|e| eyre::eyre!("Failed to place dYdX order: {}", e))?;
+
+        let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
+        let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
+        let dydx_subaccount_perp_positions_final = self.get_dydx_subaccount_perp_positions().await?;
+        info!(
+            tx_hash = ?tx_hash,
+            dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+            dydx_subaccount_perp_positions_final = ?dydx_subaccount_perp_positions_final,
+            "{} | Order Submitted Successfully", log_string
+        );
+
+        // Spawn status polling
+        self.spawn_status_polling_perp_order(log_string, false, order_id, current_block_height.ahead(40)).await?;
+
+        Ok(())
+    }
+
+    fn get_perp_order_log_string(
+        &self,
+        token: &str,
+        size: Decimal, // None for full position close
+        side_is_buy: bool, 
+        is_position_reduction: bool,
+    ) -> Result<String> {
+        let side_str = match side_is_buy {
+            true => "Long",
+            false => "Short",
+        };
+        let log_string = if is_position_reduction {
+            format!(
+                "DYDX PERP POSITION REDUCTION REQUEST | {} {:.5} {}",
+                side_str, size, token
+            )
+        } else {
+            format!(
+                "DYDX PERP ORDER REQUEST | {} {:.5} {}",
+                side_str, size, token,
+            )
+        };
+        Ok(log_string)
+    }
+
+    async fn spawn_status_polling_perp_order(
+        &self, 
+        log_string: String, 
+        is_position_reduction: bool,
+        order_id_node: OrderId,
+        block_to_wait_until: Height,
+    ) -> Result<()> {
+        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
+            .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
+        let mut node_client_clone = NodeClient::connect(config.node).await
+            .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
+        let indexer_client_clone = IndexerClient::new(config.indexer);
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+        let subaccount_orders = self.indexer_client.accounts().get_subaccount_orders(&subaccount, None).await
+            .map_err(|e| eyre::eyre!("Failed to fetch subaccount orders for order ID string: {}", e))?;
+        let order_id_indexer = subaccount_orders
+            .iter()
+            .find(|order| order.client_id.0 == order_id_node.client_id && order.good_til_block == Some(block_to_wait_until.clone()))
+            .ok_or_else(|| eyre::eyre!("Order not found in subaccount orders"))?
+            .id
+            .clone();
+            
+        let handle = tokio::spawn(async move {
+            let complete_msg = if is_position_reduction {
+                "Position Reduced Successfully"
+            } else {
+                "Order Executed Successfully"
+            };
+            loop {
+                match indexer_client_clone.accounts().get_order(&order_id_indexer).await {
+                    Ok(order) => {
+                        match order.status {
+                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Filled) => {
+                                info!(
+                                    order_id_indexer = ?order_id_indexer,
+                                    "{} | {}", log_string, complete_msg
+                                );
+                                break;
+                            },
+                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Open) |
+                            dydx::indexer::ApiOrderStatus::BestEffort(dydx::indexer::types::BestEffortOpenedStatus::BestEffortOpened) => {
+                                info!(
+                                    order_id_indexer = ?order_id_indexer,
+                                    "{} | Order Still Open...", log_string
+                                );
+                            }
+                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Canceled) |
+                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::BestEffortCanceled) => {
+                                warn!(
+                                    order_id_indexer = ?order_id_indexer,
+                                    "{} | Order Cancelled", log_string
+                                );
+                                break;
+                            }
+                            _ => {
+                                warn!(
+                                    order_id_indexer = ?order_id_indexer,
+                                    order_status = ?order.status,
+                                    "{} | Order In Unexpected State", log_string
+                                );
+                            }
+                        };
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "{} | Failed to fetch account during polling", log_string
+                        );
+                        continue;
+                    }
+                }
+                
+                let current_block_height = match node_client_clone.latest_block_height().await {
+                    Ok(height) => height,
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "{} | Failed to fetch latest block height during order polling", log_string
+                        );
+                        continue;
+                    }
+                };
+                if current_block_height > block_to_wait_until {
+                    warn!("{} | Order Timed Out After Reaching Target Block Height", log_string);
+                    break;
+                }
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        // Store the handle
+        self.active_transfer_polling_tasks.lock().await.push(handle);
+        Ok(())
     }
 
     pub async fn get_subaccount(&mut self) -> Result<SubaccountInfo> {
@@ -330,6 +549,36 @@ impl DydxClient {
 
         Ok(())
     }
+
+    pub async fn set_subaccount_usdc_balance(&mut self, target_balance: Decimal) -> Result<()> {
+        let current_balance = self.get_dydx_subaccount_usdc_balance().await?;
+        if target_balance > current_balance {
+            let deposit_amount = target_balance - current_balance;
+            info!(
+                current_balance = ?current_balance,
+                target_balance = ?target_balance,
+                deposit_amount = ?deposit_amount,
+                "Increasing dYdX subaccount USDC balance via deposit"
+            );
+            self.deposit_to_subaccount(deposit_amount).await?;
+        } else if target_balance < current_balance {
+            let withdrawal_amount = current_balance - target_balance;
+            info!(
+                current_balance = ?current_balance,
+                target_balance = ?target_balance,
+                withdrawal_amount = ?withdrawal_amount,
+                "Decreasing dYdX subaccount USDC balance via withdrawal"
+            );
+            self.withdraw_from_subaccount(withdrawal_amount).await?;
+        } else {
+            info!(
+                current_balance = ?current_balance,
+                target_balance = ?target_balance,
+                "dYdX subaccount USDC balance already at target, no action taken"
+            );
+        }
+        Ok(())
+    }
         
 
     #[instrument(skip(self))]
@@ -350,7 +599,7 @@ impl DydxClient {
             initial_arbitrum_usdc_balance,
             amount_in,
             amount_out,
-        ).await?;
+        )?;
 
         info!(
             initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
@@ -445,7 +694,7 @@ impl DydxClient {
             initial_dydx_usdc_balance,
             amount_in,
             amount_out,
-        ).await?;
+        )?;
 
         info!(
             initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
@@ -547,7 +796,29 @@ impl DydxClient {
         Ok(Decimal::ZERO)
     }
 
-    async fn get_deposit_log_string(
+    async fn get_dydx_subaccount_perp_positions(&self) -> Result<HashMap<String, Decimal>> {
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+
+        let mut perp_positions_map = HashMap::new();
+        let perp_positions = self.indexer_client.accounts()
+            .get_subaccount_perpetual_positions(&subaccount, None).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount perpetual positions: {}", e))?;
+        for position in perp_positions {
+            let ticker = position.market.0.clone();
+            let size = Decimal::from_str(&position.size.to_plain_string())?;
+            if size == Decimal::ZERO || position.status == dydx::indexer::types::PerpetualPositionStatus::Closed || position.status == dydx::indexer::types::PerpetualPositionStatus::Liquidated {
+                continue;
+            }
+            perp_positions_map.insert(ticker, size);
+        }
+        Ok(perp_positions_map)
+    }
+
+    fn get_deposit_log_string(
         &self,
         arbitrum_usdc_balance: Decimal,
         amount_in: Option<Decimal>, 
@@ -573,7 +844,7 @@ impl DydxClient {
         }
     }
 
-    async fn get_withdrawal_log_string(
+    fn get_withdrawal_log_string(
         &self,
         dydx_usdc_balance: Decimal,
         amount_in: Option<Decimal>, 
@@ -708,7 +979,7 @@ impl DydxClient {
                     );
 
                     // Spawn status polling
-                    self.spawn_status_polling(
+                    self.spawn_status_polling_skipgo(
                         tx_hash,
                         DYDX_CHAIN_ID.to_string(), 
                         expected_time_to_complete_secs,
@@ -742,7 +1013,7 @@ impl DydxClient {
                     );
 
                     // Spawn status polling
-                    self.spawn_status_polling(
+                    self.spawn_status_polling_skipgo(
                         format!("{:#x}", tx_hash),
                         ARBITRUM_CHAIN_ID.to_string(), 
                         expected_time_to_complete_secs,
@@ -988,7 +1259,7 @@ impl DydxClient {
         Ok(tx_hash)
     }
 
-    async fn spawn_status_polling(
+    async fn spawn_status_polling_skipgo(
         &self, 
         tx_hash: String,
         chain_id: String, 

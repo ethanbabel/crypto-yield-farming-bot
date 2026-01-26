@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     }
 
     // Keep the application running until all active transfers are complete
-    dydx_client.wait_for_active_transfers().await;
+    dydx_client.wait_for_active_tasks().await;
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

@@ -36,6 +36,10 @@ path = "src/bin/transact_gm_tokens.rs"
 name = "dydx_transfer"
 path = "src/bin/dydx_transfer.rs"
 
+[[bin]]        # Utility for trading dYdX perpetuals
+name = "dydx_trade_perps"
+path = "src/bin/dydx_trade_perps.rs"
+
 [dependencies]
 dotenvy = "0.15"    # Load environment variables from .env file
 ethers = { version = "2", features = ["ws", "rustls"] } # Ethereum with WebSocket support

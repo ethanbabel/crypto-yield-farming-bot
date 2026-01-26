@@ -291,14 +291,8 @@ impl DydxClient {
         let tx_hash = self.node_client.place_order(&mut account, order).await
             .map_err(|e| eyre::eyre!("Failed to place dYdX order: {}", e))?;
 
-        let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
-        let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
-        let dydx_subaccount_perp_positions_final = self.get_dydx_subaccount_perp_positions().await?;
         info!(
             tx_hash = ?tx_hash,
-            dydx_usdc_balance_final = ?dydx_usdc_balance_final,
-            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
-            dydx_subaccount_perp_positions_final = ?dydx_subaccount_perp_positions_final,
             "{} | Order Submitted Successfully", log_string
         );
 
@@ -345,6 +339,7 @@ impl DydxClient {
         let mut node_client_clone = NodeClient::connect(config.node).await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let indexer_client_clone = IndexerClient::new(config.indexer);
+        let dydx_address_clone = self.dydx_address.clone();
         let subaccount = Subaccount::new(
             self.dydx_address.clone().into(),
             SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
@@ -370,8 +365,58 @@ impl DydxClient {
                     Ok(order) => {
                         match order.status {
                             dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Filled) => {
+                                sleep(Duration::from_secs(2)).await; // Small delay to ensure balances are updated
+                                let dydx_usdc_balance_final = match node_client_clone.get_account_balance(
+                                    &dydx_address_clone.clone().into(),
+                                    &Denom::Usdc,
+                                ).await {
+                                    Ok(balance) => Decimal::from_str(&balance.amount.to_string()).unwrap_or(Decimal::ZERO) * Decimal::from_str("0.000001").unwrap(),
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} | Failed to fetch dYdX USDC balance: {}", log_string, e
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+                                let dydx_subaccount_usdc_balance_final = match indexer_client_clone.accounts().get_subaccount_asset_positions(&subaccount).await {
+                                    Ok(positions) => {
+                                        positions.iter().find(|pos| pos.symbol.0 == "USDC")
+                                        .map(|pos| Decimal::from_str(&pos.size.to_plain_string()).unwrap_or(Decimal::ZERO))
+                                        .unwrap_or(Decimal::ZERO)
+                                    },
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} | Failed to fetch dYdX subaccount USDC balance: {}", log_string, e
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+                                let dydx_subaccount_perp_positions_final = match indexer_client_clone.accounts().get_subaccount_perpetual_positions(&subaccount, None).await {
+                                    Ok(positions) => {
+                                        positions.iter()
+                                        .filter_map(|pos| {
+                                            let ticker = pos.market.0.clone();
+                                            let size_decimal = Decimal::from_str(&pos.size.to_plain_string()).ok()?;
+                                            if size_decimal.is_zero() { return None; }
+                                            Some((ticker, size_decimal))
+                                        })
+                                        .collect::<HashMap<String, Decimal>>()
+                                    },
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} | Failed to fetch dYdX subaccount perpetual positions: {}", log_string, e
+                                        );
+                                        HashMap::new()
+                                    }
+                                };
                                 info!(
                                     order_id_indexer = ?order_id_indexer,
+                                    dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+                                    dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+                                    dydx_subaccount_perp_positions_final = ?dydx_subaccount_perp_positions_final,
                                     "{} | {}", log_string, complete_msg
                                 );
                                 break;

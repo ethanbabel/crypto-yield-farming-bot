@@ -1,6 +1,6 @@
 use dotenvy::dotenv;
 use eyre::Result;
-use tracing::{info};
+use tracing::{info, error};
 use std::sync::Arc;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
         "Placing dYdX market order to short ETH-USD perp"
     );
     if let Err(e) = dydx_client.submit_perp_order(&token, size, side_is_buy).await {
-        info!(error = %e, "Failed to submit dYdX market order");
+        error!(error = %e, "Failed to submit dYdX market order");
     } else {
         info!("dYdX market order submitted successfully");
     }
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     // Close the position
     info!(token = %token, "Closing dYdX perp position");
     if let Err(e) = dydx_client.reduce_perp_position(&token, None).await {
-        info!(error = %e, "Failed to close dYdX perp position");
+        error!(error = %e, "Failed to close dYdX perp position");
     } else {
         info!("dYdX perp position closed successfully");
     }

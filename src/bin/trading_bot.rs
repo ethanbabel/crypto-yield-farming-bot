@@ -1,5 +1,6 @@
 use dotenvy::dotenv;
 use futures::StreamExt;
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 use tracing::{instrument, info};
 
@@ -65,6 +66,14 @@ async fn main() -> eyre::Result<()> {
     while let Some(msg) = messages.next().await {
         let payload: String = msg.get_payload().unwrap_or_default();
         info!(payload = %payload, "Received data collection completion signal");
+
+        if let Some(last_run) = db.get_latest_strategy_run().await? {
+            let elapsed = Utc::now() - last_run.timestamp;
+            if elapsed < Duration::minutes(30) {
+                info!(elapsed_minutes = %elapsed.num_minutes(), "Skipping rebalance due to cadence");
+                continue;
+            }
+        }
 
         let portfolio_data = engine::run_strategy_engine(db.clone(), dydx_client.clone()).await?;
         info!(

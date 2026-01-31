@@ -825,7 +825,7 @@ impl DydxClient {
         Ok(Decimal::ZERO)
     }
 
-    async fn get_dydx_subaccount_perp_positions(&self) -> Result<HashMap<String, Decimal>> {
+    pub async fn get_dydx_subaccount_perp_positions(&self) -> Result<HashMap<String, Decimal>> {
         let subaccount = Subaccount::new(
             self.dydx_address.clone().into(),
             SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)

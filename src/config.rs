@@ -15,6 +15,7 @@ pub struct Config {
     pub wallet_private_key: String,
     pub wallet_mnemonic: String,
     pub network_mode: String,
+    pub execution_mode: String,
     pub chain_id: u64,
     pub gmx_datastore: Address,
     pub gmx_reader: Address,
@@ -38,6 +39,12 @@ impl Config {
             panic!("NETWORK_MODE must be either 'test' or 'prod'");
         }
         
+        // Load execution mode (paper or live)
+        let execution_mode = env::var("EXECUTION_MODE").unwrap_or_else(|_| "paper".to_string());
+        if execution_mode != "paper" && execution_mode != "live" {
+            panic!("EXECUTION_MODE must be either 'paper' or 'live'");
+        }
+
         // Load alchemy RPC HTTP URL based on network mode, create ethers provider
         let alchemy_rpc_url = match network_mode.as_str() {
             "test" => env::var("ALCHEMY_RPC_URL_TEST").expect("Missing ALCHEMY_RPC_URL_TEST"),
@@ -125,6 +132,7 @@ impl Config {
             wallet_private_key,
             wallet_mnemonic,
             network_mode,
+            execution_mode,
             chain_id,
             gmx_datastore: gmx_datastore.parse().expect("Invalid GMX DataStore address"),
             gmx_reader: gmx_reader.parse().expect("Invalid GMX Reader address"),

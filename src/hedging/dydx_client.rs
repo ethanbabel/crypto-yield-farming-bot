@@ -792,7 +792,7 @@ impl DydxClient {
         Ok(balance)
     }
 
-    async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
+    pub async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
         let balance = self.node_client.get_account_balance(
             &self.dydx_address.clone().into(),
             &Denom::Usdc

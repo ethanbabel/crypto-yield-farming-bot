@@ -120,7 +120,7 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>, dydx_client: Arc<Dy
             let funding_cost = exposed_capital_frac * (- funding_rate); // funding rate > 0 ==> longs pay shorts ==> income for our short position
             let opportunity_cost = (exposed_capital_frac / leverage) * fee_return;
             let total_return = fee_return - funding_cost - opportunity_cost;
-            info!(
+            debug!(
                 market = %slice.display_name,
                 fee_return = %fee_return,
                 fee_return_annualized = %((fee_return * Decimal::from_f64(24.0 * 365.0).unwrap())),

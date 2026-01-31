@@ -1,13 +1,17 @@
 use dotenvy::dotenv;
-use tracing::{instrument, info};
+use futures::StreamExt;
 use std::sync::Arc;
+use tracing::{instrument, info};
 
-use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::wallet::WalletManager;
 use crypto_yield_farming_bot::db::db_manager::DbManager;
+use crypto_yield_farming_bot::execution::engine::ExecutionEngine;
+use crypto_yield_farming_bot::execution::types::ExecutionMode;
 use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
+use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::strategy::engine;
+use crypto_yield_farming_bot::wallet::WalletManager;
+
 
 #[instrument(name = "trading_bot_main")]
 #[tokio::main]
@@ -38,17 +42,41 @@ async fn main() -> eyre::Result<()> {
 
     // Initialize dydx client
     let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
-    let dydx_client = Arc::new(dydx_client);
+    let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
     info!("dYdX client initialized");
 
-    // Run strategy engine
-    let portfolio_data = engine::run_strategy_engine(db.clone(), dydx_client.clone()).await?;
-    
-    // Log basic diagnostics
-    info!("Strategy engine completed with {} markets", portfolio_data.market_addresses.len());
-    portfolio_data.log_portfolio_data();
-    
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
+    let execution_mode = ExecutionMode::from_str(&cfg.execution_mode).unwrap_or(ExecutionMode::Paper);
+    let execution_engine = ExecutionEngine::new(
+        cfg.clone(),
+        db.clone(),
+        wallet_manager.clone(),
+        dydx_client.clone(),
+        execution_mode,
+    );
+    info!(mode = %execution_mode.as_str(), "Execution engine initialized");
+
+    // Subscribe to data collection completion signal
+    let redis_client = redis::Client::open("redis://redis:6379")?;
+    let mut pubsub = redis_client.get_async_pubsub().await?;
+    pubsub.subscribe("data_collection_completed").await?;
+    let mut messages = pubsub.on_message();
+
+    info!("Waiting for data_collection_completed signals");
+    while let Some(msg) = messages.next().await {
+        let payload: String = msg.get_payload().unwrap_or_default();
+        info!(payload = %payload, "Received data collection completion signal");
+
+        let portfolio_data = engine::run_strategy_engine(db.clone(), dydx_client.clone()).await?;
+        info!(
+            "Strategy engine completed with {} markets",
+            portfolio_data.market_addresses.len()
+        );
+        portfolio_data.log_portfolio_data();
+
+        if let Err(e) = execution_engine.run_once(&portfolio_data).await {
+            eprintln!("Execution engine failed: {}", e);
+        }
+    }
 
     Ok(())
 }

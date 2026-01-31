@@ -15,12 +15,20 @@ use super::queries::{
     markets as markets_queries,
     token_prices as token_prices_queries,
     market_states as market_states_queries,
+    strategy_runs as strategy_runs_queries,
+    strategy_targets as strategy_targets_queries,
+    trades as trades_queries,
+    portfolio_snapshots as portfolio_snapshots_queries,
 };
 use super::models::{
     tokens::{TokenModel, NewTokenModel, RawTokenModel},
     markets::{MarketModel, NewMarketModel, RawMarketModel},
     token_prices::{TokenPriceModel, NewTokenPriceModel, RawTokenPriceModel},
     market_states::{MarketStateModel, NewMarketStateModel, RawMarketStateModel},
+    strategy_runs::{NewStrategyRunModel, StrategyRunModel},
+    strategy_targets::NewStrategyTargetModel,
+    trades::NewTradeModel,
+    portfolio_snapshots::{NewPortfolioSnapshotModel, PortfolioSnapshotModel},
 };
 use crate::config::Config;
 use crate::data_ingestion::token::token::AssetToken;
@@ -684,5 +692,41 @@ impl DbManager {
             );
             Ok(None)
         }
+    }
+
+    /// Insert a strategy run and return its ID
+    #[instrument(skip(self, run))]
+    pub async fn insert_strategy_run(&self, run: &NewStrategyRunModel) -> Result<i32, sqlx::Error> {
+        strategy_runs_queries::insert_strategy_run(&self.pool, run).await
+    }
+
+    /// Insert a strategy target and return its ID
+    #[instrument(skip(self, target))]
+    pub async fn insert_strategy_target(&self, target: &NewStrategyTargetModel) -> Result<i32, sqlx::Error> {
+        strategy_targets_queries::insert_strategy_target(&self.pool, target).await
+    }
+
+    /// Insert a trade record and return its ID
+    #[instrument(skip(self, trade))]
+    pub async fn insert_trade(&self, trade: &NewTradeModel) -> Result<i32, sqlx::Error> {
+        trades_queries::insert_trade(&self.pool, trade).await
+    }
+
+    /// Insert a portfolio snapshot and return its ID
+    #[instrument(skip(self, snapshot))]
+    pub async fn insert_portfolio_snapshot(&self, snapshot: &NewPortfolioSnapshotModel) -> Result<i32, sqlx::Error> {
+        portfolio_snapshots_queries::insert_portfolio_snapshot(&self.pool, snapshot).await
+    }
+
+    /// Fetch latest portfolio snapshot for a given mode
+    #[instrument(skip(self))]
+    pub async fn get_latest_portfolio_snapshot(&self, mode: &str) -> Result<Option<PortfolioSnapshotModel>, sqlx::Error> {
+        portfolio_snapshots_queries::get_latest_portfolio_snapshot_by_mode(&self.pool, mode).await
+    }
+
+    /// Fetch latest strategy run
+    #[instrument(skip(self))]
+    pub async fn get_latest_strategy_run(&self) -> Result<Option<StrategyRunModel>, sqlx::Error> {
+        strategy_runs_queries::get_latest_strategy_run(&self.pool).await
     }
 }

@@ -39,3 +39,6 @@ CREATE TABLE IF NOT EXISTS market_states (
     fees_borrowing NUMERIC,
     fees_total NUMERIC
 );
+
+CREATE INDEX IF NOT EXISTS idx_market_states_market_timestamp 
+    ON market_states(market_id, timestamp);

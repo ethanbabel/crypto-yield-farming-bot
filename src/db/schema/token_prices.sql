@@ -6,3 +6,7 @@ CREATE TABLE IF NOT EXISTS token_prices (
     max_price NUMERIC NOT NULL,
     mid_price NUMERIC NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_token_prices_token_timestamp
+    ON token_prices(token_id, timestamp);
+    

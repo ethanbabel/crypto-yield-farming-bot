@@ -6,3 +6,6 @@ pub mod strategy_runs;
 pub mod strategy_targets;
 pub mod trades;
 pub mod portfolio_snapshots;
+pub mod position_snapshots;
+pub mod dydx_perps;
+pub mod dydx_perp_states;

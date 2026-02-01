@@ -9,13 +9,12 @@ pub async fn insert_portfolio_snapshot(
     let row = sqlx::query!(
         r#"
         INSERT INTO portfolio_snapshots (
-            timestamp, mode, total_value_usd, market_value_usd, asset_value_usd, hedge_value_usd, pnl_usd
+            timestamp, total_value_usd, market_value_usd, asset_value_usd, hedge_value_usd, pnl_usd
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        VALUES ($1,$2,$3,$4,$5,$6)
         RETURNING id
         "#,
         snapshot.timestamp,
-        snapshot.mode,
         snapshot.total_value_usd,
         snapshot.market_value_usd,
         snapshot.asset_value_usd,
@@ -28,20 +27,17 @@ pub async fn insert_portfolio_snapshot(
     Ok(row.id)
 }
 
-pub async fn get_latest_portfolio_snapshot_by_mode(
+pub async fn get_latest_portfolio_snapshot(
     pool: &PgPool,
-    mode: &str,
 ) -> Result<Option<PortfolioSnapshotModel>, sqlx::Error> {
     sqlx::query_as!(
         PortfolioSnapshotModel,
         r#"
-        SELECT id, timestamp, mode, total_value_usd, market_value_usd, asset_value_usd, hedge_value_usd, pnl_usd
+        SELECT id, timestamp, total_value_usd, market_value_usd, asset_value_usd, hedge_value_usd, pnl_usd
         FROM portfolio_snapshots
-        WHERE mode = $1
         ORDER BY timestamp DESC
         LIMIT 1
-        "#,
-        mode
+        "#
     )
     .fetch_optional(pool)
     .await

@@ -6,14 +6,13 @@ pub async fn insert_trade(pool: &PgPool, trade: &NewTradeModel) -> Result<i32, s
     let row = sqlx::query!(
         r#"
         INSERT INTO trades (
-            timestamp, mode, action_type, strategy_run_id, market_id, from_token_id, to_token_id,
+            timestamp, action_type, strategy_run_id, market_id, from_token_id, to_token_id,
             amount_in, amount_out, usd_value, fee_usd, tx_hash, status, details
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         RETURNING id
         "#,
         trade.timestamp,
-        trade.mode,
         trade.action_type,
         trade.strategy_run_id,
         trade.market_id,
@@ -37,7 +36,7 @@ pub async fn get_recent_trades(pool: &PgPool, limit: i64) -> Result<Vec<TradeMod
     sqlx::query_as!(
         TradeModel,
         r#"
-        SELECT id, timestamp, mode, action_type, strategy_run_id, market_id, from_token_id, to_token_id,
+        SELECT id, timestamp, action_type, strategy_run_id, market_id, from_token_id, to_token_id,
                amount_in, amount_out, usd_value, fee_usd, tx_hash, status, details
         FROM trades
         ORDER BY timestamp DESC

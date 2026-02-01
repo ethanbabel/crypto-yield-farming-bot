@@ -81,6 +81,25 @@ pub struct DydxClient {
     dydx_wallet: Wallet,
     dydx_address: String,
     active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    active_perp_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<Result<PerpOrderTaskResult>>>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerpOrderOutcome {
+    Filled,
+    Canceled,
+    TimedOut,
+}
+
+#[derive(Debug)]
+struct PerpOrderTaskResult {
+    token: String,
+    size: Decimal,
+    side_is_buy: bool,
+    is_position_reduction: bool,
+    log_string: String,
+    outcome: PerpOrderOutcome,
+    retry_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -115,11 +134,12 @@ impl DydxClient {
             dydx_wallet,
             dydx_address,
             active_transfer_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            active_perp_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
     }
 
     #[instrument(skip(self))]
-    pub async fn wait_for_active_tasks(&self) {
+    pub async fn wait_for_active_transfer_tasks(&self) {
         let mut tasks = self.active_transfer_polling_tasks.lock().await;
         info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());
         while let Some(handle) = tasks.pop() {
@@ -128,6 +148,57 @@ impl DydxClient {
             }
         }
         info!("All active transfer polling tasks completed.");
+    }
+
+    #[instrument(skip(self))]
+    pub async fn wait_for_active_perp_tasks(&mut self) {
+        let max_retries = 5u32;
+        loop {
+            let perp_handles = {
+                let mut tasks = self.active_perp_polling_tasks.lock().await;
+                std::mem::take(&mut *tasks)
+            };
+            if perp_handles.is_empty() {
+                break;
+            }
+
+            info!("Waiting for {} active perp polling tasks to complete...", perp_handles.len());
+            for handle in perp_handles {
+                match handle.await {
+                    Ok(Ok(result)) => {
+                        if result.outcome == PerpOrderOutcome::TimedOut && result.retry_count < max_retries {
+                            warn!(
+                                token = %result.token,
+                                size = %result.size,
+                                side_is_buy = result.side_is_buy,
+                                retry_count = result.retry_count + 1,
+                                "Perp order timed out; retrying"
+                            );
+                            let retry_log = format!("{} | Retry {}/{}", result.log_string, result.retry_count + 1, max_retries);
+                            if let Err(e) = self
+                                .execute_perp_order(
+                                    &result.token,
+                                    result.size,
+                                    result.side_is_buy,
+                                    retry_log,
+                                    result.is_position_reduction,
+                                    result.retry_count + 1,
+                                )
+                                .await
+                            {
+                                error!(error = ?e, token = %result.token, "Failed to retry perp order");
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("Error in perp polling task: {}", e);
+                    }
+                    Err(e) => {
+                        error!("Join error in perp polling task: {}", e);
+                    }
+                }
+            }
+        }
     }
 
     #[instrument(skip(self))]
@@ -227,7 +298,7 @@ impl DydxClient {
     pub async fn submit_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool) -> Result<()> {
         let log_string = self.get_perp_order_log_string(&token, size, side_is_buy, false)?;
 
-        self.execute_perp_order(&token, size, side_is_buy, log_string).await
+        self.execute_perp_order(&token, size, side_is_buy, log_string, false, 0).await
     }
 
     pub async fn reduce_perp_position(&mut self, token: &str, reduce_by: Option<Decimal>) -> Result<()> {
@@ -242,10 +313,18 @@ impl DydxClient {
         };
         let log_string = self.get_perp_order_log_string(&token, reduce_by, side_is_buy, true)?;
 
-        self.execute_perp_order(token, reduce_by, side_is_buy, log_string).await
+        self.execute_perp_order(token, reduce_by, side_is_buy, log_string, true, 0).await
     }
 
-    async fn execute_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool, log_string: String) -> Result<()> {
+    async fn execute_perp_order(
+        &mut self,
+        token: &str,
+        size: Decimal,
+        side_is_buy: bool,
+        log_string: String,
+        is_position_reduction: bool,
+        retry_count: u32,
+    ) -> Result<()> {
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
         let dydx_subaccount_perp_positions_initial = self.get_dydx_subaccount_perp_positions().await?;
@@ -306,7 +385,17 @@ impl DydxClient {
         );
 
         // Spawn status polling
-        self.spawn_status_polling_perp_order(log_string, false, order_id, current_block_height.ahead(40)).await?;
+        self.spawn_status_polling_perp_order(
+            token.to_string(),
+            size,
+            side_is_buy,
+            log_string,
+            is_position_reduction,
+            retry_count,
+            order_id,
+            current_block_height.ahead(42), // Wait until 2 blocks after order expiry
+        )
+        .await?;
 
         Ok(())
     }
@@ -338,11 +427,17 @@ impl DydxClient {
 
     async fn spawn_status_polling_perp_order(
         &self, 
+        token: String,
+        size: Decimal,
+        side_is_buy: bool,
         log_string: String, 
         is_position_reduction: bool,
+        retry_count: u32,
         order_id_node: OrderId,
         block_to_wait_until: Height,
     ) -> Result<()> {
+        sleep(Duration::from_millis(500)).await; // Small delay to ensure order is indexed
+
         let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let mut node_client_clone = NodeClient::connect(config.node).await
@@ -471,7 +566,15 @@ impl DydxClient {
                                     dydx_subaccount_free_collateral_final = ?dydx_subaccount_free_collateral_final,
                                     "{} | {}", log_string, complete_msg
                                 );
-                                break;
+                                return Ok(PerpOrderTaskResult {
+                                    token,
+                                    size,
+                                    side_is_buy,
+                                    is_position_reduction,
+                                    log_string,
+                                    outcome: PerpOrderOutcome::Filled,
+                                    retry_count,
+                                });
                             },
                             dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Open) |
                             dydx::indexer::ApiOrderStatus::BestEffort(dydx::indexer::types::BestEffortOpenedStatus::BestEffortOpened) => {
@@ -486,7 +589,15 @@ impl DydxClient {
                                     order_id_indexer = ?order_id_indexer,
                                     "{} | Order Cancelled", log_string
                                 );
-                                break;
+                                return Ok(PerpOrderTaskResult {
+                                    token,
+                                    size,
+                                    side_is_buy,
+                                    is_position_reduction,
+                                    log_string,
+                                    outcome: PerpOrderOutcome::Canceled,
+                                    retry_count,
+                                });
                             }
                             _ => {
                                 warn!(
@@ -518,14 +629,22 @@ impl DydxClient {
                 };
                 if current_block_height > block_to_wait_until {
                     warn!("{} | Order Timed Out After Reaching Target Block Height", log_string);
-                    break;
+                    return Ok(PerpOrderTaskResult {
+                        token,
+                        size,
+                        side_is_buy,
+                        is_position_reduction,
+                        log_string,
+                        outcome: PerpOrderOutcome::TimedOut,
+                        retry_count,
+                    });
                 }
                 sleep(Duration::from_secs(5)).await;
             }
         });
 
         // Store the handle
-        self.active_transfer_polling_tasks.lock().await.push(handle);
+        self.active_perp_polling_tasks.lock().await.push(handle);
         Ok(())
     }
 
@@ -945,9 +1064,8 @@ impl DydxClient {
                 continue;
             }
 
-            let realized = Decimal::from_str(&position.realized_pnl.to_plain_string())?;
             let unrealized = Decimal::from_str(&position.unrealized_pnl.to_plain_string())?;
-            equity += realized + unrealized;
+            equity += unrealized;
 
             let entry_price = Decimal::from_str(&position.entry_price.to_plain_string())?;
             let notional = size.abs() * entry_price;

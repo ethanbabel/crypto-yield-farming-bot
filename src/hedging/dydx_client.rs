@@ -499,12 +499,20 @@ impl DydxClient {
                                         Decimal::ZERO
                                     }
                                 };
-                                let (dydx_subaccount_perp_positions_final, dydx_subaccount_free_collateral_final) = match indexer_client_clone.accounts().get_subaccount_perpetual_positions(&subaccount, None).await {
+                                let dydx_subaccount_free_collateral_final = match indexer_client_clone.accounts().get_subaccount(&subaccount).await {
+                                    Ok(summary) => Decimal::from_str(&summary.free_collateral.to_string()).unwrap_or(Decimal::ZERO),
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} | Failed to fetch dYdX subaccount summary for free collateral", log_string
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+
+                                let dydx_subaccount_perp_positions_final = match indexer_client_clone.accounts().get_subaccount_perpetual_positions(&subaccount, None).await {
                                     Ok(positions) => {
                                         let mut perp_map = HashMap::new();
-                                        let mut equity = dydx_subaccount_usdc_balance_final;
-                                        let mut required_margin = Decimal::ZERO;
-                                        let mut margin_cache: HashMap<String, Decimal> = HashMap::new();
 
                                         for pos in positions.iter() {
                                             let ticker = pos.market.0.clone();
@@ -516,48 +524,15 @@ impl DydxClient {
                                                 continue;
                                             }
                                             perp_map.insert(ticker.clone(), size_decimal);
-
-                                            let realized = Decimal::from_str(&pos.realized_pnl.to_plain_string()).unwrap_or(Decimal::ZERO);
-                                            let unrealized = Decimal::from_str(&pos.unrealized_pnl.to_plain_string()).unwrap_or(Decimal::ZERO);
-                                            equity += realized + unrealized;
-
-                                            let entry_price = Decimal::from_str(&pos.entry_price.to_plain_string()).unwrap_or(Decimal::ZERO);
-                                            let notional = size_decimal.abs() * entry_price;
-                                            if notional <= Decimal::ZERO {
-                                                continue;
-                                            }
-
-                                            let margin_frac = if let Some(value) = margin_cache.get(&ticker) {
-                                                *value
-                                            } else {
-                                                match indexer_client_clone.markets().get_perpetual_market(&pos.market).await {
-                                                    Ok(market) => {
-                                                        let initial = Decimal::from_str(&market.initial_margin_fraction.to_plain_string()).unwrap_or(Decimal::ZERO);
-                                                        let maintenance = Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string()).unwrap_or(Decimal::ZERO);
-                                                        let frac = initial.max(maintenance);
-                                                        margin_cache.insert(ticker.clone(), frac);
-                                                        frac
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                            error = %e,
-                                                            "{} | Failed to fetch dYdX market {} for margin", log_string, ticker
-                                                        );
-                                                        Decimal::ZERO
-                                                    }
-                                                }
-                                            };
-                                            required_margin += notional * margin_frac;
                                         }
-                                        let free_collateral = equity - required_margin;
-                                        (perp_map, free_collateral)
+                                        perp_map
                                     },
                                     Err(e) => {
                                         error!(
                                             error = %e,
                                             "{} | Failed to fetch dYdX subaccount perpetual positions: {}", log_string, e
                                         );
-                                        (HashMap::new(), Decimal::ZERO)
+                                        HashMap::new()
                                     }
                                 };
                                 info!(
@@ -1026,76 +1001,18 @@ impl DydxClient {
             SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
                 .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
         );
-        let asset_positions = self
-            .indexer_client
-            .accounts()
-            .get_subaccount_asset_positions(&subaccount)
-            .await
-            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount asset positions: {}", e))?;
 
-        let mut usdc_balance = Decimal::ZERO;
-        for position in asset_positions {
-            if position.symbol.0 == "USDC" {
-                let balance = Decimal::from_str(&position.size.to_plain_string())?;
-                if position.side == dydx::indexer::types::PositionSide::Short {
-                    usdc_balance = -balance;
-                } else {
-                    usdc_balance = balance;
-                }
-                break;
-            }
-        }
+        let subaccount_info = self.indexer_client.accounts()
+            .get_subaccount(&subaccount).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount info: {}", e))?;
 
-        let perp_positions = self
-            .indexer_client
-            .accounts()
-            .get_subaccount_perpetual_positions(&subaccount, None)
-            .await
-            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount perp positions: {}", e))?;
-
-        let mut equity = usdc_balance;
-        let mut required_margin = Decimal::ZERO;
-        let mut margin_cache: HashMap<String, Decimal> = HashMap::new();
-
-        for position in perp_positions {
-            let size = Decimal::from_str(&position.size.to_plain_string())?;
-            if size == Decimal::ZERO
-                || position.status == dydx::indexer::types::PerpetualPositionStatus::Closed
-                || position.status == dydx::indexer::types::PerpetualPositionStatus::Liquidated
-            {
-                continue;
-            }
-
-            let unrealized = Decimal::from_str(&position.unrealized_pnl.to_plain_string())?;
-            equity += unrealized;
-
-            let entry_price = Decimal::from_str(&position.entry_price.to_plain_string())?;
-            let notional = size.abs() * entry_price;
-            if notional <= Decimal::ZERO {
-                continue;
-            }
-
-            let ticker = position.market.0.clone();
-            let margin_frac = if let Some(value) = margin_cache.get(&ticker) {
-                *value
-            } else {
-                let market = self
-                    .indexer_client
-                    .markets()
-                    .get_perpetual_market(&position.market)
-                    .await
-                    .map_err(|e| eyre::eyre!("Failed to fetch dYdX market {}: {}", ticker, e))?;
-                let initial = Decimal::from_str(&market.initial_margin_fraction.to_plain_string())?;
-                let maintenance = Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string())?;
-                let frac = initial.max(maintenance);
-                margin_cache.insert(ticker.clone(), frac);
-                frac
-            };
-
-            required_margin += notional * margin_frac;
-        }
-
-        let free_collateral = equity - required_margin;
+        let equity = Decimal::from_str(&subaccount_info.equity.to_plain_string())?;
+        let free_collateral = Decimal::from_str(&subaccount_info.free_collateral.to_plain_string())?;
+        let usdc_balance = Decimal::from_str(
+            &subaccount_info.asset_positions.get(&Ticker("USDC".to_string()))
+            .map(|pos| pos.size.to_plain_string())
+            .unwrap_or("0".to_string())
+        )?;
 
         Ok(DydxSubaccountSummary {
             equity,

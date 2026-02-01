@@ -19,6 +19,9 @@ use super::queries::{
     strategy_targets as strategy_targets_queries,
     trades as trades_queries,
     portfolio_snapshots as portfolio_snapshots_queries,
+    dydx_perps as dydx_perps_queries,
+    dydx_perp_states as dydx_perp_states_queries,
+    position_snapshots as position_snapshots_queries,
 };
 use super::models::{
     tokens::{TokenModel, NewTokenModel, RawTokenModel},
@@ -29,6 +32,9 @@ use super::models::{
     strategy_targets::NewStrategyTargetModel,
     trades::NewTradeModel,
     portfolio_snapshots::{NewPortfolioSnapshotModel, PortfolioSnapshotModel},
+    dydx_perps::{NewDydxPerpModel, RawDydxPerpModel},
+    dydx_perp_states::{NewDydxPerpStateModel, RawDydxPerpStateModel},
+    position_snapshots::NewPositionSnapshotModel,
 };
 use crate::config::Config;
 use crate::data_ingestion::token::token::AssetToken;
@@ -38,7 +44,9 @@ use crate::strategy::types::MarketStateSlice;
 pub struct DbManager {
     pub pool: PgPool,
     pub token_id_map: HashMap<Address, i32>,
+    pub token_symbol_map: HashMap<String, i32>,
     pub market_id_map: HashMap<Address, i32>,
+    pub dydx_perp_id_map: HashMap<String, i32>,
 }
 
 impl DbManager {
@@ -54,7 +62,9 @@ impl DbManager {
 
         // Load ID maps
         let token_id_map = tokens_queries::get_token_id_map(&pool).await?;
+        let token_symbol_map = tokens_queries::get_token_symbol_map(&pool).await?;
         let market_id_map = markets_queries::get_market_id_map(&pool).await?;
+        let dydx_perp_id_map = dydx_perps_queries::get_dydx_perp_id_map(&pool).await.unwrap_or_default();
 
         info!(
             token_count = token_id_map.len(),
@@ -65,7 +75,9 @@ impl DbManager {
         Ok(Self {
             pool,
             token_id_map,
+            token_symbol_map,
             market_id_map,
+            dydx_perp_id_map,
         })
     }
 
@@ -75,13 +87,17 @@ impl DbManager {
         debug!("Refreshing ID maps from database");
         
         let token_id_map = tokens_queries::get_token_id_map(&self.pool).await?;
+        let token_symbol_map = tokens_queries::get_token_symbol_map(&self.pool).await?;
         let market_id_map = markets_queries::get_market_id_map(&self.pool).await?;
+        let dydx_perp_id_map = dydx_perps_queries::get_dydx_perp_id_map(&self.pool).await.unwrap_or_default();
         
         let token_count_diff = token_id_map.len() as i32 - self.token_id_map.len() as i32;
         let market_count_diff = market_id_map.len() as i32 - self.market_id_map.len() as i32;
         
         self.token_id_map = token_id_map;
+        self.token_symbol_map = token_symbol_map;
         self.market_id_map = market_id_map;
+        self.dydx_perp_id_map = dydx_perp_id_map;
         
         debug!(
             token_count = self.token_id_map.len(),
@@ -694,6 +710,45 @@ impl DbManager {
         }
     }
 
+    /// Convert raw dYdX perp model to new model
+    #[instrument(skip(self, raw_perp))]
+    pub async fn convert_raw_dydx_perp_to_new_dydx_perp(
+        &mut self,
+        raw_perp: RawDydxPerpModel,
+    ) -> Result<Option<NewDydxPerpModel>, sqlx::Error> {
+        self.refresh_id_maps().await?;
+        if let Some(&token_id) = self.token_symbol_map.get(&raw_perp.token_symbol) {
+            Ok(Some(NewDydxPerpModel {
+                token_id,
+                ticker: raw_perp.ticker,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Convert raw dYdX perp state model to new model
+    #[instrument(skip(self, raw_state))]
+    pub async fn convert_raw_dydx_perp_state_to_new_dydx_perp_state(
+        &mut self,
+        raw_state: RawDydxPerpStateModel,
+    ) -> Result<Option<NewDydxPerpStateModel>, sqlx::Error> {
+        self.refresh_id_maps().await?;
+        if let Some(&perp_id) = self.dydx_perp_id_map.get(&raw_state.ticker) {
+            Ok(Some(NewDydxPerpStateModel {
+                dydx_perp_id: perp_id,
+                timestamp: raw_state.timestamp,
+                funding_rate: raw_state.funding_rate,
+                initial_margin_fraction: raw_state.initial_margin_fraction,
+                maintenance_margin_fraction: raw_state.maintenance_margin_fraction,
+                oracle_price: raw_state.oracle_price,
+                open_interest: raw_state.open_interest,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Insert a strategy run and return its ID
     #[instrument(skip(self, run))]
     pub async fn insert_strategy_run(&self, run: &NewStrategyRunModel) -> Result<i32, sqlx::Error> {
@@ -718,15 +773,55 @@ impl DbManager {
         portfolio_snapshots_queries::insert_portfolio_snapshot(&self.pool, snapshot).await
     }
 
-    /// Fetch latest portfolio snapshot for a given mode
+    /// Insert position snapshot rows
+    #[instrument(skip(self, positions))]
+    pub async fn insert_position_snapshots(
+        &self,
+        positions: Vec<NewPositionSnapshotModel>,
+    ) -> Result<(), sqlx::Error> {
+        for position in positions {
+            position_snapshots_queries::insert_position_snapshot(&self.pool, &position).await?;
+        }
+        Ok(())
+    }
+
+    /// Insert a dYdX perp and return its ID
+    #[instrument(skip(self, perp))]
+    pub async fn insert_dydx_perp(&self, perp: &NewDydxPerpModel) -> Result<i32, sqlx::Error> {
+        dydx_perps_queries::insert_dydx_perp(&self.pool, perp).await
+    }
+
+    /// Insert a batch of dYdX perp states
+    #[instrument(skip(self, states))]
+    pub async fn insert_dydx_perp_states(
+        &self,
+        states: Vec<NewDydxPerpStateModel>,
+    ) -> Result<(), sqlx::Error> {
+        for state in states {
+            dydx_perp_states_queries::insert_dydx_perp_state(&self.pool, &state).await?;
+        }
+        Ok(())
+    }
+
+    /// Fetch latest portfolio snapshot
     #[instrument(skip(self))]
-    pub async fn get_latest_portfolio_snapshot(&self, mode: &str) -> Result<Option<PortfolioSnapshotModel>, sqlx::Error> {
-        portfolio_snapshots_queries::get_latest_portfolio_snapshot_by_mode(&self.pool, mode).await
+    pub async fn get_latest_portfolio_snapshot(&self) -> Result<Option<PortfolioSnapshotModel>, sqlx::Error> {
+        portfolio_snapshots_queries::get_latest_portfolio_snapshot(&self.pool).await
     }
 
     /// Fetch latest strategy run
     #[instrument(skip(self))]
     pub async fn get_latest_strategy_run(&self) -> Result<Option<StrategyRunModel>, sqlx::Error> {
         strategy_runs_queries::get_latest_strategy_run(&self.pool).await
+    }
+
+    /// Fetch strategy runs in a time range
+    #[instrument(skip(self))]
+    pub async fn get_strategy_runs_in_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<StrategyRunModel>, sqlx::Error> {
+        strategy_runs_queries::get_strategy_runs_in_range(&self.pool, start, end).await
     }
 }

@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS dydx_perps (
+    id SERIAL PRIMARY KEY,
+    token_id INTEGER NOT NULL REFERENCES tokens(id),
+    ticker TEXT NOT NULL UNIQUE
+);

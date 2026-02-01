@@ -1,7 +1,6 @@
 CREATE TABLE IF NOT EXISTS trades (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ NOT NULL,
-    mode TEXT NOT NULL,
     action_type TEXT NOT NULL,
     strategy_run_id INTEGER REFERENCES strategy_runs(id) ON DELETE SET NULL,
     market_id INTEGER REFERENCES markets(id),

@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS strategy_runs (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ NOT NULL,
+    strategy_version TEXT NOT NULL,
     total_weight NUMERIC,
     expected_return_bps NUMERIC,
     volatility_bps NUMERIC,

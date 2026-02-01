@@ -1,7 +1,6 @@
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id SERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ NOT NULL,
-    mode TEXT NOT NULL,
     total_value_usd NUMERIC,
     market_value_usd NUMERIC,
     asset_value_usd NUMERIC,

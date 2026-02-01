@@ -62,6 +62,18 @@ pub async fn get_token_id_map(pool: &PgPool) -> Result<HashMap<Address, i32>, Er
     Ok(map)
 }
 
+/// Load a map from token symbol to token ID
+pub async fn get_token_symbol_map(pool: &PgPool) -> Result<HashMap<String, i32>, Error> {
+    let rows = sqlx::query!(
+        "SELECT id, symbol FROM tokens"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let map = rows.into_iter().map(|row| (row.symbol, row.id)).collect();
+    Ok(map)
+}
+
 /// Fetch all tokens from the database
 pub async fn get_all_tokens(pool: &PgPool) -> Result<Vec<TokenModel>, Error> {
     sqlx::query_as!(

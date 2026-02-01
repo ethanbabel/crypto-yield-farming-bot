@@ -6,7 +6,6 @@ use sqlx::FromRow;
 pub struct TradeModel {
     pub id: i32,
     pub timestamp: DateTime<Utc>,
-    pub mode: String,
     pub action_type: String,
     pub strategy_run_id: Option<i32>,
     pub market_id: Option<i32>,
@@ -24,7 +23,6 @@ pub struct TradeModel {
 #[derive(Debug, Clone)]
 pub struct NewTradeModel {
     pub timestamp: DateTime<Utc>,
-    pub mode: String,
     pub action_type: String,
     pub strategy_run_id: Option<i32>,
     pub market_id: Option<i32>,

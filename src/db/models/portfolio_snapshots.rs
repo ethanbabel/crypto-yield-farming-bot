@@ -6,7 +6,6 @@ use sqlx::FromRow;
 pub struct PortfolioSnapshotModel {
     pub id: i32,
     pub timestamp: DateTime<Utc>,
-    pub mode: String,
     pub total_value_usd: Option<Decimal>,
     pub market_value_usd: Option<Decimal>,
     pub asset_value_usd: Option<Decimal>,
@@ -17,7 +16,6 @@ pub struct PortfolioSnapshotModel {
 #[derive(Debug, Clone)]
 pub struct NewPortfolioSnapshotModel {
     pub timestamp: DateTime<Utc>,
-    pub mode: String,
     pub total_value_usd: Decimal,
     pub market_value_usd: Decimal,
     pub asset_value_usd: Decimal,

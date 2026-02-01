@@ -393,6 +393,7 @@ impl DydxClient {
             is_position_reduction,
             retry_count,
             order_id,
+            current_block_height.ahead(40),
             current_block_height.ahead(42), // Wait until 2 blocks after order expiry
         )
         .await?;
@@ -434,6 +435,7 @@ impl DydxClient {
         is_position_reduction: bool,
         retry_count: u32,
         order_id_node: OrderId,
+        good_til_block_height: Height,
         block_to_wait_until: Height,
     ) -> Result<()> {
         sleep(Duration::from_millis(500)).await; // Small delay to ensure order is indexed
@@ -453,7 +455,7 @@ impl DydxClient {
             .map_err(|e| eyre::eyre!("Failed to fetch subaccount orders for order ID string: {}", e))?;
         let order_id_indexer = subaccount_orders
             .iter()
-            .find(|order| order.client_id.0 == order_id_node.client_id && order.good_til_block == Some(block_to_wait_until.clone()))
+            .find(|order| order.client_id.0 == order_id_node.client_id && order.good_til_block == Some(good_til_block_height.clone()))
             .ok_or_else(|| eyre::eyre!("Order not found in subaccount orders"))?
             .id
             .clone();

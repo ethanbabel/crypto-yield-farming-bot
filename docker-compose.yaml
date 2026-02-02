@@ -72,3 +72,24 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped     # Comment out during testing
+
+  strategy_runner:
+    container_name: strategy_runner
+    build:
+      context: .
+      dockerfile: Dockerfile.strategy_runner
+    env_file:
+      - .env
+    environment:
+      - STAGE=prod  # 'test' for testing, 'prod' for production deployment
+      - DEPLOYMENT=docker  # Explicit deployment type
+      - CONTAINER_NAME=strategy_runner  # Pass the container name for logging
+      - DYDX_CONFIG_PATH=./dydx_mainnet.toml  # Path to dYdX config inside container
+    depends_on:
+      redis:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+      data_recorder:
+        condition: service_started
+    restart: unless-stopped   # Comment out during testing

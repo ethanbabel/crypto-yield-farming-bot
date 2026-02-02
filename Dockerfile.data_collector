@@ -30,6 +30,8 @@ RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /v
 
 # Copy data directory for token registry runtime access
 COPY --from=builder /app/data ./data
+# Copy dYdX config used by data_collector
+COPY --from=builder /app/src/hedging/dydx_mainnet.toml ./dydx_mainnet.toml
 # Copy .env file for runtime environment loading
 COPY --from=builder /app/.env ./
 

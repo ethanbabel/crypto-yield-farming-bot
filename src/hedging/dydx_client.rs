@@ -114,7 +114,9 @@ impl DydxClient {
         // Initialize crypto provider
         config::init_crypto_provider();
 
-        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml")
+        let config_path = std::env::var("DYDX_CONFIG_PATH")
+            .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
+        let config = ClientConfig::from_file(&config_path)
             .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let node_client = NodeClient::connect(config.node)
@@ -440,7 +442,9 @@ impl DydxClient {
     ) -> Result<()> {
         sleep(Duration::from_millis(500)).await; // Small delay to ensure order is indexed
 
-        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
+        let config_path = std::env::var("DYDX_CONFIG_PATH")
+            .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
+        let config = ClientConfig::from_file(&config_path).await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let mut node_client_clone = NodeClient::connect(config.node).await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
@@ -1482,7 +1486,9 @@ impl DydxClient {
         arbitrum_native_balance_initial: Decimal,
         log_string: String,
     ) -> Result<()> {
-        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
+        let config_path = std::env::var("DYDX_CONFIG_PATH")
+            .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
+        let config = ClientConfig::from_file(&config_path).await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let mut node_client_clone = NodeClient::connect(config.node).await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;

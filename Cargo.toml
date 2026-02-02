@@ -13,6 +13,10 @@ name = "data_recorder"
 path = "src/bin/data_recorder.rs"
 
 [[bin]]
+name = "strategy_runner"
+path = "src/bin/strategy_runner.rs"
+
+[[bin]]
 name = "trading_bot"
 path = "src/bin/trading_bot.rs"
 

@@ -202,6 +202,7 @@ async fn main() -> eyre::Result<()> {
             }
         };
 
+        let mut seen_perp_state_tickers: HashSet<String> = HashSet::new();
         for (token_symbol, market_opt) in token_perp_map {
             let Some(market) = market_opt else { continue; };
             let ticker = market.ticker.0.clone();
@@ -212,6 +213,10 @@ async fn main() -> eyre::Result<()> {
                     ticker: ticker.clone(),
                 });
                 known_dydx_perps.insert(ticker.clone());
+            }
+
+            if !seen_perp_state_tickers.insert(ticker.clone()) {
+                continue;
             }
 
             raw_dydx_perp_states.push(RawDydxPerpStateModel {

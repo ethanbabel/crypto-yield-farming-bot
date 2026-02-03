@@ -5,6 +5,7 @@ use redis::AsyncCommands;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time;
 use tracing::{error, info, instrument, warn};
 
@@ -20,6 +21,8 @@ use crypto_yield_farming_bot::wallet::WalletManager;
 
 const DATA_COLLECTION_COMPLETED_CHANNEL: &str = "data_collection_completed";
 const STRATEGY_RUN_COMPLETED_CHANNEL: &str = "strategy_run_completed";
+const DEFAULT_HANG_TIMEOUT_SECS: u64 = 3000; // 50m - strategy runner should run every 30 minutes so after 50m+ assume it's hung
+const DEFAULT_RUN_TIMEOUT_SECS: u64 = 600; // 10m
 
 #[instrument(name = "strategy_runner_main")]
 #[tokio::main]
@@ -63,8 +66,37 @@ async fn main() -> eyre::Result<()> {
     // Get the timestamp of the last strategy run
     let mut last_run_time = db_manager.get_latest_strategy_run().await?.map(|run| run.timestamp);
 
+    let last_progress = Arc::new(AtomicU64::new(Utc::now().timestamp() as u64));
+    let hang_timeout_secs = std::env::var("STRATEGY_RUNNER_HANG_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_HANG_TIMEOUT_SECS);
+    let run_timeout_secs = std::env::var("STRATEGY_RUNNER_RUN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RUN_TIMEOUT_SECS);
+
+    let watchdog_progress = last_progress.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let last = watchdog_progress.load(Ordering::Relaxed);
+            let now = Utc::now().timestamp() as u64;
+            if now.saturating_sub(last) > hang_timeout_secs {
+                error!(
+                    last_progress = last,
+                    hang_timeout_secs,
+                    "Strategy runner appears hung; exiting for restart"
+                );
+                std::process::exit(1);
+            }
+        }
+    });
+
     info!("Waiting for data_collection_completed signals");
     loop {
+        last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
         let now = Utc::now();
         let ready_at = last_run_time.map(|t| t + Duration::minutes(30));
 
@@ -74,6 +106,7 @@ async fn main() -> eyre::Result<()> {
                 tokio::select! {
                     msg = messages.next() => {
                         if let Some(msg) = msg {
+                            last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
                             let payload: String = msg.get_payload().unwrap_or_default();
                             info!(payload = %payload, "Received data collection completion signal");
                             if let Some(last_run_time) = last_run_time {
@@ -97,11 +130,26 @@ async fn main() -> eyre::Result<()> {
 
         match time::timeout(std::time::Duration::from_secs(600), messages.next()).await {
             Ok(Some(msg)) => { // 30 minutes have passed and we received a data collection completed signal
+                last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
                 let payload: String = msg.get_payload().unwrap_or_default();
                 info!(payload = %payload, "Received data collection completion signal");
 
                 let run_started_at = Utc::now();
-                let portfolio_data = engine::run_strategy_engine(db_manager.clone(), dydx_client.clone()).await?;
+                let portfolio_data = match time::timeout(
+                    std::time::Duration::from_secs(run_timeout_secs),
+                    engine::run_strategy_engine(db_manager.clone(), dydx_client.clone()),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        error!(
+                            run_timeout_secs,
+                            "Strategy engine timed out; exiting for restart"
+                        );
+                        std::process::exit(1);
+                    }
+                };
                 info!(
                     "Strategy engine completed with {} markets",
                     portfolio_data.market_addresses.len()

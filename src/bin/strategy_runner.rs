@@ -45,17 +45,6 @@ async fn main() -> eyre::Result<()> {
     let mut db_manager = Arc::new(db_manager);
     info!("Database manager initialized");
 
-    // Initialize and load wallet manager
-    let mut wallet_manager = WalletManager::new(&cfg)?;
-    wallet_manager.load_tokens(&db_manager).await?;
-    let wallet_manager = Arc::new(wallet_manager);
-    info!("Wallet manager initialized");
-
-    // Initialize dydx client
-    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
-    let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
-    info!("dYdX client initialized");
-
     // Create Redis client
     let redis_client = redis::Client::open("redis://redis:6379")?;
     let mut pubsub = redis_client.get_async_pubsub().await?;
@@ -135,6 +124,12 @@ async fn main() -> eyre::Result<()> {
                 info!(payload = %payload, "Received data collection completion signal");
 
                 let run_started_at = Utc::now();
+                let mut wallet_manager = WalletManager::new(&cfg)?;
+                wallet_manager.load_tokens(&db_manager).await?;
+                let wallet_manager = Arc::new(wallet_manager);
+
+                let dydx_client = DydxClient::new(cfg.clone(), wallet_manager).await?;
+                let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
                 let portfolio_data = match time::timeout(
                     std::time::Duration::from_secs(run_timeout_secs),
                     engine::run_strategy_engine(db_manager.clone(), dydx_client.clone()),

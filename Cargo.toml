@@ -24,6 +24,10 @@ path = "src/bin/trading_bot.rs"
 name = "main"   # For development and testing
 path = "src/bin/main.rs"
 
+[[bin]]        # Utility to initialize database schema
+name = "init_db_schema"
+path = "src/bin/init_db_schema.rs"
+
 [[bin]]         # Utility to see wallet balances
 name = "see_balances"
 path = "src/bin/see_balances.rs"

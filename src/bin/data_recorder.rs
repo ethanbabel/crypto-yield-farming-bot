@@ -21,6 +21,9 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 
+const INIT_RETRY_BASE_SECS: u64 = 5;
+const INIT_RETRY_MAX_SECS: u64 = 120;
+
 #[instrument(skip(token_prices_tx, market_states_tx, new_token_tx, new_market_tx, redis_connection), fields(stream_name, entry_count))]
 async fn process_stream_entries(
     stream_name: &str,
@@ -143,8 +146,25 @@ async fn main() -> eyre::Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Loaded configuration and initialized logging");
 
-    // Initialize database manager
-    let mut db = db::db_manager::DbManager::init(&cfg).await?;
+    // Initialize database manager with retry to avoid rapid restart loops under DB pressure
+    let mut init_attempt = 0u64;
+    let mut db = loop {
+        match db::db_manager::DbManager::init(&cfg).await {
+            Ok(manager) => break manager,
+            Err(e) => {
+                init_attempt += 1;
+                let retry_secs =
+                    (INIT_RETRY_BASE_SECS.saturating_mul(init_attempt)).min(INIT_RETRY_MAX_SECS);
+                error!(
+                    error = ?e,
+                    init_attempt,
+                    retry_secs,
+                    "Failed to initialize database manager, retrying"
+                );
+                sleep(Duration::from_secs(retry_secs)).await;
+            }
+        }
+    };
 
     // Create Redis client
     let redis_client = redis::Client::open("redis://redis:6379")?;

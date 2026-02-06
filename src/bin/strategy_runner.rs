@@ -23,6 +23,8 @@ const DATA_COLLECTION_COMPLETED_CHANNEL: &str = "data_collection_completed";
 const STRATEGY_RUN_COMPLETED_CHANNEL: &str = "strategy_run_completed";
 const DEFAULT_HANG_TIMEOUT_SECS: u64 = 3000; // 50m - strategy runner should run every 30 minutes so after 50m+ assume it's hung
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 600; // 10m
+const INIT_RETRY_BASE_SECS: u64 = 5;
+const INIT_RETRY_MAX_SECS: u64 = 120;
 
 #[instrument(name = "strategy_runner_main")]
 #[tokio::main]
@@ -40,9 +42,25 @@ async fn main() -> eyre::Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Initialize database manager
-    let db_manager = DbManager::init(&cfg).await?;
-    let mut db_manager = Arc::new(db_manager);
+    // Initialize database manager with retry to avoid rapid restart loops under DB pressure
+    let mut init_attempt = 0u64;
+    let db_manager = loop {
+        match DbManager::init(&cfg).await {
+            Ok(db_manager) => break db_manager,
+            Err(e) => {
+                init_attempt += 1;
+                let retry_secs = (INIT_RETRY_BASE_SECS.saturating_mul(init_attempt)).min(INIT_RETRY_MAX_SECS);
+                error!(
+                    error = ?e,
+                    init_attempt,
+                    retry_secs,
+                    "Failed to initialize database manager, retrying"
+                );
+                time::sleep(std::time::Duration::from_secs(retry_secs)).await;
+            }
+        }
+    };
+    let db_manager = Arc::new(db_manager);
     info!("Database manager initialized");
 
     // Create Redis client
@@ -136,13 +154,17 @@ async fn main() -> eyre::Result<()> {
                 )
                 .await
                 {
-                    Ok(result) => result?,
+                    Ok(Ok(result)) => result,
+                    Ok(Err(e)) => {
+                        error!(error = ?e, "Strategy engine failed");
+                        continue;
+                    }
                     Err(_) => {
                         error!(
                             run_timeout_secs,
-                            "Strategy engine timed out; exiting for restart"
+                            "Strategy engine timed out; skipping run"
                         );
-                        std::process::exit(1);
+                        continue;
                     }
                 };
                 info!(
@@ -151,7 +173,7 @@ async fn main() -> eyre::Result<()> {
                 );
                 portfolio_data.log_portfolio_data();
 
-                if let Err(e) = record_strategy_run(&mut db_manager, &cfg, run_started_at, &portfolio_data).await {
+                if let Err(e) = record_strategy_run(&db_manager, &cfg, run_started_at, &portfolio_data).await {
                     error!(error = ?e, "Failed to record strategy run");
                 } else {
                     let _: () = publish_conn
@@ -167,8 +189,8 @@ async fn main() -> eyre::Result<()> {
                 break;
             }
             Err(_) => {
-                error!("Did not receive data collection completion signal within 10 minutes after cadence window");
-                break;
+                warn!("Did not receive data collection completion signal within 10 minutes after cadence window");
+                continue;
             }
         }
     }
@@ -177,15 +199,11 @@ async fn main() -> eyre::Result<()> {
 }
 
 async fn record_strategy_run(
-    db_manager: &mut Arc<DbManager>,
+    db_manager: &Arc<DbManager>,
     cfg: &config::Config,
     run_started_at: chrono::DateTime<Utc>,
     portfolio_data: &PortfolioData,
 ) -> eyre::Result<i32> {
-    if let Some(db_manager_mut) = Arc::get_mut(db_manager) {
-        db_manager_mut.refresh_id_maps().await?;
-    }
-
     let total_weight = portfolio_data.weights.sum();
     let portfolio_return = portfolio_data.weights.dot(&portfolio_data.expected_returns);
     let portfolio_variance = portfolio_data
@@ -209,7 +227,7 @@ async fn record_strategy_run(
     let run_id = db_manager.insert_strategy_run(&run).await?;
 
     for (i, market) in portfolio_data.market_addresses.iter().enumerate() {
-        if let Some(market_id) = db_manager.market_id_map.get(market).cloned() {
+        if let Some(market_id) = db_manager.get_market_id_with_fallback(*market).await? {
             let mkt_return = portfolio_data.expected_returns[i];
             let mkt_variance = portfolio_data.covariance_matrix[[i, i]];
             let target = NewStrategyTargetModel {
@@ -220,6 +238,8 @@ async fn record_strategy_run(
                 variance_bps: mkt_variance * Decimal::from_f64(10000.0).unwrap(),
             };
             db_manager.insert_strategy_target(&target).await?;
+        } else {
+            warn!(market_address = ?market, "Skipping strategy target insert: market ID not found");
         }
     }
 

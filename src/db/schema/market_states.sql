@@ -40,5 +40,10 @@ CREATE TABLE IF NOT EXISTS market_states (
     fees_total NUMERIC
 );
 
-CREATE INDEX IF NOT EXISTS idx_market_states_market_timestamp 
-    ON market_states(market_id, timestamp);
+-- Optimizes latest-per-market lookups with ORDER BY market_id, timestamp DESC.
+CREATE INDEX IF NOT EXISTS idx_market_states_market_timestamp_desc
+    ON market_states(market_id, timestamp DESC);
+
+-- Optimizes timestamp range scans used by strategy slice loading.
+CREATE INDEX IF NOT EXISTS idx_market_states_timestamp_market
+    ON market_states(timestamp, market_id);

@@ -1,9 +1,28 @@
-use sqlx::{PgPool, Row};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
 use crate::db::models::token_prices::{NewTokenPriceModel, TokenPriceModel};
+
+fn rows_to_token_price_map(rows: Vec<sqlx::postgres::PgRow>) -> HashMap<i32, Vec<TokenPriceModel>> {
+    let mut result = HashMap::new();
+    for row in rows {
+        let token_price = TokenPriceModel {
+            id: row.get(0),
+            token_id: row.get(1),
+            timestamp: row.get(2),
+            min_price: row.get(3),
+            max_price: row.get(4),
+            mid_price: row.get(5),
+        };
+        result
+            .entry(token_price.token_id)
+            .or_insert_with(Vec::new)
+            .push(token_price);
+    }
+    result
+}
 
 /// Insert a single token price record
 pub async fn insert_token_price(
@@ -20,7 +39,6 @@ pub async fn insert_token_price(
         new_price.min_price,
         new_price.max_price,
         new_price.mid_price,
-
     )
     .execute(pool)
     .await?;
@@ -108,33 +126,51 @@ pub async fn get_all_token_prices_in_range(
         FROM token_prices
         WHERE timestamp >= $1 AND timestamp <= $2
         ORDER BY token_id, timestamp
-        "#
+        "#,
     )
     .bind(start)
     .bind(end)
     .fetch_all(pool)
     .await?;
 
-    // Manual deserialization (faster than text protocol)
-    let mut result = HashMap::new();
-    for row in rows {
-        let token_price = TokenPriceModel {
-            id: row.get(0),
-            token_id: row.get(1),
-            timestamp: row.get(2),
-            min_price: row.get(3),
-            max_price: row.get(4),
-            mid_price: row.get(5),
-        };
-        result.entry(token_price.token_id)
-            .or_insert_with(Vec::new)
-            .push(token_price);
+    Ok(rows_to_token_price_map(rows))
+}
+
+/// Fetch token prices across selected tokens in a time range
+pub async fn get_token_prices_in_range_for_tokens(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    token_ids: &[i32],
+) -> Result<HashMap<i32, Vec<TokenPriceModel>>, sqlx::Error> {
+    if token_ids.is_empty() {
+        return Ok(HashMap::new());
     }
-    Ok(result)
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, token_id, timestamp, min_price, max_price, mid_price
+        FROM token_prices
+        WHERE token_id = ANY($1)
+          AND timestamp >= $2
+          AND timestamp <= $3
+        ORDER BY token_id, timestamp
+        "#,
+    )
+    .bind(token_ids)
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows_to_token_price_map(rows))
 }
 
 /// Fetch the latest token price for a specific token
-pub async fn get_latest_token_price_for_token(pool: &PgPool, token_id: i32) -> Result<Option<TokenPriceModel>, sqlx::Error> {
+pub async fn get_latest_token_price_for_token(
+    pool: &PgPool,
+    token_id: i32,
+) -> Result<Option<TokenPriceModel>, sqlx::Error> {
     sqlx::query_as!(
         TokenPriceModel,
         r#"
@@ -151,41 +187,79 @@ pub async fn get_latest_token_price_for_token(pool: &PgPool, token_id: i32) -> R
 }
 
 /// Fetch the latest token prices for all tokens
-pub async fn get_latest_token_prices_for_all_tokens(pool: &PgPool) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
-    sqlx::query_as!(
-        TokenPriceModel,
+pub async fn get_latest_token_prices_for_all_tokens(
+    pool: &PgPool,
+) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
+    let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (token_id) 
-            id, token_id, timestamp, min_price, max_price, mid_price
-        FROM token_prices
-        ORDER BY token_id, timestamp DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-}
-
-/// Fetch all asset tokens
-pub async fn get_all_asset_tokens(pool: &PgPool) -> Result<Vec<(String, String, u8, Decimal)>, sqlx::Error> {
-    let rows = sqlx::query!(
-        r#"
-        SELECT DISTINCT ON (tp.token_id)
-            t.address, t.symbol, t.decimals, tp.mid_price
-        FROM token_prices tp
-        JOIN tokens t ON tp.token_id = t.id
-        WHERE t.id IN (
-            SELECT DISTINCT long_token_id FROM markets
-            UNION
-            SELECT DISTINCT short_token_id FROM markets
-        )
-        ORDER BY tp.token_id, tp.timestamp DESC
+        SELECT
+            tp.id, tp.token_id, tp.timestamp, tp.min_price, tp.max_price, tp.mid_price
+        FROM tokens t
+        JOIN LATERAL (
+            SELECT id, token_id, timestamp, min_price, max_price, mid_price
+            FROM token_prices
+            WHERE token_id = t.id
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) tp ON true
+        ORDER BY tp.token_id
         "#,
     )
     .fetch_all(pool)
     .await?;
-    let tokens = rows.into_iter()
-        .map(|row| (row.address, row.symbol, row.decimals as u8, row.mid_price))
+
+    Ok(rows
+        .into_iter()
+        .map(|row| TokenPriceModel {
+            id: row.get(0),
+            token_id: row.get(1),
+            timestamp: row.get(2),
+            min_price: row.get(3),
+            max_price: row.get(4),
+            mid_price: row.get(5),
+        })
+        .collect())
+}
+
+/// Fetch all asset tokens
+pub async fn get_all_asset_tokens(
+    pool: &PgPool,
+) -> Result<Vec<(String, String, u8, Decimal)>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        WITH asset_token_ids AS (
+            SELECT DISTINCT long_token_id AS token_id FROM markets
+            UNION
+            SELECT DISTINCT short_token_id AS token_id FROM markets
+        )
+        SELECT
+            t.address,
+            t.symbol,
+            t.decimals,
+            tp.mid_price
+        FROM asset_token_ids a
+        JOIN tokens t ON t.id = a.token_id
+        JOIN LATERAL (
+            SELECT mid_price
+            FROM token_prices
+            WHERE token_id = a.token_id
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) tp ON true
+        ORDER BY a.token_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let tokens = rows
+        .into_iter()
+        .map(|row| {
+            let decimals: i32 = row.get(2);
+            (row.get(0), row.get(1), decimals as u8, row.get(3))
+        })
         .collect();
+
     Ok(tokens)
 }
 

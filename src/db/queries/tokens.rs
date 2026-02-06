@@ -1,6 +1,6 @@
-use sqlx::{PgPool, Error};
-use std::collections::HashMap;
 use ethers::types::Address;
+use sqlx::{Error, PgPool, Row};
+use std::collections::HashMap;
 
 use crate::db::models::tokens::{TokenModel, NewTokenModel};
 
@@ -62,6 +62,26 @@ pub async fn get_token_id_map(pool: &PgPool) -> Result<HashMap<Address, i32>, Er
     Ok(map)
 }
 
+/// Resolve a token ID by address using case-insensitive matching.
+pub async fn get_token_id_by_address_insensitive(
+    pool: &PgPool,
+    address: &str,
+) -> Result<Option<i32>, Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM tokens
+        WHERE lower(address) = lower($1)
+        LIMIT 1
+        "#,
+    )
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| row.get(0)))
+}
+
 /// Load a map from token symbol to token ID
 pub async fn get_token_symbol_map(pool: &PgPool) -> Result<HashMap<String, i32>, Error> {
     let rows = sqlx::query!(
@@ -72,6 +92,23 @@ pub async fn get_token_symbol_map(pool: &PgPool) -> Result<HashMap<String, i32>,
 
     let map = rows.into_iter().map(|row| (row.symbol, row.id)).collect();
     Ok(map)
+}
+
+/// Resolve a token ID by symbol.
+pub async fn get_token_id_by_symbol(pool: &PgPool, symbol: &str) -> Result<Option<i32>, Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM tokens
+        WHERE symbol = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| row.get(0)))
 }
 
 /// Fetch all tokens from the database

@@ -329,7 +329,7 @@ async fn main() -> Result<()> {
                 window_end.to_rfc3339(),
                 final_window_time.to_rfc3339()
             );
-            next_progress_milestone_pct += 10;
+            next_progress_milestone_pct += 25;
         }
 
         let run = &runs[run_index];

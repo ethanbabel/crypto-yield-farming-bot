@@ -10,14 +10,14 @@ use tracing::{debug, info, instrument};
 
 use super::connection;
 use super::models::{
-    dydx_perp_states::{NewDydxPerpStateModel, RawDydxPerpStateModel},
-    dydx_perps::{NewDydxPerpModel, RawDydxPerpModel},
+    dydx_perp_states::{DydxPerpStateModel, NewDydxPerpStateModel, RawDydxPerpStateModel},
+    dydx_perps::{DydxPerpModel, NewDydxPerpModel, RawDydxPerpModel},
     market_states::{MarketStateModel, NewMarketStateModel, RawMarketStateModel},
     markets::{MarketModel, NewMarketModel, RawMarketModel},
     portfolio_snapshots::{NewPortfolioSnapshotModel, PortfolioSnapshotModel},
     position_snapshots::NewPositionSnapshotModel,
     strategy_runs::{NewStrategyRunModel, StrategyRunModel},
-    strategy_targets::NewStrategyTargetModel,
+    strategy_targets::{NewStrategyTargetModel, StrategyTargetModel},
     token_prices::{NewTokenPriceModel, RawTokenPriceModel, TokenPriceModel},
     tokens::{NewTokenModel, RawTokenModel, TokenModel},
     trades::NewTradeModel,
@@ -627,6 +627,13 @@ impl DbManager {
         Ok(markets)
     }
 
+    /// Fetch all dYdX perps
+    pub async fn get_all_dydx_perps(&self) -> Result<Vec<DydxPerpModel>, sqlx::Error> {
+        let perps = dydx_perps_queries::get_all_dydx_perps(&self.pool).await?;
+        debug!(count = perps.len(), "Fetched all dYdX perps");
+        Ok(perps)
+    }
+
     /// Fetch most recent token price for all tokens
     #[instrument(skip(self))]
     pub async fn get_latest_token_prices(&self) -> Result<Vec<TokenPriceModel>, sqlx::Error> {
@@ -990,5 +997,106 @@ impl DbManager {
         end: DateTime<Utc>,
     ) -> Result<Vec<StrategyRunModel>, sqlx::Error> {
         strategy_runs_queries::get_strategy_runs_in_range(&self.pool, start, end).await
+    }
+
+    /// Fetch strategy runs for a specific strategy version with optional bounds.
+    #[instrument(skip(self))]
+    pub async fn get_strategy_runs_for_version(
+        &self,
+        strategy_version: &str,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+    ) -> Result<Vec<StrategyRunModel>, sqlx::Error> {
+        strategy_runs_queries::get_strategy_runs_for_version(&self.pool, strategy_version, start, end)
+            .await
+    }
+
+    /// Fetch strategy targets for a set of strategy run IDs.
+    #[instrument(skip(self, run_ids))]
+    pub async fn get_strategy_targets_for_runs(
+        &self,
+        run_ids: &[i32],
+    ) -> Result<Vec<StrategyTargetModel>, sqlx::Error> {
+        strategy_targets_queries::get_targets_for_runs(&self.pool, run_ids).await
+    }
+
+    /// Fetch market state series for selected markets, including the latest pre-start row for each market if available.
+    #[instrument(skip(self, market_ids))]
+    pub async fn get_market_state_series_for_markets(
+        &self,
+        market_ids: &[i32],
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<HashMap<i32, Vec<MarketStateModel>>, sqlx::Error> {
+        let mut series = market_states_queries::get_market_states_in_range_for_markets_exclusive_start(
+            &self.pool,
+            start,
+            end,
+            market_ids,
+        )
+        .await?;
+
+        let mut pre_start_states = market_states_queries::get_latest_market_states_at_or_before_for_markets(
+            &self.pool,
+            start,
+            market_ids,
+        )
+        .await?;
+
+        for market_id in market_ids {
+            if let Some(pre_state) = pre_start_states.remove(market_id) {
+                let entry = series.entry(*market_id).or_insert_with(Vec::new);
+                if entry
+                    .first()
+                    .map(|row| row.timestamp != pre_state.timestamp)
+                    .unwrap_or(true)
+                {
+                    entry.insert(0, pre_state);
+                }
+            }
+        }
+
+        Ok(series)
+    }
+
+    /// Fetch dYdX perp state series for selected perps, including the latest pre-start row for each perp if available.
+    #[instrument(skip(self, perp_ids))]
+    pub async fn get_dydx_perp_state_series(
+        &self,
+        perp_ids: &[i32],
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<HashMap<i32, Vec<DydxPerpStateModel>>, sqlx::Error> {
+        let mut series =
+            dydx_perp_states_queries::get_dydx_perp_states_in_range_for_perps_exclusive_start(
+                &self.pool,
+                start,
+                end,
+                perp_ids,
+            )
+            .await?;
+
+        let mut pre_start_states =
+            dydx_perp_states_queries::get_latest_dydx_perp_states_at_or_before_for_perps(
+                &self.pool,
+                start,
+                perp_ids,
+            )
+            .await?;
+
+        for perp_id in perp_ids {
+            if let Some(pre_state) = pre_start_states.remove(perp_id) {
+                let entry = series.entry(*perp_id).or_insert_with(Vec::new);
+                if entry
+                    .first()
+                    .map(|row| row.timestamp != pre_state.timestamp)
+                    .unwrap_or(true)
+                {
+                    entry.insert(0, pre_state);
+                }
+            }
+        }
+
+        Ok(series)
     }
 }

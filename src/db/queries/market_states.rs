@@ -295,6 +295,110 @@ pub async fn get_market_states_in_range_for_markets(
     Ok(rows_to_market_state_map(rows))
 }
 
+/// Fetch market states across selected markets in a time range, excluding the lower bound timestamp.
+pub async fn get_market_states_in_range_for_markets_exclusive_start(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    market_ids: &[i32],
+) -> Result<HashMap<i32, Vec<MarketStateModel>>, sqlx::Error> {
+    if market_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id, market_id, timestamp,
+            borrowing_factor_long, borrowing_factor_short,
+            pnl_long, pnl_short, pnl_net,
+            gm_price_min, gm_price_max, gm_price_mid,
+            pool_long_amount, pool_short_amount, pool_impact_amount,
+            pool_long_token_usd, pool_short_token_usd, pool_impact_token_usd,
+            open_interest_long, open_interest_short,
+            open_interest_long_amount, open_interest_short_amount,
+            open_interest_long_via_tokens, open_interest_short_via_tokens,
+            utilization, swap_volume, trading_volume,
+            fees_position, fees_liquidation, fees_swap, fees_borrowing, fees_total
+        FROM market_states
+        WHERE market_id = ANY($1)
+          AND timestamp > $2
+          AND timestamp <= $3
+        ORDER BY market_id, timestamp
+        "#,
+    )
+    .bind(market_ids)
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows_to_market_state_map(rows))
+}
+
+/// Fetch latest market state at or before a given timestamp for each selected market.
+pub async fn get_latest_market_states_at_or_before_for_markets(
+    pool: &PgPool,
+    timestamp: DateTime<Utc>,
+    market_ids: &[i32],
+) -> Result<HashMap<i32, MarketStateModel>, sqlx::Error> {
+    if market_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            ms.id, ms.market_id, ms.timestamp,
+            ms.borrowing_factor_long, ms.borrowing_factor_short,
+            ms.pnl_long, ms.pnl_short, ms.pnl_net,
+            ms.gm_price_min, ms.gm_price_max, ms.gm_price_mid,
+            ms.pool_long_amount, ms.pool_short_amount, ms.pool_impact_amount,
+            ms.pool_long_token_usd, ms.pool_short_token_usd, ms.pool_impact_token_usd,
+            ms.open_interest_long, ms.open_interest_short,
+            ms.open_interest_long_amount, ms.open_interest_short_amount,
+            ms.open_interest_long_via_tokens, ms.open_interest_short_via_tokens,
+            ms.utilization, ms.swap_volume, ms.trading_volume,
+            ms.fees_position, ms.fees_liquidation, ms.fees_swap, ms.fees_borrowing, ms.fees_total
+        FROM unnest($1::int[]) AS ids(market_id)
+        JOIN LATERAL (
+            SELECT
+                id, market_id, timestamp,
+                borrowing_factor_long, borrowing_factor_short,
+                pnl_long, pnl_short, pnl_net,
+                gm_price_min, gm_price_max, gm_price_mid,
+                pool_long_amount, pool_short_amount, pool_impact_amount,
+                pool_long_token_usd, pool_short_token_usd, pool_impact_token_usd,
+                open_interest_long, open_interest_short,
+                open_interest_long_amount, open_interest_short_amount,
+                open_interest_long_via_tokens, open_interest_short_via_tokens,
+                utilization, swap_volume, trading_volume,
+                fees_position, fees_liquidation, fees_swap, fees_borrowing, fees_total
+            FROM market_states
+            WHERE market_id = ids.market_id
+              AND timestamp <= $2
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) ms ON true
+        ORDER BY ms.market_id
+        "#,
+    )
+    .bind(market_ids)
+    .bind(timestamp)
+    .fetch_all(pool)
+    .await?;
+
+    let grouped = rows_to_market_state_map(rows);
+    let mut out = HashMap::new();
+    for (market_id, mut states) in grouped {
+        if let Some(state) = states.pop() {
+            out.insert(market_id, state);
+        }
+    }
+
+    Ok(out)
+}
+
 /// Get market display names by joining markets and tokens tables
 pub async fn get_market_display_names(
     pool: &PgPool,

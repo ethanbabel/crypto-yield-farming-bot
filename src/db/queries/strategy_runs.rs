@@ -55,3 +55,26 @@ pub async fn get_strategy_runs_in_range(
     .fetch_all(pool)
     .await
 }
+
+pub async fn get_strategy_runs_for_version(
+    pool: &PgPool,
+    strategy_version: &str,
+    start: Option<chrono::DateTime<chrono::Utc>>,
+    end: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Vec<StrategyRunModel>, sqlx::Error> {
+    sqlx::query_as::<_, StrategyRunModel>(
+        r#"
+        SELECT id, timestamp, strategy_version, total_weight, expected_return_bps, volatility_bps, sharpe
+        FROM strategy_runs
+        WHERE strategy_version = $1
+          AND ($2::timestamptz IS NULL OR timestamp >= $2)
+          AND ($3::timestamptz IS NULL OR timestamp <= $3)
+        ORDER BY timestamp ASC
+        "#,
+    )
+    .bind(strategy_version)
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await
+}

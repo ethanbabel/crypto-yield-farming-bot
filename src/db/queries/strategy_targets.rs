@@ -34,3 +34,24 @@ pub async fn get_targets_for_run(pool: &PgPool, run_id: i32) -> Result<Vec<Strat
     .fetch_all(pool)
     .await
 }
+
+pub async fn get_targets_for_runs(
+    pool: &PgPool,
+    run_ids: &[i32],
+) -> Result<Vec<StrategyTargetModel>, sqlx::Error> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, StrategyTargetModel>(
+        r#"
+        SELECT id, strategy_run_id, market_id, target_weight, expected_return_bps, variance_bps
+        FROM strategy_targets
+        WHERE strategy_run_id = ANY($1)
+        ORDER BY strategy_run_id ASC, id ASC
+        "#,
+    )
+    .bind(run_ids)
+    .fetch_all(pool)
+    .await
+}

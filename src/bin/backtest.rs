@@ -311,8 +311,21 @@ async fn main() -> Result<()> {
     let mut window_results = Vec::new();
     let mut market_results = Vec::new();
     let stable_short_hedge_fraction = Decimal::from_i32(1).unwrap() / Decimal::from_i32(2).unwrap();
+    let total_windows = windows.len();
+    let final_window_time = last_window_end;
 
-    for (run_index, window_end) in windows {
+    for (window_idx, (run_index, window_end)) in windows.into_iter().enumerate() {
+        let cur_iteration_num = window_idx + 1;
+        let percentage_complete = (cur_iteration_num as f64 / total_windows as f64) * 100.0;
+        info!(
+            cur_iteration_num,
+            total_iterations = total_windows,
+            percentage_complete = percentage_complete,
+            cur_window_time = %window_end.to_rfc3339(),
+            final_window_time = %final_window_time.to_rfc3339(),
+            "Backtest progress"
+        );
+
         let run = &runs[run_index];
         let Some(run_targets) = targets_by_run.get(&run.id) else {
             warnings.push(format!(

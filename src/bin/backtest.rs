@@ -152,6 +152,47 @@ struct BacktestArtifacts {
     market_windows_csv: PathBuf,
 }
 
+#[derive(Debug)]
+struct HedgeResult {
+    desired_hedge_notional_usd: Decimal,
+    actual_hedge_notional_usd: Decimal,
+    required_hedge_margin_usd: Decimal,
+    gm_capital_usd: Decimal,
+    perp_ticker: Option<String>,
+    perp_entry_price: Decimal,
+    perp_exit_price: Decimal,
+    hedge_quantity: Decimal,
+    hedge_mtm_pnl_usd: Decimal,
+    funding_pnl_usd: Decimal,
+    notes: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+struct TargetSimulation {
+    market_result: Option<MarketWindowResult>,
+    gm_pnl_usd: Decimal,
+    hedge_mtm_pnl_usd: Decimal,
+    funding_pnl_usd: Decimal,
+    fee_attribution_usd: Decimal,
+    active_market: bool,
+    warnings: Vec<String>,
+}
+
+impl TargetSimulation {
+    fn skipped_with_warning(warning: String) -> Self {
+        Self {
+            market_result: None,
+            gm_pnl_usd: Decimal::ZERO,
+            hedge_mtm_pnl_usd: Decimal::ZERO,
+            funding_pnl_usd: Decimal::ZERO,
+            fee_attribution_usd: Decimal::ZERO,
+            active_market: false,
+            warnings: vec![warning],
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
@@ -310,208 +351,36 @@ async fn main() -> Result<()> {
             } else {
                 Decimal::ZERO
             };
-
-            let mut notes = Vec::new();
-
-            let Some(ctx) = market_contexts.get(&target.market_id) else {
-                warnings.push(format!(
-                    "run_id={} market_id={} missing context; treating allocation as cash",
-                    run.id, target.market_id
-                ));
-                continue;
-            };
-
             let package_capital = start_nav * normalized_weight;
             if package_capital <= Decimal::ZERO {
                 continue;
             }
-
-            let Some(market_series) = market_state_series.get(&target.market_id) else {
-                warnings.push(format!(
-                    "run_id={} market_id={} has no market state series; treating allocation as cash",
-                    run.id, target.market_id
-                ));
-                continue;
-            };
-
-            let start_market_state = latest_at_or_before_market(market_series, run.timestamp);
-            let end_market_state = latest_at_or_before_market(market_series, window_end);
-
-            let mut gm_entry_price = Decimal::ZERO;
-            let mut gm_exit_price = Decimal::ZERO;
-            let mut gm_qty = Decimal::ZERO;
-            let mut gm_pnl = Decimal::ZERO;
-
-            let hedge_exposure_fraction = if ctx.short_is_stable {
-                stable_short_hedge_fraction
-            } else {
-                Decimal::ONE
-            };
-
-            let mut desired_hedge_notional = Decimal::ZERO;
-            let mut actual_hedge_notional = Decimal::ZERO;
-            let mut required_hedge_margin = Decimal::ZERO;
-            let mut gm_capital = package_capital;
-
-            let mut perp_ticker = ctx.dydx_ticker.clone();
-            let mut perp_entry_price = Decimal::ZERO;
-            let mut perp_exit_price = Decimal::ZERO;
-            let mut hedge_qty = Decimal::ZERO;
-            let mut hedge_mtm_pnl = Decimal::ZERO;
-            let mut funding_pnl = Decimal::ZERO;
-
-            if let (Some(start_state), Some(end_state)) = (start_market_state, end_market_state) {
-                gm_entry_price = start_state.gm_price_mid.unwrap_or(Decimal::ZERO);
-                gm_exit_price = end_state.gm_price_mid.unwrap_or(Decimal::ZERO);
-
-                if gm_entry_price > Decimal::ZERO {
-                    if !ctx.long_is_stable {
-                        desired_hedge_notional = package_capital * hedge_exposure_fraction;
-
-                        if let Some(perp_id) = ctx.dydx_perp_id {
-                            if let Some(perp_series) = perp_state_series.get(&perp_id) {
-                                let start_perp_state = latest_at_or_before_perp(perp_series, run.timestamp);
-                                let end_perp_state = latest_at_or_before_perp(perp_series, window_end);
-
-                                if let (Some(perp_start), Some(perp_end)) = (start_perp_state, end_perp_state) {
-                                    perp_entry_price = perp_start.oracle_price.unwrap_or(Decimal::ZERO);
-                                    perp_exit_price = perp_end.oracle_price.unwrap_or(Decimal::ZERO);
-
-                                    if perp_entry_price > Decimal::ZERO {
-                                        let leverage = derive_effective_leverage(perp_start);
-                                        if leverage > Decimal::ZERO {
-                                            let desired_margin = desired_hedge_notional / leverage;
-                                            if desired_margin <= package_capital {
-                                                required_hedge_margin = desired_margin;
-                                                actual_hedge_notional = desired_hedge_notional;
-                                            } else {
-                                                required_hedge_margin = package_capital;
-                                                actual_hedge_notional = package_capital * leverage;
-                                                notes.push(format!(
-                                                    "Required hedge margin exceeded package capital; capped hedge notional to {}",
-                                                    actual_hedge_notional
-                                                ));
-                                            }
-
-                                            gm_capital = (package_capital - required_hedge_margin).max(Decimal::ZERO);
-                                            hedge_qty = if perp_entry_price > Decimal::ZERO {
-                                                -(actual_hedge_notional / perp_entry_price)
-                                            } else {
-                                                Decimal::ZERO
-                                            };
-
-                                            hedge_mtm_pnl = hedge_qty * (perp_exit_price - perp_entry_price);
-                                            funding_pnl = calculate_funding_pnl(
-                                                hedge_qty,
-                                                perp_start,
-                                                perp_end,
-                                                states_in_window_perp(perp_series, run.timestamp, window_end),
-                                            );
-                                        } else {
-                                            notes.push("Perp leverage is zero; no hedge applied".to_string());
-                                        }
-                                    } else {
-                                        notes.push("Perp entry oracle price is non-positive; no hedge applied".to_string());
-                                    }
-                                } else {
-                                    notes.push("Missing perp start/end state; hedge PnL set to zero".to_string());
-                                    warnings.push(format!(
-                                        "run_id={} market_id={} missing perp start/end state in window {} -> {}",
-                                        run.id,
-                                        target.market_id,
-                                        run.timestamp.to_rfc3339(),
-                                        window_end.to_rfc3339()
-                                    ));
-                                }
-                            } else {
-                                notes.push("No perp state series available; hedge PnL set to zero".to_string());
-                                warnings.push(format!(
-                                    "run_id={} market_id={} has no perp series for perp_id={}",
-                                    run.id,
-                                    target.market_id,
-                                    perp_id
-                                ));
-                            }
-                        } else {
-                            notes.push("No mapped dYdX perp; hedge PnL set to zero".to_string());
-                            warnings.push(format!(
-                                "run_id={} market_id={} long token {} has no dYdX perp mapping",
-                                run.id,
-                                target.market_id,
-                                ctx.long_token_symbol
-                            ));
-                        }
-                    }
-
-                    gm_qty = gm_capital / gm_entry_price;
-                    gm_pnl = gm_qty * (gm_exit_price - gm_entry_price);
-                } else {
-                    notes.push("GM entry price is non-positive; market package held as cash".to_string());
-                    warnings.push(format!(
-                        "run_id={} market_id={} has non-positive GM entry price at {}",
-                        run.id,
-                        target.market_id,
-                        run.timestamp.to_rfc3339()
-                    ));
-                }
-            } else {
-                notes.push("Missing market start/end state; market package held as cash".to_string());
-                warnings.push(format!(
-                    "run_id={} market_id={} missing market start/end state in window {} -> {}",
-                    run.id,
-                    target.market_id,
-                    run.timestamp.to_rfc3339(),
-                    window_end.to_rfc3339()
-                ));
-            }
-
-            let fee_attr = calculate_fee_attribution(
-                gm_qty,
-                states_in_window_market(market_series, run.timestamp, window_end),
+            let simulation = simulate_target_window(
+                run,
+                target,
+                window_end,
+                normalized_weight,
+                package_capital,
+                stable_short_hedge_fraction,
+                &market_contexts,
+                &market_state_series,
+                &perp_state_series,
             );
 
-            if gm_qty > Decimal::ZERO {
+            warnings.extend(simulation.warnings);
+
+            if simulation.active_market {
                 active_markets += 1;
             }
 
-            window_gm_pnl += gm_pnl;
-            window_hedge_mtm_pnl += hedge_mtm_pnl;
-            window_funding_pnl += funding_pnl;
-            window_fee_attr += fee_attr;
+            window_gm_pnl += simulation.gm_pnl_usd;
+            window_hedge_mtm_pnl += simulation.hedge_mtm_pnl_usd;
+            window_funding_pnl += simulation.funding_pnl_usd;
+            window_fee_attr += simulation.fee_attribution_usd;
 
-            let market_result = MarketWindowResult {
-                run_id: run.id,
-                strategy_version: run.strategy_version.clone(),
-                window_start: run.timestamp,
-                window_end,
-                market_id: target.market_id,
-                market_address: ctx.market_address.clone(),
-                market_display_name: ctx.display_name.clone(),
-                long_token_symbol: ctx.long_token_symbol.clone(),
-                short_token_symbol: ctx.short_token_symbol.clone(),
-                target_weight_raw: target.target_weight,
-                target_weight_normalized: normalized_weight,
-                package_capital_usd: package_capital,
-                hedge_exposure_fraction,
-                desired_hedge_notional_usd: desired_hedge_notional,
-                actual_hedge_notional_usd: actual_hedge_notional,
-                required_hedge_margin_usd: required_hedge_margin,
-                gm_capital_usd: gm_capital,
-                gm_entry_price,
-                gm_exit_price,
-                gm_token_quantity: gm_qty,
-                gm_pnl_usd: gm_pnl,
-                perp_ticker: perp_ticker.take(),
-                perp_entry_price,
-                perp_exit_price,
-                hedge_quantity: hedge_qty,
-                hedge_mtm_pnl_usd: hedge_mtm_pnl,
-                funding_pnl_usd: funding_pnl,
-                fee_attribution_usd: fee_attr,
-                notes: notes.join(" | "),
-            };
-
-            market_results.push(market_result);
+            if let Some(market_result) = simulation.market_result {
+                market_results.push(market_result);
+            }
         }
 
         let total_pnl = window_gm_pnl + window_hedge_mtm_pnl + window_funding_pnl;
@@ -816,6 +685,250 @@ fn build_market_contexts(
     }
 
     out
+}
+
+fn simulate_target_window(
+    run: &StrategyRunModel,
+    target: &StrategyTargetModel,
+    window_end: DateTime<Utc>,
+    normalized_weight: Decimal,
+    package_capital: Decimal,
+    stable_short_hedge_fraction: Decimal,
+    market_contexts: &HashMap<i32, MarketContext>,
+    market_state_series: &HashMap<i32, Vec<MarketStateModel>>,
+    perp_state_series: &HashMap<i32, Vec<DydxPerpStateModel>>,
+) -> TargetSimulation {
+    let Some(ctx) = market_contexts.get(&target.market_id) else {
+        return TargetSimulation::skipped_with_warning(format!(
+            "run_id={} market_id={} missing context; treating allocation as cash",
+            run.id, target.market_id
+        ));
+    };
+
+    let Some(market_series) = market_state_series.get(&target.market_id) else {
+        return TargetSimulation::skipped_with_warning(format!(
+            "run_id={} market_id={} has no market state series; treating allocation as cash",
+            run.id, target.market_id
+        ));
+    };
+
+    let mut notes = Vec::new();
+    let mut warnings = Vec::new();
+
+    let hedge_exposure_fraction = if ctx.short_is_stable {
+        stable_short_hedge_fraction
+    } else {
+        Decimal::ONE
+    };
+
+    let mut gm_entry_price = Decimal::ZERO;
+    let mut gm_exit_price = Decimal::ZERO;
+    let mut gm_qty = Decimal::ZERO;
+    let mut gm_pnl = Decimal::ZERO;
+
+    let mut hedge_result = default_hedge_result(package_capital, ctx.dydx_ticker.clone());
+
+    let start_market_state = latest_at_or_before_market(market_series, run.timestamp);
+    let end_market_state = latest_at_or_before_market(market_series, window_end);
+
+    if let (Some(start_state), Some(end_state)) = (start_market_state, end_market_state) {
+        gm_entry_price = start_state.gm_price_mid.unwrap_or(Decimal::ZERO);
+        gm_exit_price = end_state.gm_price_mid.unwrap_or(Decimal::ZERO);
+
+        if gm_entry_price > Decimal::ZERO {
+            if !ctx.long_is_stable {
+                let desired_hedge_notional = package_capital * hedge_exposure_fraction;
+                hedge_result = compute_hedge_result(
+                    run,
+                    target,
+                    window_end,
+                    package_capital,
+                    desired_hedge_notional,
+                    ctx,
+                    perp_state_series,
+                );
+                notes.extend(hedge_result.notes.iter().cloned());
+                warnings.extend(hedge_result.warnings.iter().cloned());
+            }
+
+            gm_qty = hedge_result.gm_capital_usd / gm_entry_price;
+            gm_pnl = gm_qty * (gm_exit_price - gm_entry_price);
+        } else {
+            notes.push("GM entry price is non-positive; market package held as cash".to_string());
+            warnings.push(format!(
+                "run_id={} market_id={} has non-positive GM entry price at {}",
+                run.id,
+                target.market_id,
+                run.timestamp.to_rfc3339()
+            ));
+        }
+    } else {
+        notes.push("Missing market start/end state; market package held as cash".to_string());
+        warnings.push(format!(
+            "run_id={} market_id={} missing market start/end state in window {} -> {}",
+            run.id,
+            target.market_id,
+            run.timestamp.to_rfc3339(),
+            window_end.to_rfc3339()
+        ));
+    }
+
+    let fee_attr = calculate_fee_attribution(
+        gm_qty,
+        states_in_window_market(market_series, run.timestamp, window_end),
+    );
+
+    let market_result = MarketWindowResult {
+        run_id: run.id,
+        strategy_version: run.strategy_version.clone(),
+        window_start: run.timestamp,
+        window_end,
+        market_id: target.market_id,
+        market_address: ctx.market_address.clone(),
+        market_display_name: ctx.display_name.clone(),
+        long_token_symbol: ctx.long_token_symbol.clone(),
+        short_token_symbol: ctx.short_token_symbol.clone(),
+        target_weight_raw: target.target_weight,
+        target_weight_normalized: normalized_weight,
+        package_capital_usd: package_capital,
+        hedge_exposure_fraction,
+        desired_hedge_notional_usd: hedge_result.desired_hedge_notional_usd,
+        actual_hedge_notional_usd: hedge_result.actual_hedge_notional_usd,
+        required_hedge_margin_usd: hedge_result.required_hedge_margin_usd,
+        gm_capital_usd: hedge_result.gm_capital_usd,
+        gm_entry_price,
+        gm_exit_price,
+        gm_token_quantity: gm_qty,
+        gm_pnl_usd: gm_pnl,
+        perp_ticker: hedge_result.perp_ticker,
+        perp_entry_price: hedge_result.perp_entry_price,
+        perp_exit_price: hedge_result.perp_exit_price,
+        hedge_quantity: hedge_result.hedge_quantity,
+        hedge_mtm_pnl_usd: hedge_result.hedge_mtm_pnl_usd,
+        funding_pnl_usd: hedge_result.funding_pnl_usd,
+        fee_attribution_usd: fee_attr,
+        notes: notes.join(" | "),
+    };
+
+    TargetSimulation {
+        market_result: Some(market_result),
+        gm_pnl_usd: gm_pnl,
+        hedge_mtm_pnl_usd: hedge_result.hedge_mtm_pnl_usd,
+        funding_pnl_usd: hedge_result.funding_pnl_usd,
+        fee_attribution_usd: fee_attr,
+        active_market: gm_qty > Decimal::ZERO,
+        warnings,
+    }
+}
+
+fn default_hedge_result(package_capital: Decimal, perp_ticker: Option<String>) -> HedgeResult {
+    HedgeResult {
+        desired_hedge_notional_usd: Decimal::ZERO,
+        actual_hedge_notional_usd: Decimal::ZERO,
+        required_hedge_margin_usd: Decimal::ZERO,
+        gm_capital_usd: package_capital,
+        perp_ticker,
+        perp_entry_price: Decimal::ZERO,
+        perp_exit_price: Decimal::ZERO,
+        hedge_quantity: Decimal::ZERO,
+        hedge_mtm_pnl_usd: Decimal::ZERO,
+        funding_pnl_usd: Decimal::ZERO,
+        notes: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+fn compute_hedge_result(
+    run: &StrategyRunModel,
+    target: &StrategyTargetModel,
+    window_end: DateTime<Utc>,
+    package_capital: Decimal,
+    desired_hedge_notional: Decimal,
+    ctx: &MarketContext,
+    perp_state_series: &HashMap<i32, Vec<DydxPerpStateModel>>,
+) -> HedgeResult {
+    let mut result = default_hedge_result(package_capital, ctx.dydx_ticker.clone());
+    result.desired_hedge_notional_usd = desired_hedge_notional;
+
+    let Some(perp_id) = ctx.dydx_perp_id else {
+        result
+            .notes
+            .push("No mapped dYdX perp; hedge PnL set to zero".to_string());
+        result.warnings.push(format!(
+            "run_id={} market_id={} long token {} has no dYdX perp mapping",
+            run.id, target.market_id, ctx.long_token_symbol
+        ));
+        return result;
+    };
+
+    let Some(perp_series) = perp_state_series.get(&perp_id) else {
+        result
+            .notes
+            .push("No perp state series available; hedge PnL set to zero".to_string());
+        result.warnings.push(format!(
+            "run_id={} market_id={} has no perp series for perp_id={}",
+            run.id, target.market_id, perp_id
+        ));
+        return result;
+    };
+
+    let start_perp_state = latest_at_or_before_perp(perp_series, run.timestamp);
+    let end_perp_state = latest_at_or_before_perp(perp_series, window_end);
+    let (Some(perp_start), Some(perp_end)) = (start_perp_state, end_perp_state) else {
+        result
+            .notes
+            .push("Missing perp start/end state; hedge PnL set to zero".to_string());
+        result.warnings.push(format!(
+            "run_id={} market_id={} missing perp start/end state in window {} -> {}",
+            run.id,
+            target.market_id,
+            run.timestamp.to_rfc3339(),
+            window_end.to_rfc3339()
+        ));
+        return result;
+    };
+
+    result.perp_entry_price = perp_start.oracle_price.unwrap_or(Decimal::ZERO);
+    result.perp_exit_price = perp_end.oracle_price.unwrap_or(Decimal::ZERO);
+    if result.perp_entry_price <= Decimal::ZERO {
+        result
+            .notes
+            .push("Perp entry oracle price is non-positive; no hedge applied".to_string());
+        return result;
+    }
+
+    let leverage = derive_effective_leverage(perp_start);
+    if leverage <= Decimal::ZERO {
+        result
+            .notes
+            .push("Perp leverage is zero; no hedge applied".to_string());
+        return result;
+    }
+
+    let desired_margin = desired_hedge_notional / leverage;
+    if desired_margin <= package_capital {
+        result.required_hedge_margin_usd = desired_margin;
+        result.actual_hedge_notional_usd = desired_hedge_notional;
+    } else {
+        result.required_hedge_margin_usd = package_capital;
+        result.actual_hedge_notional_usd = package_capital * leverage;
+        result.notes.push(format!(
+            "Required hedge margin exceeded package capital; capped hedge notional to {}",
+            result.actual_hedge_notional_usd
+        ));
+    }
+
+    result.gm_capital_usd = (package_capital - result.required_hedge_margin_usd).max(Decimal::ZERO);
+    result.hedge_quantity = -(result.actual_hedge_notional_usd / result.perp_entry_price);
+    result.hedge_mtm_pnl_usd = result.hedge_quantity * (result.perp_exit_price - result.perp_entry_price);
+    result.funding_pnl_usd = calculate_funding_pnl(
+        result.hedge_quantity,
+        perp_start,
+        perp_end,
+        states_in_window_perp(perp_series, run.timestamp, window_end),
+    );
+
+    result
 }
 
 fn latest_at_or_before_market(

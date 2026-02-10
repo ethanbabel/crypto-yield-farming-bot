@@ -21,6 +21,10 @@ name = "trading_bot"
 path = "src/bin/trading_bot.rs"
 
 [[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
+
+[[bin]]
 name = "main"   # For development and testing
 path = "src/bin/main.rs"
 

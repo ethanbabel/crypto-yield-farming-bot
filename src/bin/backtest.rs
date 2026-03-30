@@ -176,6 +176,7 @@ struct BacktestArtifacts {
 
 #[derive(Debug)]
 struct HedgeResult {
+    hedge_exposure_fraction: Decimal,
     desired_hedge_notional_usd: Decimal,
     actual_hedge_notional_usd: Decimal,
     required_hedge_margin_usd: Decimal,
@@ -362,7 +363,6 @@ async fn main() -> Result<()> {
 
     let mut window_results = Vec::new();
     let mut market_results = Vec::new();
-    let stable_short_hedge_fraction = Decimal::from_i32(1).unwrap() / Decimal::from_i32(2).unwrap();
     let total_windows = windows.len();
     let final_window_time = last_window_end;
     let mut next_progress_milestone_pct = 10usize;
@@ -432,7 +432,6 @@ async fn main() -> Result<()> {
                 window_end,
                 normalized_weight,
                 package_capital,
-                stable_short_hedge_fraction,
                 &market_contexts,
                 &market_state_series,
                 &perp_state_series,
@@ -778,7 +777,6 @@ fn simulate_target_window(
     window_end: DateTime<Utc>,
     normalized_weight: Decimal,
     package_capital: Decimal,
-    stable_short_hedge_fraction: Decimal,
     market_contexts: &HashMap<i32, MarketContext>,
     market_state_series: &HashMap<i32, Vec<MarketStateModel>>,
     perp_state_series: &HashMap<i32, Vec<DydxPerpStateModel>>,
@@ -801,12 +799,6 @@ fn simulate_target_window(
     let mut notes = Vec::new();
     let mut warnings = Vec::new();
 
-    let hedge_exposure_fraction = if ctx.short_is_stable {
-        stable_short_hedge_fraction
-    } else {
-        Decimal::ONE
-    };
-
     let mut gm_entry_price = Decimal::ZERO;
     let mut gm_exit_price = Decimal::ZERO;
     let mut gm_qty = Decimal::ZERO;
@@ -823,14 +815,13 @@ fn simulate_target_window(
 
         if gm_entry_price > Decimal::ZERO {
             if !ctx.long_is_stable {
-                let desired_hedge_notional = package_capital * hedge_exposure_fraction;
                 hedge_result = compute_hedge_result(
                     run,
                     target,
                     window_end,
                     package_capital,
-                    desired_hedge_notional,
                     ctx,
+                    start_state,
                     perp_state_series,
                 );
                 notes.extend(hedge_result.notes.iter().cloned());
@@ -894,7 +885,7 @@ fn simulate_target_window(
         target_weight_raw: target.target_weight,
         target_weight_normalized: normalized_weight,
         package_capital_usd: package_capital,
-        hedge_exposure_fraction,
+        hedge_exposure_fraction: hedge_result.hedge_exposure_fraction,
         desired_hedge_notional_usd: hedge_result.desired_hedge_notional_usd,
         actual_hedge_notional_usd: hedge_result.actual_hedge_notional_usd,
         required_hedge_margin_usd: hedge_result.required_hedge_margin_usd,
@@ -945,6 +936,7 @@ fn simulate_target_window(
 
 fn default_hedge_result(package_capital: Decimal, perp_ticker: Option<String>) -> HedgeResult {
     HedgeResult {
+        hedge_exposure_fraction: Decimal::ZERO,
         desired_hedge_notional_usd: Decimal::ZERO,
         actual_hedge_notional_usd: Decimal::ZERO,
         required_hedge_margin_usd: Decimal::ZERO,
@@ -965,12 +957,11 @@ fn compute_hedge_result(
     target: &StrategyTargetModel,
     window_end: DateTime<Utc>,
     package_capital: Decimal,
-    desired_hedge_notional: Decimal,
     ctx: &MarketContext,
+    start_market_state: &MarketStateModel,
     perp_state_series: &HashMap<i32, Vec<DydxPerpStateModel>>,
 ) -> HedgeResult {
     let mut result = default_hedge_result(package_capital, ctx.dydx_ticker.clone());
-    result.desired_hedge_notional_usd = desired_hedge_notional;
 
     let Some(perp_id) = ctx.dydx_perp_id else {
         result
@@ -1026,6 +1017,22 @@ fn compute_hedge_result(
             .push("Perp leverage is zero; no hedge applied".to_string());
         return result;
     }
+
+    let hedge_exposure_fraction = estimate_hedge_exposure_fraction(start_market_state, ctx);
+    result.hedge_exposure_fraction = hedge_exposure_fraction;
+    if hedge_exposure_fraction <= Decimal::ZERO {
+        result
+            .notes
+            .push("Estimated hedge exposure fraction is non-positive; no hedge applied".to_string());
+        return result;
+    }
+
+    let desired_hedge_notional = solve_desired_hedge_notional(
+        package_capital,
+        hedge_exposure_fraction,
+        leverage,
+    );
+    result.desired_hedge_notional_usd = desired_hedge_notional;
 
     let desired_margin = desired_hedge_notional / leverage;
     if desired_margin <= package_capital {
@@ -1258,6 +1265,52 @@ fn derive_effective_leverage(perp_state: &DydxPerpStateModel) -> Decimal {
         Decimal::ZERO
     } else {
         Decimal::ONE / denom
+    }
+}
+
+fn estimate_hedge_exposure_fraction(
+    start_market_state: &MarketStateModel,
+    ctx: &MarketContext,
+) -> Decimal {
+    let pool_long_usd = start_market_state.pool_long_token_usd.unwrap_or(Decimal::ZERO);
+    let pool_short_usd = start_market_state.pool_short_token_usd.unwrap_or(Decimal::ZERO);
+    let pool_impact_usd = start_market_state.pool_impact_token_usd.unwrap_or(Decimal::ZERO);
+    let pool_value_usd = pool_long_usd + pool_short_usd - pool_impact_usd;
+
+    if pool_value_usd <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+
+    let collateral_exposure_usd = if ctx.short_is_stable {
+        pool_long_usd
+    } else {
+        pool_long_usd + pool_short_usd
+    };
+
+    if collateral_exposure_usd <= Decimal::ZERO {
+        Decimal::ZERO
+    } else {
+        collateral_exposure_usd / pool_value_usd
+    }
+}
+
+fn solve_desired_hedge_notional(
+    package_capital: Decimal,
+    hedge_exposure_fraction: Decimal,
+    leverage: Decimal,
+) -> Decimal {
+    if package_capital <= Decimal::ZERO
+        || hedge_exposure_fraction <= Decimal::ZERO
+        || leverage <= Decimal::ZERO
+    {
+        return Decimal::ZERO;
+    }
+
+    let denom = leverage + hedge_exposure_fraction;
+    if denom <= Decimal::ZERO {
+        Decimal::ZERO
+    } else {
+        package_capital * hedge_exposure_fraction * leverage / denom
     }
 }
 
@@ -1540,7 +1593,7 @@ fn build_summary(
         end: args.end.map(|e| e.to_rfc3339()),
         initial_capital_usd: args.initial_capital.to_string(),
         fee_mode: "attribution_only".to_string(),
-        hedge_exposure_rule: "0.5_if_short_collateral_is_stable_else_1.0".to_string(),
+        hedge_exposure_rule: "estimated_from_entry_pool_collateral_composition".to_string(),
         hedge_leverage_rule: "max_leverage = 1 / (2 * max(initial_margin_fraction, maintenance_margin_fraction))".to_string(),
         funding_rate_unit: "hourly".to_string(),
         price_selection_rule: "latest_state_at_or_before_timestamp (UTC)".to_string(),

@@ -19,3 +19,6 @@
 # Ignore backtest output
 /backtest_output/*
 !/backtest_output/.gitkeep
+
+# Ignore Codex/LLM files
+.codex

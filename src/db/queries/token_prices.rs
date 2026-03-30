@@ -166,6 +166,78 @@ pub async fn get_token_prices_in_range_for_tokens(
     Ok(rows_to_token_price_map(rows))
 }
 
+/// Fetch token prices across selected tokens in a time range, excluding the start timestamp.
+pub async fn get_token_prices_in_range_for_tokens_exclusive_start(
+    pool: &PgPool,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    token_ids: &[i32],
+) -> Result<HashMap<i32, Vec<TokenPriceModel>>, sqlx::Error> {
+    if token_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, token_id, timestamp, min_price, max_price, mid_price
+        FROM token_prices
+        WHERE token_id = ANY($1)
+          AND timestamp > $2
+          AND timestamp <= $3
+        ORDER BY token_id, timestamp
+        "#,
+    )
+    .bind(token_ids)
+    .bind(start)
+    .bind(end)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows_to_token_price_map(rows))
+}
+
+/// Fetch the latest token price at or before a timestamp for each selected token.
+pub async fn get_latest_token_prices_at_or_before_for_tokens(
+    pool: &PgPool,
+    timestamp: DateTime<Utc>,
+    token_ids: &[i32],
+) -> Result<HashMap<i32, TokenPriceModel>, sqlx::Error> {
+    if token_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            tp.id, tp.token_id, tp.timestamp, tp.min_price, tp.max_price, tp.mid_price
+        FROM unnest($1::int[]) AS ids(token_id)
+        JOIN LATERAL (
+            SELECT id, token_id, timestamp, min_price, max_price, mid_price
+            FROM token_prices
+            WHERE token_id = ids.token_id
+              AND timestamp <= $2
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) tp ON true
+        ORDER BY tp.token_id
+        "#,
+    )
+    .bind(token_ids)
+    .bind(timestamp)
+    .fetch_all(pool)
+    .await?;
+
+    let grouped = rows_to_token_price_map(rows);
+    let mut out = HashMap::new();
+    for (token_id, mut prices) in grouped {
+        if let Some(price) = prices.pop() {
+            out.insert(token_id, price);
+        }
+    }
+
+    Ok(out)
+}
+
 /// Fetch the latest token price for a specific token
 pub async fn get_latest_token_price_for_token(
     pool: &PgPool,

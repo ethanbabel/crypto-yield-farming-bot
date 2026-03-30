@@ -1099,4 +1099,43 @@ impl DbManager {
 
         Ok(series)
     }
+
+    /// Fetch token price series for selected tokens, including the latest pre-start row for each token if available.
+    #[instrument(skip(self, token_ids))]
+    pub async fn get_token_price_series(
+        &self,
+        token_ids: &[i32],
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<HashMap<i32, Vec<TokenPriceModel>>, sqlx::Error> {
+        let mut series = token_prices_queries::get_token_prices_in_range_for_tokens_exclusive_start(
+            &self.pool,
+            start,
+            end,
+            token_ids,
+        )
+        .await?;
+
+        let mut pre_start_prices = token_prices_queries::get_latest_token_prices_at_or_before_for_tokens(
+            &self.pool,
+            start,
+            token_ids,
+        )
+        .await?;
+
+        for token_id in token_ids {
+            if let Some(pre_price) = pre_start_prices.remove(token_id) {
+                let entry = series.entry(*token_id).or_insert_with(Vec::new);
+                if entry
+                    .first()
+                    .map(|row| row.timestamp != pre_price.timestamp)
+                    .unwrap_or(true)
+                {
+                    entry.insert(0, pre_price);
+                }
+            }
+        }
+
+        Ok(series)
+    }
 }

@@ -17,6 +17,7 @@ use crypto_yield_farming_bot::db::models::market_states::MarketStateModel;
 use crypto_yield_farming_bot::db::models::markets::MarketModel;
 use crypto_yield_farming_bot::db::models::strategy_runs::StrategyRunModel;
 use crypto_yield_farming_bot::db::models::strategy_targets::StrategyTargetModel;
+use crypto_yield_farming_bot::db::models::token_prices::TokenPriceModel;
 use crypto_yield_farming_bot::db::models::tokens::TokenModel;
 use crypto_yield_farming_bot::hedging::hedge_utils;
 use crypto_yield_farming_bot::logging;
@@ -45,7 +46,9 @@ struct CliArgs {
 struct MarketContext {
     market_address: String,
     display_name: String,
+    long_token_id: i32,
     long_token_symbol: String,
+    short_token_id: i32,
     short_token_symbol: String,
     short_is_stable: bool,
     long_is_stable: bool,
@@ -83,6 +86,25 @@ struct MarketWindowResult {
     hedge_mtm_pnl_usd: Decimal,
     funding_pnl_usd: Decimal,
     fee_attribution_usd: Decimal,
+    long_token_entry_price_usd: Decimal,
+    long_token_exit_price_usd: Decimal,
+    long_token_return_pct: Decimal,
+    short_token_entry_price_usd: Decimal,
+    short_token_exit_price_usd: Decimal,
+    short_token_return_pct: Decimal,
+    gm_return_pct: Decimal,
+    perp_return_pct: Decimal,
+    entry_pool_value_usd: Decimal,
+    entry_pool_share: Decimal,
+    entry_long_token_amount_est: Decimal,
+    entry_short_token_amount_est: Decimal,
+    entry_long_token_exposure_usd_est: Decimal,
+    entry_short_token_exposure_usd_est: Decimal,
+    est_long_token_price_move_pnl_usd: Decimal,
+    est_short_token_price_move_pnl_usd: Decimal,
+    est_total_collateral_price_move_pnl_usd: Decimal,
+    long_token_price_move_plus_hedge_mtm_pnl_usd: Decimal,
+    gm_pnl_minus_est_collateral_price_move_pnl_usd: Decimal,
     notes: String,
 }
 
@@ -177,6 +199,29 @@ struct TargetSimulation {
     fee_attribution_usd: Decimal,
     active_market: bool,
     warnings: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct MarketDiagnostics {
+    long_token_entry_price_usd: Decimal,
+    long_token_exit_price_usd: Decimal,
+    long_token_return_pct: Decimal,
+    short_token_entry_price_usd: Decimal,
+    short_token_exit_price_usd: Decimal,
+    short_token_return_pct: Decimal,
+    gm_return_pct: Decimal,
+    perp_return_pct: Decimal,
+    entry_pool_value_usd: Decimal,
+    entry_pool_share: Decimal,
+    entry_long_token_amount_est: Decimal,
+    entry_short_token_amount_est: Decimal,
+    entry_long_token_exposure_usd_est: Decimal,
+    entry_short_token_exposure_usd_est: Decimal,
+    est_long_token_price_move_pnl_usd: Decimal,
+    est_short_token_price_move_pnl_usd: Decimal,
+    est_total_collateral_price_move_pnl_usd: Decimal,
+    long_token_price_move_plus_hedge_mtm_pnl_usd: Decimal,
+    gm_pnl_minus_est_collateral_price_move_pnl_usd: Decimal,
 }
 
 impl TargetSimulation {
@@ -299,10 +344,17 @@ async fn main() -> Result<()> {
         .filter_map(|ctx| ctx.dydx_perp_id)
         .collect();
 
+    let relevant_token_ids = collect_relevant_token_ids(&market_contexts);
+
     let perp_state_series = db_manager
         .get_dydx_perp_state_series(&relevant_perp_ids, first_window_start, last_window_end)
         .await
         .context("Failed to fetch dYdX perp state series")?;
+
+    let token_price_series = db_manager
+        .get_token_price_series(&relevant_token_ids, first_window_start, last_window_end)
+        .await
+        .context("Failed to fetch token price series")?;
 
     let mut current_nav = args.initial_capital;
     let mut nav_points = Vec::new();
@@ -384,6 +436,7 @@ async fn main() -> Result<()> {
                 &market_contexts,
                 &market_state_series,
                 &perp_state_series,
+                &token_price_series,
             );
 
             warnings.extend(simulation.warnings);
@@ -628,6 +681,17 @@ fn collect_relevant_market_ids(
     seen.into_iter().collect()
 }
 
+fn collect_relevant_token_ids(market_contexts: &HashMap<i32, MarketContext>) -> Vec<i32> {
+    let mut seen = std::collections::BTreeSet::new();
+
+    for ctx in market_contexts.values() {
+        seen.insert(ctx.long_token_id);
+        seen.insert(ctx.short_token_id);
+    }
+
+    seen.into_iter().collect()
+}
+
 fn build_market_contexts(
     market_ids: &[i32],
     market_map: &HashMap<i32, MarketModel>,
@@ -693,7 +757,9 @@ fn build_market_contexts(
             MarketContext {
                 market_address: market.address.clone(),
                 display_name,
+                long_token_id: long_token.id,
                 long_token_symbol: long_token.symbol.clone(),
+                short_token_id: short_token.id,
                 short_token_symbol: short_token.symbol.clone(),
                 short_is_stable,
                 long_is_stable,
@@ -716,6 +782,7 @@ fn simulate_target_window(
     market_contexts: &HashMap<i32, MarketContext>,
     market_state_series: &HashMap<i32, Vec<MarketStateModel>>,
     perp_state_series: &HashMap<i32, Vec<DydxPerpStateModel>>,
+    token_price_series: &HashMap<i32, Vec<TokenPriceModel>>,
 ) -> TargetSimulation {
     let Some(ctx) = market_contexts.get(&target.market_id) else {
         return TargetSimulation::skipped_with_warning(format!(
@@ -797,6 +864,23 @@ fn simulate_target_window(
         states_in_window_market(market_series, run.timestamp, window_end),
     );
 
+    let diagnostics = compute_market_diagnostics(
+        run,
+        target,
+        window_end,
+        ctx,
+        start_market_state,
+        end_market_state,
+        gm_qty,
+        gm_entry_price,
+        gm_exit_price,
+        gm_pnl,
+        &hedge_result,
+        token_price_series,
+        &mut notes,
+        &mut warnings,
+    );
+
     let market_result = MarketWindowResult {
         run_id: run.id,
         strategy_version: run.strategy_version.clone(),
@@ -826,6 +910,25 @@ fn simulate_target_window(
         hedge_mtm_pnl_usd: hedge_result.hedge_mtm_pnl_usd,
         funding_pnl_usd: hedge_result.funding_pnl_usd,
         fee_attribution_usd: fee_attr,
+        long_token_entry_price_usd: diagnostics.long_token_entry_price_usd,
+        long_token_exit_price_usd: diagnostics.long_token_exit_price_usd,
+        long_token_return_pct: diagnostics.long_token_return_pct,
+        short_token_entry_price_usd: diagnostics.short_token_entry_price_usd,
+        short_token_exit_price_usd: diagnostics.short_token_exit_price_usd,
+        short_token_return_pct: diagnostics.short_token_return_pct,
+        gm_return_pct: diagnostics.gm_return_pct,
+        perp_return_pct: diagnostics.perp_return_pct,
+        entry_pool_value_usd: diagnostics.entry_pool_value_usd,
+        entry_pool_share: diagnostics.entry_pool_share,
+        entry_long_token_amount_est: diagnostics.entry_long_token_amount_est,
+        entry_short_token_amount_est: diagnostics.entry_short_token_amount_est,
+        entry_long_token_exposure_usd_est: diagnostics.entry_long_token_exposure_usd_est,
+        entry_short_token_exposure_usd_est: diagnostics.entry_short_token_exposure_usd_est,
+        est_long_token_price_move_pnl_usd: diagnostics.est_long_token_price_move_pnl_usd,
+        est_short_token_price_move_pnl_usd: diagnostics.est_short_token_price_move_pnl_usd,
+        est_total_collateral_price_move_pnl_usd: diagnostics.est_total_collateral_price_move_pnl_usd,
+        long_token_price_move_plus_hedge_mtm_pnl_usd: diagnostics.long_token_price_move_plus_hedge_mtm_pnl_usd,
+        gm_pnl_minus_est_collateral_price_move_pnl_usd: diagnostics.gm_pnl_minus_est_collateral_price_move_pnl_usd,
         notes: notes.join(" | "),
     };
 
@@ -950,6 +1053,126 @@ fn compute_hedge_result(
     result
 }
 
+fn compute_market_diagnostics(
+    run: &StrategyRunModel,
+    target: &StrategyTargetModel,
+    window_end: DateTime<Utc>,
+    ctx: &MarketContext,
+    start_market_state: Option<&MarketStateModel>,
+    _end_market_state: Option<&MarketStateModel>,
+    gm_qty: Decimal,
+    gm_entry_price: Decimal,
+    gm_exit_price: Decimal,
+    gm_pnl: Decimal,
+    hedge_result: &HedgeResult,
+    token_price_series: &HashMap<i32, Vec<TokenPriceModel>>,
+    notes: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> MarketDiagnostics {
+    let mut diagnostics = MarketDiagnostics {
+        gm_return_pct: calculate_return_pct(gm_entry_price, gm_exit_price),
+        perp_return_pct: calculate_return_pct(hedge_result.perp_entry_price, hedge_result.perp_exit_price),
+        ..Default::default()
+    };
+
+    let long_token_series = token_price_series.get(&ctx.long_token_id);
+    let short_token_series = token_price_series.get(&ctx.short_token_id);
+
+    let long_token_start = long_token_series
+        .and_then(|rows| latest_at_or_before_token(rows, run.timestamp));
+    let long_token_end = long_token_series
+        .and_then(|rows| latest_at_or_before_token(rows, window_end));
+    let short_token_start = short_token_series
+        .and_then(|rows| latest_at_or_before_token(rows, run.timestamp));
+    let short_token_end = short_token_series
+        .and_then(|rows| latest_at_or_before_token(rows, window_end));
+
+    if let (Some(start), Some(end)) = (long_token_start, long_token_end) {
+        diagnostics.long_token_entry_price_usd = start.mid_price;
+        diagnostics.long_token_exit_price_usd = end.mid_price;
+        diagnostics.long_token_return_pct = calculate_return_pct(start.mid_price, end.mid_price);
+    } else if !ctx.long_is_stable {
+        notes.push("Missing long token spot diagnostics".to_string());
+        warnings.push(format!(
+            "run_id={} market_id={} missing long token spot diagnostics in window {} -> {}",
+            run.id,
+            target.market_id,
+            run.timestamp.to_rfc3339(),
+            window_end.to_rfc3339()
+        ));
+    }
+
+    if let (Some(start), Some(end)) = (short_token_start, short_token_end) {
+        diagnostics.short_token_entry_price_usd = start.mid_price;
+        diagnostics.short_token_exit_price_usd = end.mid_price;
+        diagnostics.short_token_return_pct = calculate_return_pct(start.mid_price, end.mid_price);
+    } else if !ctx.short_is_stable {
+        notes.push("Missing short token spot diagnostics".to_string());
+        warnings.push(format!(
+            "run_id={} market_id={} missing short token spot diagnostics in window {} -> {}",
+            run.id,
+            target.market_id,
+            run.timestamp.to_rfc3339(),
+            window_end.to_rfc3339()
+        ));
+    }
+
+    let Some(start_state) = start_market_state else {
+        return diagnostics;
+    };
+
+    if gm_qty <= Decimal::ZERO || gm_entry_price <= Decimal::ZERO {
+        return diagnostics;
+    }
+
+    let entry_pool_value = start_state.pool_long_token_usd.unwrap_or(Decimal::ZERO)
+        + start_state.pool_short_token_usd.unwrap_or(Decimal::ZERO)
+        - start_state.pool_impact_token_usd.unwrap_or(Decimal::ZERO);
+    if entry_pool_value <= Decimal::ZERO {
+        notes.push("Entry pool value unavailable for token-move diagnostics".to_string());
+        return diagnostics;
+    }
+
+    let entry_gm_value = gm_qty * gm_entry_price;
+    if entry_gm_value <= Decimal::ZERO {
+        return diagnostics;
+    }
+
+    diagnostics.entry_pool_value_usd = entry_pool_value;
+    diagnostics.entry_pool_share = entry_gm_value / entry_pool_value;
+    diagnostics.entry_long_token_amount_est =
+        diagnostics.entry_pool_share * start_state.pool_long_amount.unwrap_or(Decimal::ZERO);
+    diagnostics.entry_short_token_amount_est =
+        diagnostics.entry_pool_share * start_state.pool_short_amount.unwrap_or(Decimal::ZERO);
+    diagnostics.entry_long_token_exposure_usd_est =
+        diagnostics.entry_pool_share * start_state.pool_long_token_usd.unwrap_or(Decimal::ZERO);
+    diagnostics.entry_short_token_exposure_usd_est =
+        diagnostics.entry_pool_share * start_state.pool_short_token_usd.unwrap_or(Decimal::ZERO);
+
+    if diagnostics.long_token_entry_price_usd > Decimal::ZERO
+        && diagnostics.long_token_exit_price_usd > Decimal::ZERO
+    {
+        diagnostics.est_long_token_price_move_pnl_usd = diagnostics.entry_long_token_amount_est
+            * (diagnostics.long_token_exit_price_usd - diagnostics.long_token_entry_price_usd);
+    }
+
+    if diagnostics.short_token_entry_price_usd > Decimal::ZERO
+        && diagnostics.short_token_exit_price_usd > Decimal::ZERO
+    {
+        diagnostics.est_short_token_price_move_pnl_usd = diagnostics.entry_short_token_amount_est
+            * (diagnostics.short_token_exit_price_usd - diagnostics.short_token_entry_price_usd);
+    }
+
+    diagnostics.est_total_collateral_price_move_pnl_usd =
+        diagnostics.est_long_token_price_move_pnl_usd + diagnostics.est_short_token_price_move_pnl_usd;
+    diagnostics.long_token_price_move_plus_hedge_mtm_pnl_usd =
+        diagnostics.est_long_token_price_move_pnl_usd + hedge_result.hedge_mtm_pnl_usd;
+    diagnostics.gm_pnl_minus_est_collateral_price_move_pnl_usd =
+        gm_pnl - diagnostics.est_total_collateral_price_move_pnl_usd;
+
+    diagnostics
+}
+
 fn latest_at_or_before_market(
     rows: &[MarketStateModel],
     ts: DateTime<Utc>,
@@ -961,6 +1184,13 @@ fn latest_at_or_before_perp(
     rows: &[DydxPerpStateModel],
     ts: DateTime<Utc>,
 ) -> Option<&DydxPerpStateModel> {
+    latest_at_or_before_by(rows, ts, |row| row.timestamp)
+}
+
+fn latest_at_or_before_token(
+    rows: &[TokenPriceModel],
+    ts: DateTime<Utc>,
+) -> Option<&TokenPriceModel> {
     latest_at_or_before_by(rows, ts, |row| row.timestamp)
 }
 
@@ -1028,6 +1258,14 @@ fn derive_effective_leverage(perp_state: &DydxPerpStateModel) -> Decimal {
         Decimal::ZERO
     } else {
         Decimal::ONE / denom
+    }
+}
+
+fn calculate_return_pct(entry_price: Decimal, exit_price: Decimal) -> Decimal {
+    if entry_price <= Decimal::ZERO {
+        Decimal::ZERO
+    } else {
+        (exit_price / entry_price - Decimal::ONE) * Decimal::from_i32(100).unwrap()
     }
 }
 
@@ -1183,7 +1421,7 @@ fn write_windows_csv(path: &Path, rows: &[WindowResult]) -> Result<()> {
 fn write_market_windows_csv(path: &Path, rows: &[MarketWindowResult]) -> Result<()> {
     let mut out = String::new();
     out.push_str(
-        "run_id,strategy_version,window_start_utc,window_end_utc,market_id,market_address,market_display_name,long_token_symbol,short_token_symbol,target_weight_raw,target_weight_normalized,package_capital_usd,hedge_exposure_fraction,desired_hedge_notional_usd,actual_hedge_notional_usd,required_hedge_margin_usd,gm_capital_usd,gm_entry_price,gm_exit_price,gm_token_quantity,gm_pnl_usd,perp_ticker,perp_entry_price,perp_exit_price,hedge_quantity,hedge_mtm_pnl_usd,funding_pnl_usd,fee_attribution_usd,notes\n",
+        "run_id,strategy_version,window_start_utc,window_end_utc,market_id,market_address,market_display_name,long_token_symbol,short_token_symbol,target_weight_raw,target_weight_normalized,package_capital_usd,hedge_exposure_fraction,desired_hedge_notional_usd,actual_hedge_notional_usd,required_hedge_margin_usd,gm_capital_usd,gm_entry_price,gm_exit_price,gm_token_quantity,gm_pnl_usd,perp_ticker,perp_entry_price,perp_exit_price,hedge_quantity,hedge_mtm_pnl_usd,funding_pnl_usd,fee_attribution_usd,long_token_entry_price_usd,long_token_exit_price_usd,long_token_return_pct,short_token_entry_price_usd,short_token_exit_price_usd,short_token_return_pct,gm_return_pct,perp_return_pct,entry_pool_value_usd,entry_pool_share,entry_long_token_amount_est,entry_short_token_amount_est,entry_long_token_exposure_usd_est,entry_short_token_exposure_usd_est,est_long_token_price_move_pnl_usd,est_short_token_price_move_pnl_usd,est_total_collateral_price_move_pnl_usd,long_token_price_move_plus_hedge_mtm_pnl_usd,gm_pnl_minus_est_collateral_price_move_pnl_usd,notes\n",
     );
 
     for row in rows {
@@ -1216,6 +1454,25 @@ fn write_market_windows_csv(path: &Path, rows: &[MarketWindowResult]) -> Result<
             row.hedge_mtm_pnl_usd.to_string(),
             row.funding_pnl_usd.to_string(),
             row.fee_attribution_usd.to_string(),
+            row.long_token_entry_price_usd.to_string(),
+            row.long_token_exit_price_usd.to_string(),
+            row.long_token_return_pct.to_string(),
+            row.short_token_entry_price_usd.to_string(),
+            row.short_token_exit_price_usd.to_string(),
+            row.short_token_return_pct.to_string(),
+            row.gm_return_pct.to_string(),
+            row.perp_return_pct.to_string(),
+            row.entry_pool_value_usd.to_string(),
+            row.entry_pool_share.to_string(),
+            row.entry_long_token_amount_est.to_string(),
+            row.entry_short_token_amount_est.to_string(),
+            row.entry_long_token_exposure_usd_est.to_string(),
+            row.entry_short_token_exposure_usd_est.to_string(),
+            row.est_long_token_price_move_pnl_usd.to_string(),
+            row.est_short_token_price_move_pnl_usd.to_string(),
+            row.est_total_collateral_price_move_pnl_usd.to_string(),
+            row.long_token_price_move_plus_hedge_mtm_pnl_usd.to_string(),
+            row.gm_pnl_minus_est_collateral_price_move_pnl_usd.to_string(),
             row.notes.clone(),
         ];
         out.push_str(&csv_line(&cols));

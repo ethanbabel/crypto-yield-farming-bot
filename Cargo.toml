@@ -17,8 +17,8 @@ name = "strategy_runner"
 path = "src/bin/strategy_runner.rs"
 
 [[bin]]
-name = "trading_bot"
-path = "src/bin/trading_bot.rs"
+name = "executor"
+path = "src/bin/executor.rs"
 
 [[bin]]
 name = "backtest"

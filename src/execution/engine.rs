@@ -68,6 +68,16 @@ impl ExecutionEngine {
     }
 
     pub async fn run_once(&self, portfolio_data: &PortfolioData) -> Result<()> {
+        let strategy_run_id = self.record_strategy_run(portfolio_data).await?;
+        self.run_once_with_existing_strategy_run(portfolio_data, strategy_run_id)
+            .await
+    }
+
+    pub async fn run_once_with_existing_strategy_run(
+        &self,
+        portfolio_data: &PortfolioData,
+        strategy_run_id: i32,
+    ) -> Result<()> {
         let mut snapshot = self.build_snapshot().await?;
         let reserve_state = self
             .compute_reserve_state(portfolio_data, &snapshot)
@@ -77,12 +87,11 @@ impl ExecutionEngine {
             warn!(
                 total_value_usd = %snapshot.total_value_usd,
                 reserve_total = %reserve_state.reserve_total,
+                strategy_run_id,
                 "No investable capital after reserves; skipping"
             );
             return Ok(());
         }
-
-        let strategy_run_id = self.record_strategy_run(portfolio_data).await?;
 
         self.maybe_withdraw_dydx_excess(&snapshot, &reserve_state)
             .await?;
@@ -1148,7 +1157,6 @@ impl ExecutionEngine {
                 Some(token) => token,
                 None => continue,
             };
-
             if hedge_utils::STABLE_COINS.contains(&long_token.symbol.as_str()) {
                 continue;
             }

@@ -4,29 +4,6 @@ use chrono::{DateTime, Utc};
 use ethers::types::Address;
 use rust_decimal::Decimal;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionMode {
-    Paper,
-    Live,
-}
-
-impl ExecutionMode {
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value.to_lowercase().as_str() {
-            "paper" => Some(Self::Paper),
-            "live" => Some(Self::Live),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Paper => "paper",
-            Self::Live => "live",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct PortfolioSnapshot {
     pub timestamp: DateTime<Utc>,
@@ -35,9 +12,13 @@ pub struct PortfolioSnapshot {
     pub asset_balances: HashMap<Address, Decimal>,
     pub asset_values_usd: HashMap<Address, Decimal>,
     pub hedge_positions: HashMap<String, Decimal>,
+    pub dydx_main_usdc: Decimal,
+    pub dydx_subaccount_equity: Decimal,
+    pub dydx_free_collateral: Decimal,
     pub total_value_usd: Decimal,
     pub market_value_usd: Decimal,
     pub asset_value_usd: Decimal,
+    pub arbitrum_value_usd: Decimal,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +92,8 @@ pub struct RebalancePlan {
 pub struct PlannerConfig {
     pub min_weight_delta: Decimal,
     pub min_value_usd: Decimal,
+    pub reserve_pct: Decimal,
+    pub gas_reserve_pct: Decimal,
 }
 
 impl Default for PlannerConfig {
@@ -118,6 +101,20 @@ impl Default for PlannerConfig {
         Self {
             min_weight_delta: Decimal::new(1, 2),
             min_value_usd: Decimal::new(10, 0),
+            reserve_pct: Decimal::new(5, 2),
+            gas_reserve_pct: Decimal::new(1, 2),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReserveState {
+    pub reserve_total: Decimal,
+    pub investable_capital: Decimal,
+    pub required_margin: Decimal,
+    pub required_equity: Decimal,
+    pub required_free_collateral: Decimal,
+    pub upper_equity: Decimal,
+    pub gas_reserve_target_usd: Decimal,
+    pub gas_reserve_target_eth: Decimal,
 }

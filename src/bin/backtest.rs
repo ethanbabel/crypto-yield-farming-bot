@@ -23,6 +23,8 @@ use crypto_yield_farming_bot::hedging::hedge_utils;
 use crypto_yield_farming_bot::logging;
 use tracing::{info, warn};
 
+const BACKTEST_DATA_CHUNK_DAYS: i64 = 10;
+
 /*
 Usage:
 cargo run --bin backtest -- \
@@ -172,6 +174,21 @@ struct BacktestArtifacts {
     summary_json: PathBuf,
     windows_csv: PathBuf,
     market_windows_csv: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowChunk {
+    start_index: usize,
+    end_index_exclusive: usize,
+    data_start: DateTime<Utc>,
+    data_end: DateTime<Utc>,
+}
+
+#[derive(Debug, Default)]
+struct ChunkSeries {
+    market_state_series: HashMap<i32, Vec<MarketStateModel>>,
+    perp_state_series: HashMap<i32, Vec<DydxPerpStateModel>>,
+    token_price_series: HashMap<i32, Vec<TokenPriceModel>>,
 }
 
 #[derive(Debug)]
@@ -326,11 +343,6 @@ async fn main() -> Result<()> {
 
     let relevant_market_ids = collect_relevant_market_ids(&windows, &runs, &targets_by_run);
 
-    let market_state_series = db_manager
-        .get_market_state_series_for_markets(&relevant_market_ids, first_window_start, last_window_end)
-        .await
-        .context("Failed to fetch market state series")?;
-
     let market_contexts = build_market_contexts(
         &relevant_market_ids,
         &market_map,
@@ -340,22 +352,12 @@ async fn main() -> Result<()> {
         &mut warnings,
     );
 
-    let relevant_perp_ids: Vec<i32> = market_contexts
-        .values()
-        .filter_map(|ctx| ctx.dydx_perp_id)
-        .collect();
-
-    let relevant_token_ids = collect_relevant_token_ids(&market_contexts);
-
-    let perp_state_series = db_manager
-        .get_dydx_perp_state_series(&relevant_perp_ids, first_window_start, last_window_end)
-        .await
-        .context("Failed to fetch dYdX perp state series")?;
-
-    let token_price_series = db_manager
-        .get_token_price_series(&relevant_token_ids, first_window_start, last_window_end)
-        .await
-        .context("Failed to fetch token price series")?;
+    let window_chunks = build_window_chunks(&windows, &runs, BACKTEST_DATA_CHUNK_DAYS);
+    info!(
+        chunk_count = window_chunks.len(),
+        chunk_days = BACKTEST_DATA_CHUNK_DAYS,
+        "Built chronological backtest data chunks"
+    );
 
     let mut current_nav = args.initial_capital;
     let mut nav_points = Vec::new();
@@ -367,119 +369,167 @@ async fn main() -> Result<()> {
     let final_window_time = last_window_end;
     let mut next_progress_milestone_pct = 10usize;
 
-    for (window_idx, (run_index, window_end)) in windows.into_iter().enumerate() {
-        let cur_iteration_num = window_idx + 1;
-        let percentage_complete = (cur_iteration_num as f64 / total_windows as f64) * 100.0;
-        while next_progress_milestone_pct <= 100
-            && percentage_complete + f64::EPSILON >= next_progress_milestone_pct as f64
-        {
-            info!(
-                "Backtest progress: {:.1}% (window {} of {}) - current time: {}, final time: {}",
-                percentage_complete,
-                cur_iteration_num,
-                total_windows,
-                window_end.to_rfc3339(),
-                final_window_time.to_rfc3339()
-            );
-            next_progress_milestone_pct += 25;
-        }
+    for (chunk_idx, chunk) in window_chunks.iter().enumerate() {
+        let chunk_market_ids = collect_relevant_market_ids(
+            &windows[chunk.start_index..chunk.end_index_exclusive],
+            &runs,
+            &targets_by_run,
+        );
+        let chunk_perp_ids = collect_relevant_perp_ids(&chunk_market_ids, &market_contexts);
+        let chunk_token_ids = collect_relevant_token_ids_for_markets(&chunk_market_ids, &market_contexts);
 
-        let run = &runs[run_index];
-        let Some(run_targets) = targets_by_run.get(&run.id) else {
-            warnings.push(format!(
-                "run_id={} at {} has no strategy targets; skipping window",
-                run.id,
-                run.timestamp.to_rfc3339()
-            ));
-            continue;
-        };
+        info!(
+            chunk_num = chunk_idx + 1,
+            chunk_count = window_chunks.len(),
+            start_utc = %chunk.data_start.to_rfc3339(),
+            end_utc = %chunk.data_end.to_rfc3339(),
+            window_count = chunk.end_index_exclusive - chunk.start_index,
+            market_count = chunk_market_ids.len(),
+            perp_count = chunk_perp_ids.len(),
+            token_count = chunk_token_ids.len(),
+            "Loading backtest data chunk"
+        );
 
-        let start_nav = current_nav;
-        let mut window_gm_pnl = Decimal::ZERO;
-        let mut window_hedge_mtm_pnl = Decimal::ZERO;
-        let mut window_funding_pnl = Decimal::ZERO;
-        let mut window_fee_attr = Decimal::ZERO;
-        let mut active_markets = 0usize;
+        let chunk_series = load_chunk_series(
+            &db_manager,
+            chunk,
+            &chunk_market_ids,
+            &chunk_perp_ids,
+            &chunk_token_ids,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to fetch data chunk {} covering {} -> {}",
+                chunk_idx + 1,
+                chunk.data_start.to_rfc3339(),
+                chunk.data_end.to_rfc3339()
+            )
+        })?;
 
-        let positive_weight_sum: Decimal = run_targets
-            .iter()
-            .map(|t| t.target_weight.max(Decimal::ZERO))
-            .sum();
+        info!(
+            chunk_num = chunk_idx + 1,
+            market_state_rows = count_series_rows(&chunk_series.market_state_series),
+            perp_state_rows = count_series_rows(&chunk_series.perp_state_series),
+            token_price_rows = count_series_rows(&chunk_series.token_price_series),
+            "Loaded backtest data chunk"
+        );
 
-        if positive_weight_sum <= Decimal::ZERO {
-            warnings.push(format!(
-                "run_id={} at {} has non-positive total target weight; skipping window",
-                run.id,
-                run.timestamp.to_rfc3339()
-            ));
-            continue;
-        }
+        for window_idx in chunk.start_index..chunk.end_index_exclusive {
+            let (run_index, window_end) = windows[window_idx];
+            let cur_iteration_num = window_idx + 1;
+            let percentage_complete = (cur_iteration_num as f64 / total_windows as f64) * 100.0;
+            while next_progress_milestone_pct <= 100
+                && percentage_complete + f64::EPSILON >= next_progress_milestone_pct as f64
+            {
+                info!(
+                    "Backtest progress: {:.1}% (window {} of {}) - current time: {}, final time: {}",
+                    percentage_complete,
+                    cur_iteration_num,
+                    total_windows,
+                    window_end.to_rfc3339(),
+                    final_window_time.to_rfc3339()
+                );
+                next_progress_milestone_pct += 10;
+            }
 
-        for target in run_targets {
-            let raw_weight = target.target_weight.max(Decimal::ZERO);
-            let normalized_weight = if positive_weight_sum > Decimal::ZERO {
-                raw_weight / positive_weight_sum
+            let run = &runs[run_index];
+            let Some(run_targets) = targets_by_run.get(&run.id) else {
+                warnings.push(format!(
+                    "run_id={} at {} has no strategy targets; skipping window",
+                    run.id,
+                    run.timestamp.to_rfc3339()
+                ));
+                continue;
+            };
+
+            let start_nav = current_nav;
+            let mut window_gm_pnl = Decimal::ZERO;
+            let mut window_hedge_mtm_pnl = Decimal::ZERO;
+            let mut window_funding_pnl = Decimal::ZERO;
+            let mut window_fee_attr = Decimal::ZERO;
+            let mut active_markets = 0usize;
+
+            let positive_weight_sum: Decimal = run_targets
+                .iter()
+                .map(|t| t.target_weight.max(Decimal::ZERO))
+                .sum();
+
+            if positive_weight_sum <= Decimal::ZERO {
+                warnings.push(format!(
+                    "run_id={} at {} has non-positive total target weight; skipping window",
+                    run.id,
+                    run.timestamp.to_rfc3339()
+                ));
+                continue;
+            }
+
+            for target in run_targets {
+                let raw_weight = target.target_weight.max(Decimal::ZERO);
+                let normalized_weight = if positive_weight_sum > Decimal::ZERO {
+                    raw_weight / positive_weight_sum
+                } else {
+                    Decimal::ZERO
+                };
+                let package_capital = start_nav * normalized_weight;
+                if package_capital <= Decimal::ZERO {
+                    continue;
+                }
+                let simulation = simulate_target_window(
+                    run,
+                    target,
+                    window_end,
+                    normalized_weight,
+                    package_capital,
+                    &market_contexts,
+                    &chunk_series.market_state_series,
+                    &chunk_series.perp_state_series,
+                    &chunk_series.token_price_series,
+                );
+
+                warnings.extend(simulation.warnings);
+
+                if simulation.active_market {
+                    active_markets += 1;
+                }
+
+                window_gm_pnl += simulation.gm_pnl_usd;
+                window_hedge_mtm_pnl += simulation.hedge_mtm_pnl_usd;
+                window_funding_pnl += simulation.funding_pnl_usd;
+                window_fee_attr += simulation.fee_attribution_usd;
+
+                if let Some(market_result) = simulation.market_result {
+                    market_results.push(market_result);
+                }
+            }
+
+            let total_pnl = window_gm_pnl + window_hedge_mtm_pnl + window_funding_pnl;
+            current_nav = (current_nav + total_pnl).max(Decimal::ZERO);
+
+            let window_return_pct = if start_nav > Decimal::ZERO {
+                (current_nav / start_nav - Decimal::ONE) * Decimal::from_i32(100).unwrap()
             } else {
                 Decimal::ZERO
             };
-            let package_capital = start_nav * normalized_weight;
-            if package_capital <= Decimal::ZERO {
-                continue;
-            }
-            let simulation = simulate_target_window(
-                run,
-                target,
+
+            window_results.push(WindowResult {
+                run_id: run.id,
+                strategy_version: run.strategy_version.clone(),
+                window_start: run.timestamp,
                 window_end,
-                normalized_weight,
-                package_capital,
-                &market_contexts,
-                &market_state_series,
-                &perp_state_series,
-                &token_price_series,
-            );
+                start_nav_usd: start_nav,
+                end_nav_usd: current_nav,
+                gm_pnl_usd: window_gm_pnl,
+                hedge_mtm_pnl_usd: window_hedge_mtm_pnl,
+                funding_pnl_usd: window_funding_pnl,
+                fee_attribution_usd: window_fee_attr,
+                window_return_pct,
+                active_market_count: active_markets,
+                target_count: run_targets.len(),
+            });
 
-            warnings.extend(simulation.warnings);
-
-            if simulation.active_market {
-                active_markets += 1;
-            }
-
-            window_gm_pnl += simulation.gm_pnl_usd;
-            window_hedge_mtm_pnl += simulation.hedge_mtm_pnl_usd;
-            window_funding_pnl += simulation.funding_pnl_usd;
-            window_fee_attr += simulation.fee_attribution_usd;
-
-            if let Some(market_result) = simulation.market_result {
-                market_results.push(market_result);
-            }
+            nav_points.push((window_end, current_nav));
         }
-
-        let total_pnl = window_gm_pnl + window_hedge_mtm_pnl + window_funding_pnl;
-        current_nav = (current_nav + total_pnl).max(Decimal::ZERO);
-
-        let window_return_pct = if start_nav > Decimal::ZERO {
-            (current_nav / start_nav - Decimal::ONE) * Decimal::from_i32(100).unwrap()
-        } else {
-            Decimal::ZERO
-        };
-
-        window_results.push(WindowResult {
-            run_id: run.id,
-            strategy_version: run.strategy_version.clone(),
-            window_start: run.timestamp,
-            window_end,
-            start_nav_usd: start_nav,
-            end_nav_usd: current_nav,
-            gm_pnl_usd: window_gm_pnl,
-            hedge_mtm_pnl_usd: window_hedge_mtm_pnl,
-            funding_pnl_usd: window_funding_pnl,
-            fee_attribution_usd: window_fee_attr,
-            window_return_pct,
-            active_market_count: active_markets,
-            target_count: run_targets.len(),
-        });
-
-        nav_points.push((window_end, current_nav));
     }
 
     if window_results.is_empty() {
@@ -680,15 +730,112 @@ fn collect_relevant_market_ids(
     seen.into_iter().collect()
 }
 
-fn collect_relevant_token_ids(market_contexts: &HashMap<i32, MarketContext>) -> Vec<i32> {
+fn collect_relevant_token_ids_for_markets(
+    market_ids: &[i32],
+    market_contexts: &HashMap<i32, MarketContext>,
+) -> Vec<i32> {
     let mut seen = std::collections::BTreeSet::new();
 
-    for ctx in market_contexts.values() {
-        seen.insert(ctx.long_token_id);
-        seen.insert(ctx.short_token_id);
+    for market_id in market_ids {
+        if let Some(ctx) = market_contexts.get(market_id) {
+            seen.insert(ctx.long_token_id);
+            seen.insert(ctx.short_token_id);
+        }
     }
 
     seen.into_iter().collect()
+}
+
+fn collect_relevant_perp_ids(
+    market_ids: &[i32],
+    market_contexts: &HashMap<i32, MarketContext>,
+) -> Vec<i32> {
+    let mut seen = std::collections::BTreeSet::new();
+
+    for market_id in market_ids {
+        if let Some(ctx) = market_contexts.get(market_id) {
+            if let Some(perp_id) = ctx.dydx_perp_id {
+                seen.insert(perp_id);
+            }
+        }
+    }
+
+    seen.into_iter().collect()
+}
+
+fn build_window_chunks(
+    windows: &[(usize, DateTime<Utc>)],
+    runs: &[StrategyRunModel],
+    chunk_days: i64,
+) -> Vec<WindowChunk> {
+    if windows.is_empty() {
+        return Vec::new();
+    }
+
+    let chunk_span = chrono::Duration::days(chunk_days.max(1));
+    let mut out = Vec::new();
+    let mut start_index = 0usize;
+
+    while start_index < windows.len() {
+        let data_start = runs[windows[start_index].0].timestamp;
+        let chunk_boundary = data_start + chunk_span;
+        let mut end_index_exclusive = start_index + 1;
+        let mut data_end = windows[start_index].1;
+
+        while end_index_exclusive < windows.len() {
+            let next_window_start = runs[windows[end_index_exclusive].0].timestamp;
+            if next_window_start >= chunk_boundary {
+                break;
+            }
+
+            data_end = windows[end_index_exclusive].1;
+            end_index_exclusive += 1;
+        }
+
+        out.push(WindowChunk {
+            start_index,
+            end_index_exclusive,
+            data_start,
+            data_end,
+        });
+
+        start_index = end_index_exclusive;
+    }
+
+    out
+}
+
+async fn load_chunk_series(
+    db_manager: &DbManager,
+    chunk: &WindowChunk,
+    market_ids: &[i32],
+    perp_ids: &[i32],
+    token_ids: &[i32],
+) -> Result<ChunkSeries> {
+    let market_state_series = db_manager
+        .get_market_state_series_for_markets(market_ids, chunk.data_start, chunk.data_end)
+        .await
+        .context("Failed to fetch market state series for chunk")?;
+
+    let perp_state_series = db_manager
+        .get_dydx_perp_state_series(perp_ids, chunk.data_start, chunk.data_end)
+        .await
+        .context("Failed to fetch dYdX perp state series for chunk")?;
+
+    let token_price_series = db_manager
+        .get_token_price_series(token_ids, chunk.data_start, chunk.data_end)
+        .await
+        .context("Failed to fetch token price series for chunk")?;
+
+    Ok(ChunkSeries {
+        market_state_series,
+        perp_state_series,
+        token_price_series,
+    })
+}
+
+fn count_series_rows<T>(series: &HashMap<i32, Vec<T>>) -> usize {
+    series.values().map(Vec::len).sum()
 }
 
 fn build_market_contexts(

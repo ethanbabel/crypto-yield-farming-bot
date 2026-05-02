@@ -78,9 +78,11 @@ impl ExecutionEngine {
         portfolio_data: &PortfolioData,
         strategy_run_id: i32,
     ) -> Result<()> {
+        let target_weights = compute_target_weights(portfolio_data);
         let mut snapshot = self.build_snapshot().await?;
+        let token_hedgeinfo_map = self.fetch_token_hedgeinfo_map().await;
         let reserve_state = self
-            .compute_reserve_state(portfolio_data, &snapshot)
+            .compute_reserve_state(&target_weights, &snapshot, &token_hedgeinfo_map)
             .await?;
 
         if reserve_state.investable_capital <= Decimal::ZERO {
@@ -93,15 +95,20 @@ impl ExecutionEngine {
             return Ok(());
         }
 
-        self.maybe_withdraw_dydx_excess(&snapshot, &reserve_state)
-            .await?;
-        snapshot = self.build_snapshot().await?;
+        if self
+            .maybe_withdraw_dydx_excess(&snapshot, &reserve_state)
+            .await?
+        {
+            snapshot = self.build_snapshot().await?;
+        }
 
-        self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
-            .await?;
-        snapshot = self.build_snapshot().await?;
+        if self
+            .ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
+            .await?
+        {
+            snapshot = self.build_snapshot().await?;
+        }
 
-        let target_weights = compute_target_weights(portfolio_data);
         let target_values =
             compute_target_values(&target_weights, reserve_state.investable_capital);
 
@@ -114,48 +121,57 @@ impl ExecutionEngine {
 
         // Stage 1: Shifts
         let (shift_actions, _) = plan_shift_actions(&deltas, &self.wallet_manager);
-        self.execute_actions(&shift_actions, strategy_run_id).await;
-
-        snapshot = self.build_snapshot().await?;
-        deltas = compute_market_deltas(
-            &snapshot,
-            &target_values,
-            &self.wallet_manager,
-            &self.planner_config,
-        );
+        if self.execute_actions(&shift_actions, strategy_run_id).await {
+            snapshot = self.build_snapshot().await?;
+            deltas = compute_market_deltas(
+                &snapshot,
+                &target_values,
+                &self.wallet_manager,
+                &self.planner_config,
+            );
+        }
 
         // Stage 2: Withdrawals
         let withdraw_actions = self.build_withdraw_actions(&snapshot, &deltas);
-        self.execute_actions(&withdraw_actions, strategy_run_id)
-            .await;
-
-        snapshot = self.build_snapshot().await?;
-        self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
-            .await?;
-        snapshot = self.build_snapshot().await?;
-        deltas = compute_market_deltas(
-            &snapshot,
-            &target_values,
-            &self.wallet_manager,
-            &self.planner_config,
-        );
+        let withdrew = self.execute_actions(&withdraw_actions, strategy_run_id).await;
+        let gas_rebalanced = if withdrew {
+            snapshot = self.build_snapshot().await?;
+            self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
+                .await?
+        } else {
+            self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
+                .await?
+        };
+        if withdrew || gas_rebalanced {
+            snapshot = self.build_snapshot().await?;
+            deltas = compute_market_deltas(
+                &snapshot,
+                &target_values,
+                &self.wallet_manager,
+                &self.planner_config,
+            );
+        }
 
         // Stage 3: Deposits + cleanup swaps
-        self.execute_deposit_stage(&snapshot, &deltas, strategy_run_id)
-            .await?;
-
-        snapshot = self.build_snapshot().await?;
+        if self
+            .execute_deposit_stage(&snapshot, &deltas, strategy_run_id)
+            .await?
+        {
+            snapshot = self.build_snapshot().await?;
+        }
 
         // Stage 4: dYdX reserve management
-        self.manage_dydx_reserves(&snapshot, &reserve_state).await?;
+        let reserves_changed = self.manage_dydx_reserves(&snapshot, &reserve_state).await?;
 
         // Stage 5: Hedge adjustments
-        let hedge_actions = self
-            .build_hedge_actions(portfolio_data, &snapshot, &target_weights)
-            .await?;
-        self.execute_actions(&hedge_actions, strategy_run_id).await;
+        let hedge_actions = self.build_hedge_actions(&snapshot, &target_weights).await?;
+        let hedges_changed = self.execute_actions(&hedge_actions, strategy_run_id).await;
 
-        let post_snapshot = self.build_snapshot().await?;
+        let post_snapshot = if reserves_changed || hedges_changed {
+            self.build_snapshot().await?
+        } else {
+            snapshot
+        };
         self.record_snapshot(&post_snapshot).await?;
 
         Ok(())
@@ -165,37 +181,48 @@ impl ExecutionEngine {
         &self,
         snapshot: &PortfolioSnapshot,
         reserve_state: &ReserveState,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let excess_equity = snapshot.dydx_subaccount_equity - reserve_state.required_equity;
         let excess_free = snapshot.dydx_free_collateral - reserve_state.required_free_collateral;
         let excess = excess_equity.min(excess_free);
         let shortfall = reserve_state.investable_capital - snapshot.arbitrum_value_usd;
         if excess <= Decimal::ZERO || shortfall <= self.planner_config.min_value_usd {
-            return Ok(());
+            return Ok(false);
         }
 
         let amount = excess.min(shortfall);
         if amount <= self.planner_config.min_value_usd {
-            return Ok(());
+            return Ok(false);
         }
 
         let mut client = self.dydx_client.lock().await;
         if let Err(e) = client.withdraw_from_subaccount(amount).await {
             warn!(error = ?e, "Failed to move funds from subaccount for deployment");
-            return Ok(());
+            return Ok(false);
         }
         if let Err(e) = client.dydx_withdrawal(Some(amount), None, true, None).await {
             warn!(error = ?e, "Failed to withdraw dYdX excess for deployment");
+            Ok(false)
         } else {
             info!(amount = %amount, "Withdrawing dYdX excess for deployment");
+            Ok(true)
         }
-
-        Ok(())
     }
 
     async fn build_snapshot(&self) -> Result<PortfolioSnapshot> {
-        let market_balances = self.wallet_manager.get_market_token_balances().await?;
-        let asset_balances = self.wallet_manager.get_asset_token_balances().await?;
+        let all_balances = self.wallet_manager.get_all_token_balances().await?;
+        let native_balance = self.wallet_manager.get_native_balance().await?;
+        let mut market_balances = HashMap::new();
+        let mut asset_balances = HashMap::new();
+
+        for (address, balance) in all_balances.into_iter() {
+            if self.wallet_manager.market_tokens.contains_key(&address) {
+                market_balances.insert(address, balance);
+            }
+            if self.wallet_manager.asset_tokens.contains_key(&address) {
+                asset_balances.insert(address, balance);
+            }
+        }
 
         let mut market_values_usd = HashMap::new();
         let mut asset_values_usd = HashMap::new();
@@ -230,27 +257,8 @@ impl ExecutionEngine {
             asset_value_usd += value;
         }
 
-        let hedge_positions = {
-            let client = self.dydx_client.lock().await;
-            client
-                .get_dydx_subaccount_perp_positions()
-                .await
-                .unwrap_or_default()
-        };
-
-        let (dydx_main_usdc, dydx_subaccount_equity, dydx_free_collateral) = {
-            let mut client = self.dydx_client.lock().await;
-            let main = client
-                .get_dydx_usdc_balance()
-                .await
-                .unwrap_or(Decimal::ZERO);
-            let summary = client.get_subaccount_summary().await;
-            let (equity, free_collateral) = match summary {
-                Ok(summary) => (summary.equity, summary.free_collateral),
-                Err(_) => (Decimal::ZERO, Decimal::ZERO),
-            };
-            (main, equity, free_collateral)
-        };
+        let (hedge_positions, dydx_main_usdc, dydx_subaccount_equity, dydx_free_collateral) =
+            self.fetch_dydx_snapshot_state().await;
 
         let arbitrum_value_usd = market_value_usd + asset_value_usd;
         let total_value_usd = arbitrum_value_usd + dydx_main_usdc + dydx_subaccount_equity;
@@ -262,6 +270,7 @@ impl ExecutionEngine {
             asset_balances,
             asset_values_usd,
             hedge_positions,
+            native_balance,
             dydx_main_usdc,
             dydx_subaccount_equity,
             dydx_free_collateral,
@@ -274,8 +283,9 @@ impl ExecutionEngine {
 
     async fn compute_reserve_state(
         &self,
-        portfolio_data: &PortfolioData,
+        target_weights: &HashMap<Address, Decimal>,
         snapshot: &PortfolioSnapshot,
+        token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
     ) -> Result<ReserveState> {
         let total_value = snapshot.total_value_usd;
         let mut investable = Decimal::ZERO;
@@ -283,13 +293,20 @@ impl ExecutionEngine {
         let mut required_equity = Decimal::ZERO;
         let mut required_free_collateral = Decimal::ZERO;
         let mut reserve_total = Decimal::ZERO;
+        let mut deposit_token_cache = HashMap::new();
 
         let iterations = 2;
         for _ in 0..iterations {
             let base_reserve = total_value * self.planner_config.reserve_pct;
             investable = (total_value - base_reserve).max(Decimal::ZERO);
             let reserve_req = self
-                .compute_required_dydx_reserve(portfolio_data, snapshot, investable)
+                .compute_required_dydx_reserve(
+                    target_weights,
+                    snapshot,
+                    investable,
+                    token_hedgeinfo_map,
+                    &mut deposit_token_cache,
+                )
                 .await?;
             required_margin = reserve_req.0;
             required_equity = reserve_req.1;
@@ -321,25 +338,21 @@ impl ExecutionEngine {
 
     async fn compute_required_dydx_reserve(
         &self,
-        portfolio_data: &PortfolioData,
+        target_weights: &HashMap<Address, Decimal>,
         snapshot: &PortfolioSnapshot,
         investable_capital: Decimal,
+        token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
+        deposit_token_cache: &mut HashMap<Address, TokenInfo>,
     ) -> Result<(Decimal, Decimal, Decimal)> {
         if investable_capital <= Decimal::ZERO {
             return Ok((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
         }
 
-        let token_hedgeinfo_map = {
-            let client = self.dydx_client.lock().await;
-            client.get_token_hedgeinfo_map().await.unwrap_or_default()
-        };
-
         let mut required_margin = Decimal::ZERO;
         let mut min_leverage = None::<Decimal>;
-        let target_weights = compute_target_weights(portfolio_data);
         let base_stable = self.get_preferred_stable_token(&snapshot.asset_balances);
 
-        for market in portfolio_data.market_addresses.iter() {
+        for market in target_weights.keys() {
             let market_info = match self.wallet_manager.market_tokens.get(market) {
                 Some(info) => info,
                 None => continue,
@@ -372,13 +385,21 @@ impl ExecutionEngine {
                 continue;
             }
 
-            let hedge_notional = match self
-                .estimate_target_hedge_notional_usd(
+            let deposit_token = match self
+                .select_deposit_token_with_fallback_cached(
                     *market,
-                    target_value,
                     base_stable.as_ref(),
                     &snapshot.asset_balances,
+                    deposit_token_cache,
                 )
+                .await?
+            {
+                Some(token) => token,
+                None => continue,
+            };
+
+            let hedge_notional = match self
+                .estimate_target_hedge_notional_usd(*market, target_value, &deposit_token)
                 .await?
             {
                 Some(notional) => notional,
@@ -412,8 +433,7 @@ impl ExecutionEngine {
         &self,
         market: Address,
         target_value_usd: Decimal,
-        base_stable: Option<&TokenInfo>,
-        balances: &HashMap<Address, Decimal>,
+        deposit_token: &TokenInfo,
     ) -> Result<Option<Decimal>> {
         if target_value_usd <= Decimal::ZERO {
             return Ok(None);
@@ -443,26 +463,6 @@ impl ExecutionEngine {
         if hedge_utils::STABLE_COINS.contains(&long_token.symbol.as_str()) {
             return Ok(None);
         }
-
-        let deposit_token = match base_stable {
-            Some(base_stable) => self
-                .select_deposit_token(market, base_stable, balances)
-                .await?
-                .unwrap_or_else(|| {
-                    if hedge_utils::STABLE_COINS.contains(&short_token.symbol.as_str()) {
-                        short_token.clone()
-                    } else {
-                        long_token.clone()
-                    }
-                }),
-            None => {
-                if hedge_utils::STABLE_COINS.contains(&short_token.symbol.as_str()) {
-                    short_token.clone()
-                } else {
-                    long_token.clone()
-                }
-            }
-        };
 
         if deposit_token.last_mid_price_usd <= Decimal::ZERO {
             return Ok(None);
@@ -529,20 +529,53 @@ impl ExecutionEngine {
         }
     }
 
+    async fn fetch_token_hedgeinfo_map(&self) -> HashMap<String, Option<(Decimal, Decimal)>> {
+        let client = self.dydx_client.lock().await;
+        client.get_token_hedgeinfo_map().await.unwrap_or_default()
+    }
+
+    async fn fetch_dydx_snapshot_state(
+        &self,
+    ) -> (
+        HashMap<String, Decimal>,
+        Decimal,
+        Decimal,
+        Decimal,
+    ) {
+        let mut client = self.dydx_client.lock().await;
+        let hedge_positions = client
+            .get_dydx_subaccount_perp_positions()
+            .await
+            .unwrap_or_default();
+        let dydx_main_usdc = client.get_dydx_usdc_balance().await.unwrap_or(Decimal::ZERO);
+        let summary = client.get_subaccount_summary().await;
+        let (dydx_subaccount_equity, dydx_free_collateral) = match summary {
+            Ok(summary) => (summary.equity, summary.free_collateral),
+            Err(_) => (Decimal::ZERO, Decimal::ZERO),
+        };
+        (
+            hedge_positions,
+            dydx_main_usdc,
+            dydx_subaccount_equity,
+            dydx_free_collateral,
+        )
+    }
+
     async fn ensure_gas_reserve(
         &self,
         snapshot: &PortfolioSnapshot,
         reserve_state: &ReserveState,
         strategy_run_id: i32,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let target_eth = reserve_state.gas_reserve_target_eth;
         if target_eth <= Decimal::ZERO {
-            return Ok(());
+            return Ok(false);
         }
 
-        let current_eth = self.wallet_manager.get_native_balance().await?;
+        let current_eth = snapshot.native_balance;
         let native_price = self.wallet_manager.native_token.last_mid_price_usd;
         let threshold_usd = self.planner_config.min_value_usd;
+        let mut changed = false;
 
         if current_eth < target_eth {
             let mut needed = target_eth - current_eth;
@@ -556,8 +589,7 @@ impl ExecutionEngine {
                     amount: unwrap_amount,
                     side: "SELL".to_string(),
                 };
-                let status = self.execute_action(&action).await;
-                self.log_trade(strategy_run_id, &action, status).await.ok();
+                changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                 needed = (needed - unwrap_amount).max(Decimal::ZERO);
             }
 
@@ -598,7 +630,7 @@ impl ExecutionEngine {
                                     warn!(
                                         "Triggered dYdX withdrawal for gas reserve; skipping ETH top-up this cycle"
                                     );
-                                    return Ok(());
+                                    return Ok(true);
                                 }
                             }
                         }
@@ -610,8 +642,7 @@ impl ExecutionEngine {
                         amount: needed,
                         side: "BUY".to_string(),
                     };
-                    let status = self.execute_action(&action).await;
-                    self.log_trade(strategy_run_id, &action, status).await.ok();
+                    changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                 }
             }
         } else {
@@ -626,13 +657,12 @@ impl ExecutionEngine {
                         amount: excess,
                         side: "SELL".to_string(),
                     };
-                    let status = self.execute_action(&action).await;
-                    self.log_trade(strategy_run_id, &action, status).await.ok();
+                    changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                 }
             }
         }
 
-        Ok(())
+        Ok(changed)
     }
 
     fn build_withdraw_actions(
@@ -666,7 +696,7 @@ impl ExecutionEngine {
         snapshot: &PortfolioSnapshot,
         deltas: &HashMap<Address, Decimal>,
         strategy_run_id: i32,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut deposit_targets: Vec<(Address, Decimal)> = deltas
             .iter()
             .filter_map(|(market, delta)| {
@@ -679,36 +709,48 @@ impl ExecutionEngine {
             .collect();
 
         if deposit_targets.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let base_stable = match self.get_preferred_stable_token(&snapshot.asset_balances) {
             Some(token) => token,
             None => {
                 warn!("No stable token available for deposits");
-                return Ok(());
+                return Ok(false);
             }
         };
 
         let mut preferred_tokens = HashSet::new();
+        let mut deposit_token_cache = HashMap::new();
         for (market, _) in deposit_targets.iter() {
             if let Some(token) = self
-                .select_deposit_token(*market, &base_stable, &snapshot.asset_balances)
+                .select_deposit_token_with_fallback_cached(
+                    *market,
+                    Some(&base_stable),
+                    &snapshot.asset_balances,
+                    &mut deposit_token_cache,
+                )
                 .await?
             {
                 preferred_tokens.insert(token.address);
             }
         }
 
-        self.cleanup_idle_tokens(
-            &snapshot.asset_balances,
-            &preferred_tokens,
-            &base_stable,
-            strategy_run_id,
-        )
-        .await;
+        let cleaned = self
+            .cleanup_idle_tokens(
+                &snapshot.asset_balances,
+                &preferred_tokens,
+                &base_stable,
+                strategy_run_id,
+            )
+            .await;
 
-        let mut refreshed = self.build_snapshot().await?;
+        let mut refreshed = if cleaned {
+            self.build_snapshot().await?
+        } else {
+            snapshot.clone()
+        };
+        let mut changed = cleaned;
         for (market, delta_tokens) in deposit_targets.drain(..) {
             let market_info = match self.wallet_manager.market_tokens.get(&market) {
                 Some(info) => info,
@@ -723,10 +765,7 @@ impl ExecutionEngine {
                 continue;
             }
 
-            let deposit_token = match self
-                .select_deposit_token(market, &base_stable, &refreshed.asset_balances)
-                .await?
-            {
+            let deposit_token = match deposit_token_cache.get(&market).cloned() {
                 Some(token) => token,
                 None => continue,
             };
@@ -752,8 +791,7 @@ impl ExecutionEngine {
                             amount: wrap_amount,
                             side: "BUY".to_string(),
                         };
-                        let status = self.execute_action(&action).await;
-                        self.log_trade(strategy_run_id, &action, status).await.ok();
+                        changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                     }
                 }
 
@@ -772,8 +810,7 @@ impl ExecutionEngine {
                             amount: remaining,
                             side: "BUY".to_string(),
                         };
-                        let status = self.execute_action(&action).await;
-                        self.log_trade(strategy_run_id, &action, status).await.ok();
+                        changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                     }
                 }
             }
@@ -800,21 +837,23 @@ impl ExecutionEngine {
                 long_amount,
                 short_amount,
             };
-            let status = self.execute_action(&action).await;
-            self.log_trade(strategy_run_id, &action, status).await.ok();
-
-            refreshed = self.build_snapshot().await?;
+            if self.execute_and_log(&action, strategy_run_id).await {
+                changed = true;
+                refreshed = self.build_snapshot().await?;
+            }
         }
 
-        self.cleanup_idle_tokens(
-            &refreshed.asset_balances,
-            &HashSet::new(),
-            &base_stable,
-            strategy_run_id,
-        )
-        .await;
+        changed = self
+            .cleanup_idle_tokens(
+                &refreshed.asset_balances,
+                &HashSet::new(),
+                &base_stable,
+                strategy_run_id,
+            )
+            .await
+            || changed;
 
-        Ok(())
+        Ok(changed)
     }
 
     async fn cleanup_idle_tokens(
@@ -823,7 +862,8 @@ impl ExecutionEngine {
         keep_tokens: &HashSet<Address>,
         base_stable: &TokenInfo,
         strategy_run_id: i32,
-    ) {
+    ) -> bool {
+        let mut changed = false;
         for (token_addr, balance) in balances.iter() {
             if *balance <= Decimal::ZERO {
                 continue;
@@ -861,9 +901,9 @@ impl ExecutionEngine {
                 amount: *balance,
                 side: "SELL".to_string(),
             };
-            let status = self.execute_action(&action).await;
-            self.log_trade(strategy_run_id, &action, status).await.ok();
+            changed = self.execute_and_log(&action, strategy_run_id).await || changed;
         }
+        changed
     }
 
     async fn select_deposit_token(
@@ -938,6 +978,48 @@ impl ExecutionEngine {
         } else {
             long_token.clone()
         }))
+    }
+
+    async fn select_deposit_token_with_fallback_cached(
+        &self,
+        market: Address,
+        base_stable: Option<&TokenInfo>,
+        balances: &HashMap<Address, Decimal>,
+        cache: &mut HashMap<Address, TokenInfo>,
+    ) -> Result<Option<TokenInfo>> {
+        if let Some(token) = cache.get(&market) {
+            return Ok(Some(token.clone()));
+        }
+
+        let selected = match base_stable {
+            Some(base_stable) => self.select_deposit_token(market, base_stable, balances).await?,
+            None => None,
+        }
+        .or_else(|| self.default_deposit_token_for_market(market));
+
+        if let Some(token) = selected.clone() {
+            cache.insert(market, token);
+        }
+
+        Ok(selected)
+    }
+
+    fn default_deposit_token_for_market(&self, market: Address) -> Option<TokenInfo> {
+        let market_info = self.wallet_manager.market_tokens.get(&market)?;
+        let long_token = self
+            .wallet_manager
+            .asset_tokens
+            .get(&market_info.long_token_address)?;
+        let short_token = self
+            .wallet_manager
+            .asset_tokens
+            .get(&market_info.short_token_address)?;
+
+        if hedge_utils::STABLE_COINS.contains(&short_token.symbol.as_str()) {
+            Some(short_token.clone())
+        } else {
+            Some(long_token.clone())
+        }
     }
 
     async fn estimate_gm_fee_pct(
@@ -1116,18 +1198,10 @@ impl ExecutionEngine {
 
     async fn build_hedge_actions(
         &self,
-        _portfolio_data: &PortfolioData,
         snapshot: &PortfolioSnapshot,
         target_weights: &HashMap<Address, Decimal>,
     ) -> Result<Vec<TradeAction>> {
         let mut actions = Vec::new();
-        let current_positions = {
-            let client = self.dydx_client.lock().await;
-            client
-                .get_dydx_subaccount_perp_positions()
-                .await
-                .unwrap_or_default()
-        };
 
         for (market, gm_balance) in snapshot.market_balances.iter() {
             if *gm_balance <= Decimal::ZERO {
@@ -1191,7 +1265,8 @@ impl ExecutionEngine {
             
             let target_size = -(hedge_notional / long_token.last_mid_price_usd);
             let ticker = hedge_utils::get_dydx_perp_ticker(&long_token.symbol);
-            let current_size = current_positions
+            let current_size = snapshot
+                .hedge_positions
                 .get(&ticker)
                 .cloned()
                 .unwrap_or(Decimal::ZERO);
@@ -1227,7 +1302,7 @@ impl ExecutionEngine {
         &self,
         snapshot: &PortfolioSnapshot,
         reserve_state: &ReserveState,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut client = self.dydx_client.lock().await;
         let sub_equity = snapshot.dydx_subaccount_equity;
         let sub_free = snapshot.dydx_free_collateral;
@@ -1239,24 +1314,27 @@ impl ExecutionEngine {
         let shortfall = equity_shortfall.max(free_shortfall);
 
         if shortfall <= self.planner_config.min_value_usd {
-            return Ok(());
+            return Ok(false);
         }
 
         let main_usdc = snapshot.dydx_main_usdc;
         if main_usdc >= shortfall {
             if let Err(e) = client.deposit_to_subaccount(shortfall).await {
                 warn!(error = ?e, "Failed to move USDC to subaccount");
+                return Ok(false);
             } else {
                 info!(amount = %shortfall, "Moved USDC to dYdX subaccount");
             }
-            return Ok(());
+            return Ok(true);
         }
 
+        let mut changed = false;
         if main_usdc > Decimal::ZERO {
             if let Err(e) = client.deposit_to_subaccount(main_usdc).await {
                 warn!(error = ?e, "Failed to move USDC to subaccount");
-                return Ok(());
+                return Ok(false);
             }
+            changed = true;
         }
 
         let remaining = shortfall - main_usdc;
@@ -1264,23 +1342,32 @@ impl ExecutionEngine {
             info!(amount = %remaining, "Funding dYdX reserve via SkipGo");
             if let Err(e) = client.dydx_deposit(Some(remaining), None, true, None).await {
                 warn!(error = ?e, "Failed to deposit to dYdX");
+            } else {
+                changed = true;
             }
         }
 
-        Ok(())
+        Ok(changed)
     }
 
-    async fn execute_actions(&self, actions: &[TradeAction], strategy_run_id: i32) {
+    async fn execute_actions(&self, actions: &[TradeAction], strategy_run_id: i32) -> bool {
         if actions.is_empty() {
-            return;
+            return false;
         }
         info!(action_count = actions.len(), "Executing actions");
+        let mut changed = false;
         for action in actions.iter() {
-            let status = self.execute_action(action).await;
-            if let Err(e) = self.log_trade(strategy_run_id, action, status).await {
-                warn!(error = ?e, action = ?action, "Failed to log trade");
-            }
+            changed = self.execute_and_log(action, strategy_run_id).await || changed;
         }
+        changed
+    }
+
+    async fn execute_and_log(&self, action: &TradeAction, strategy_run_id: i32) -> bool {
+        let status = self.execute_action(action).await;
+        if let Err(e) = self.log_trade(strategy_run_id, action, status).await {
+            warn!(error = ?e, action = ?action, "Failed to log trade");
+        }
+        status == TradeStatus::Executed
     }
 
     async fn execute_action(&self, action: &TradeAction) -> TradeStatus {
@@ -1469,11 +1556,7 @@ impl ExecutionEngine {
             });
         }
 
-        let native_balance = self
-            .wallet_manager
-            .get_native_balance()
-            .await
-            .unwrap_or(Decimal::ZERO);
+        let native_balance = snapshot.native_balance;
         if native_balance > Decimal::ZERO {
             let native_price = self.wallet_manager.native_token.last_mid_price_usd;
             let usd_value = if native_price > Decimal::ZERO {

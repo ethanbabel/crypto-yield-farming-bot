@@ -964,8 +964,12 @@ impl ExecutionEngine {
 
         let long_total = long_fee.unwrap_or(Decimal::ZERO) + long_swap_fee;
         let short_total = short_fee.unwrap_or(Decimal::ZERO) + short_swap_fee;
+        let cost_tie_break_threshold = Decimal::from_f64(0.001).unwrap();
+        let cost_diff = (long_total - short_total).abs();
 
-        let prefer_short = if hedge_utils::STABLE_COINS.contains(&short_token.symbol.as_str()) {
+        let prefer_short = if cost_diff > cost_tie_break_threshold {
+            short_total <= long_total
+        } else if hedge_utils::STABLE_COINS.contains(&short_token.symbol.as_str()) {
             true
         } else if hedge_utils::STABLE_COINS.contains(&long_token.symbol.as_str()) {
             false

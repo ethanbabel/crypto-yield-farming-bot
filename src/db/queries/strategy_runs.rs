@@ -36,6 +36,22 @@ pub async fn get_latest_strategy_run(pool: &PgPool) -> Result<Option<StrategyRun
     .await
 }
 
+pub async fn get_strategy_run_by_id(
+    pool: &PgPool,
+    run_id: i32,
+) -> Result<Option<StrategyRunModel>, sqlx::Error> {
+    sqlx::query_as::<_, StrategyRunModel>(
+        r#"
+        SELECT id, timestamp, strategy_version, total_weight, expected_return_bps, volatility_bps, sharpe
+        FROM strategy_runs
+        WHERE id = $1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn get_strategy_runs_in_range(
     pool: &PgPool,
     start: chrono::DateTime<chrono::Utc>,

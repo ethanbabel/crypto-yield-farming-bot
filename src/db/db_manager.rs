@@ -989,6 +989,15 @@ impl DbManager {
         strategy_runs_queries::get_latest_strategy_run(&self.pool).await
     }
 
+    /// Fetch strategy run by ID
+    #[instrument(skip(self))]
+    pub async fn get_strategy_run_by_id(
+        &self,
+        run_id: i32,
+    ) -> Result<Option<StrategyRunModel>, sqlx::Error> {
+        strategy_runs_queries::get_strategy_run_by_id(&self.pool, run_id).await
+    }
+
     /// Fetch strategy runs in a time range
     #[instrument(skip(self))]
     pub async fn get_strategy_runs_in_range(
@@ -1007,8 +1016,13 @@ impl DbManager {
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
     ) -> Result<Vec<StrategyRunModel>, sqlx::Error> {
-        strategy_runs_queries::get_strategy_runs_for_version(&self.pool, strategy_version, start, end)
-            .await
+        strategy_runs_queries::get_strategy_runs_for_version(
+            &self.pool,
+            strategy_version,
+            start,
+            end,
+        )
+        .await
     }
 
     /// Fetch strategy targets for a set of strategy run IDs.
@@ -1069,18 +1083,13 @@ impl DbManager {
     ) -> Result<HashMap<i32, Vec<DydxPerpStateModel>>, sqlx::Error> {
         let mut series =
             dydx_perp_states_queries::get_dydx_perp_states_in_range_for_perps_exclusive_start(
-                &self.pool,
-                start,
-                end,
-                perp_ids,
+                &self.pool, start, end, perp_ids,
             )
             .await?;
 
         let mut pre_start_states =
             dydx_perp_states_queries::get_latest_dydx_perp_states_at_or_before_for_perps(
-                &self.pool,
-                start,
-                perp_ids,
+                &self.pool, start, perp_ids,
             )
             .await?;
 

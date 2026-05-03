@@ -1,65 +1,51 @@
-use eyre::Result;
-use std::sync::Arc;
-use std::collections::HashMap;
-use tracing::{instrument, debug, info, warn, error};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
 use bigdecimal::BigDecimal;
-use std::str::FromStr;
-use ethers::prelude::*;
-use ethers::types::{
-    TransactionRequest, Bytes, TxHash, TransactionReceipt, 
-    transaction::eip2718::TypedTransaction
+use cosmrs::{
+    Any,
+    bip32::{DerivationPath, Language, Mnemonic},
+    crypto::secp256k1,
 };
-use tokio::time::{sleep, Duration, Instant};
-use tokio::task::JoinHandle;
 use dydx::{
     config::ClientConfig,
-    node::{
-        NodeClient,
-        Wallet,
-        OrderBuilder,
-        OrderSide,
-        OrderTimeInForce,
-        OrderGoodUntil,
-        OrderId,
-    },
     indexer::{
         IndexerClient,
         types::{
-            Ticker, 
-            PerpetualMarket, 
-            Denom, 
-            Subaccount, 
-            SubaccountNumber, 
-            ClientId, 
-            OrderStatus, 
-            Height
+            ClientId, Denom, Height, OrderStatus, PerpetualMarket, Subaccount, SubaccountNumber,
+            Ticker,
         },
     },
+    node::{
+        NodeClient, OrderBuilder, OrderGoodUntil, OrderId, OrderSide, OrderTimeInForce, Wallet,
+    },
 };
-use dydx_proto::dydxprotocol::{
-    subaccounts::Subaccount as SubaccountInfo,
+use dydx_proto::dydxprotocol::subaccounts::Subaccount as SubaccountInfo;
+use ethers::prelude::*;
+use ethers::types::{
+    Bytes, TransactionReceipt, TransactionRequest, TxHash, transaction::eip2718::TypedTransaction,
 };
-use cosmrs::{
-    crypto::secp256k1,
-    bip32::{Mnemonic, DerivationPath, Language},
-    Any,
-};
+use eyre::Result;
 use ibc_proto::ibc::applications::transfer::v1::MsgTransfer;
 use prost::Message as ProstMessage;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant, sleep};
+use tracing::{debug, error, info, instrument, warn};
 
-use crate::config;
-use crate::wallet::WalletManager;
 use super::hedge_utils;
 use super::skip_go;
+use crate::config;
+use crate::wallet::WalletManager;
 
 const MAX_FEE_PER_GAS_BUFFER: f64 = 1.05; // 5% above the current gas price
 
 const ARBITRUM_CHAIN_ID: &str = "42161";
 const DYDX_CHAIN_ID: &str = "dydx-mainnet-1";
 const ARBITRUM_USDC_DENOM: &str = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
-const DYDX_USDC_DENOM: &str = "ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14E9E20E2545B5";
+const DYDX_USDC_DENOM: &str =
+    "ibc/8E27BA2D5493AF5636760E354E46004562C46AB7EC0CC4C1CA14E9E20E2545B5";
 const USDC_DECIMALS: u8 = 6;
 
 const DYDX_SUBACCOUNT_NUM: u32 = 0;
@@ -81,7 +67,8 @@ pub struct DydxClient {
     dydx_wallet: Wallet,
     dydx_address: String,
     active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
-    active_perp_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<Result<PerpOrderTaskResult>>>>>,
+    active_perp_polling_tasks:
+        Arc<tokio::sync::Mutex<Vec<JoinHandle<Result<PerpOrderTaskResult>>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +114,7 @@ impl DydxClient {
             .map_err(|e| eyre::eyre!("Failed to create dYdX wallet from mnemonic: {}", e))?;
         let dydx_address = derive_cosmos_address_from_mnemonic(&cfg, "dydx", None)
             .map_err(|e| eyre::eyre!("Failed to derive dYdX address from mnemonic: {}", e))?;
-        
+
         Ok(Self {
             config: cfg,
             wallet_manager,
@@ -143,7 +130,10 @@ impl DydxClient {
     #[instrument(skip(self))]
     pub async fn wait_for_active_transfer_tasks(&self) {
         let mut tasks = self.active_transfer_polling_tasks.lock().await;
-        info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());
+        info!(
+            "Waiting for {} active transfer polling tasks to complete...",
+            tasks.len()
+        );
         while let Some(handle) = tasks.pop() {
             if let Err(e) = handle.await {
                 error!("Error in transfer polling task: {}", e);
@@ -164,11 +154,16 @@ impl DydxClient {
                 break;
             }
 
-            info!("Waiting for {} active perp polling tasks to complete...", perp_handles.len());
+            info!(
+                "Waiting for {} active perp polling tasks to complete...",
+                perp_handles.len()
+            );
             for handle in perp_handles {
                 match handle.await {
                     Ok(Ok(result)) => {
-                        if result.outcome == PerpOrderOutcome::TimedOut && result.retry_count < max_retries {
+                        if result.outcome == PerpOrderOutcome::TimedOut
+                            && result.retry_count < max_retries
+                        {
                             warn!(
                                 token = %result.token,
                                 size = %result.size,
@@ -176,7 +171,12 @@ impl DydxClient {
                                 retry_count = result.retry_count + 1,
                                 "Perp order timed out; retrying"
                             );
-                            let retry_log = format!("{} | Retry {}/{}", result.log_string, result.retry_count + 1, max_retries);
+                            let retry_log = format!(
+                                "{} | Retry {}/{}",
+                                result.log_string,
+                                result.retry_count + 1,
+                                max_retries
+                            );
                             if let Err(e) = self
                                 .execute_perp_order(
                                     &result.token,
@@ -205,7 +205,11 @@ impl DydxClient {
 
     #[instrument(skip(self))]
     pub async fn get_perpetual_markets(&self) -> Result<HashMap<Ticker, PerpetualMarket>> {
-        let markets = self.indexer_client.markets().get_perpetual_markets(None).await
+        let markets = self
+            .indexer_client
+            .markets()
+            .get_perpetual_markets(None)
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch perpetual markets: {}", e))?;
         Ok(markets)
     }
@@ -215,13 +219,22 @@ impl DydxClient {
             return Ok(None);
         }
         let ticker = hedge_utils::get_dydx_perp_ticker(long_token);
-        match self.indexer_client.markets().get_perpetual_market(&ticker.into()).await {
+        match self
+            .indexer_client
+            .markets()
+            .get_perpetual_market(&ticker.into())
+            .await
+        {
             Ok(market) => Ok(Some(market)),
             Err(e) => {
                 if e.to_string().contains("400 Bad Request") {
                     Ok(None)
                 } else {
-                    Err(eyre::eyre!("Failed to fetch perpetual market for {}: {}", long_token, e))
+                    Err(eyre::eyre!(
+                        "Failed to fetch perpetual market for {}: {}",
+                        long_token,
+                        e
+                    ))
                 }
             }
         }
@@ -229,7 +242,10 @@ impl DydxClient {
 
     #[instrument(skip(self))]
     pub async fn get_token_perp_map(&self) -> Result<HashMap<String, Option<PerpetualMarket>>> {
-        let token_symbols: Vec<String> = self.wallet_manager.asset_tokens.values()
+        let token_symbols: Vec<String> = self
+            .wallet_manager
+            .asset_tokens
+            .values()
             .map(|token| token.symbol.clone())
             .collect();
 
@@ -250,7 +266,9 @@ impl DydxClient {
         Ok(token_perp_map)
     }
 
-    pub async fn get_token_hedgeinfo_map(&self) -> Result<HashMap<String, Option<(Decimal, Decimal)>>> {
+    pub async fn get_token_hedgeinfo_map(
+        &self,
+    ) -> Result<HashMap<String, Option<(Decimal, Decimal)>>> {
         let token_perp_map = self.get_token_perp_map().await?;
         let mut token_hedgeinfo_map = HashMap::new();
 
@@ -290,23 +308,37 @@ impl DydxClient {
     }
 
     async fn calculate_max_leverage(&self, market: PerpetualMarket) -> Result<Decimal> {
-        let initial_margin_frac = Decimal::from_str(&market.initial_margin_fraction.to_plain_string())?;
-        let maintenance_margin_frac = Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string())?;
+        let initial_margin_frac =
+            Decimal::from_str(&market.initial_margin_fraction.to_plain_string())?;
+        let maintenance_margin_frac =
+            Decimal::from_str(&market.maintenance_margin_fraction.to_plain_string())?;
         let margin_frac = initial_margin_frac.max(maintenance_margin_frac); // Should always be initial margin but just in case
         let max_leverage = Decimal::ONE / (Decimal::from_str("2")? * margin_frac); // Only use 50% of max leverage to provide buffer
         Ok(max_leverage)
     }
 
-    pub async fn submit_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool) -> Result<()> {
+    pub async fn submit_perp_order(
+        &mut self,
+        token: &str,
+        size: Decimal,
+        side_is_buy: bool,
+    ) -> Result<String> {
         let log_string = self.get_perp_order_log_string(&token, size, side_is_buy, false)?;
 
-        self.execute_perp_order(&token, size, side_is_buy, log_string, false, 0).await
+        self.execute_perp_order(&token, size, side_is_buy, log_string, false, 0)
+            .await
     }
 
-    pub async fn reduce_perp_position(&mut self, token: &str, reduce_by: Option<Decimal>) -> Result<()> {
+    pub async fn reduce_perp_position(
+        &mut self,
+        token: &str,
+        reduce_by: Option<Decimal>,
+    ) -> Result<String> {
         let ticker = hedge_utils::get_dydx_perp_ticker(token);
-        let dydx_subaccount_perp_positions_initial = self.get_dydx_subaccount_perp_positions().await?;
-        let perp_position_size = dydx_subaccount_perp_positions_initial.get(&ticker)
+        let dydx_subaccount_perp_positions_initial =
+            self.get_dydx_subaccount_perp_positions().await?;
+        let perp_position_size = dydx_subaccount_perp_positions_initial
+            .get(&ticker)
             .ok_or(eyre::eyre!("No existing perp position for token {}", token))?;
         let side_is_buy = !perp_position_size.is_sign_positive();
         let reduce_by = match reduce_by {
@@ -315,7 +347,8 @@ impl DydxClient {
         };
         let log_string = self.get_perp_order_log_string(&token, reduce_by, side_is_buy, true)?;
 
-        self.execute_perp_order(token, reduce_by, side_is_buy, log_string, true, 0).await
+        self.execute_perp_order(token, reduce_by, side_is_buy, log_string, true, 0)
+            .await
     }
 
     async fn execute_perp_order(
@@ -326,10 +359,11 @@ impl DydxClient {
         log_string: String,
         is_position_reduction: bool,
         retry_count: u32,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
-        let dydx_subaccount_perp_positions_initial = self.get_dydx_subaccount_perp_positions().await?;
+        let dydx_subaccount_perp_positions_initial =
+            self.get_dydx_subaccount_perp_positions().await?;
         let dydx_subaccount_summary_initial = self.get_subaccount_summary().await?;
         info!(
             dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
@@ -353,7 +387,10 @@ impl DydxClient {
             true => OrderSide::Buy,
             false => OrderSide::Sell,
         };
-        let current_block_height = self.node_client.latest_block_height().await
+        let current_block_height = self
+            .node_client
+            .latest_block_height()
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch latest block height: {}", e))?;
 
         let (order_id, order) = OrderBuilder::new(market_order_params, subaccount)
@@ -370,15 +407,26 @@ impl DydxClient {
         );
 
         // Fetch dYdX account info
-        let dydx_account_info = self.node_client.get_account(&self.dydx_address.clone().into()).await
+        let dydx_account_info = self
+            .node_client
+            .get_account(&self.dydx_address.clone().into())
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
         // Get dYdX account
-        let mut account = self.dydx_wallet.account(0, &mut self.node_client).await
+        let mut account = self
+            .dydx_wallet
+            .account(0, &mut self.node_client)
+            .await
             .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
         // Set next nonce
-        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account_info.sequence));
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(
+            dydx_account_info.sequence,
+        ));
 
-        let tx_hash = self.node_client.place_order(&mut account, order).await
+        let tx_hash = self
+            .node_client
+            .place_order(&mut account, order)
+            .await
             .map_err(|e| eyre::eyre!("Failed to place dYdX order: {}", e))?;
 
         info!(
@@ -400,14 +448,14 @@ impl DydxClient {
         )
         .await?;
 
-        Ok(())
+        Ok(tx_hash.to_string())
     }
 
     fn get_perp_order_log_string(
         &self,
         token: &str,
         size: Decimal, // None for full position close
-        side_is_buy: bool, 
+        side_is_buy: bool,
         is_position_reduction: bool,
     ) -> Result<String> {
         let side_str = match side_is_buy {
@@ -429,11 +477,11 @@ impl DydxClient {
     }
 
     async fn spawn_status_polling_perp_order(
-        &self, 
+        &self,
         token: String,
         size: Decimal,
         side_is_buy: bool,
-        log_string: String, 
+        log_string: String,
         is_position_reduction: bool,
         retry_count: u32,
         order_id_node: OrderId,
@@ -444,9 +492,11 @@ impl DydxClient {
 
         let config_path = std::env::var("DYDX_CONFIG_PATH")
             .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
-        let config = ClientConfig::from_file(&config_path).await
+        let config = ClientConfig::from_file(&config_path)
+            .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
-        let mut node_client_clone = NodeClient::connect(config.node).await
+        let mut node_client_clone = NodeClient::connect(config.node)
+            .await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let indexer_client_clone = IndexerClient::new(config.indexer);
         let dydx_address_clone = self.dydx_address.clone();
@@ -455,15 +505,27 @@ impl DydxClient {
             SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
                 .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
         );
-        let subaccount_orders = self.indexer_client.accounts().get_subaccount_orders(&subaccount, None).await
-            .map_err(|e| eyre::eyre!("Failed to fetch subaccount orders for order ID string: {}", e))?;
+        let subaccount_orders = self
+            .indexer_client
+            .accounts()
+            .get_subaccount_orders(&subaccount, None)
+            .await
+            .map_err(|e| {
+                eyre::eyre!(
+                    "Failed to fetch subaccount orders for order ID string: {}",
+                    e
+                )
+            })?;
         let order_id_indexer = subaccount_orders
             .iter()
-            .find(|order| order.client_id.0 == order_id_node.client_id && order.good_til_block == Some(good_til_block_height.clone()))
+            .find(|order| {
+                order.client_id.0 == order_id_node.client_id
+                    && order.good_til_block == Some(good_til_block_height.clone())
+            })
             .ok_or_else(|| eyre::eyre!("Order not found in subaccount orders"))?
             .id
             .clone();
-            
+
         let handle = tokio::spawn(async move {
             let complete_msg = if is_position_reduction {
                 "Position Reduced Successfully"
@@ -471,16 +533,27 @@ impl DydxClient {
                 "Order Executed Successfully"
             };
             loop {
-                match indexer_client_clone.accounts().get_order(&order_id_indexer).await {
+                match indexer_client_clone
+                    .accounts()
+                    .get_order(&order_id_indexer)
+                    .await
+                {
                     Ok(order) => {
                         match order.status {
                             dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Filled) => {
                                 sleep(Duration::from_secs(2)).await; // Small delay to ensure balances are updated
-                                let dydx_usdc_balance_final = match node_client_clone.get_account_balance(
-                                    &dydx_address_clone.clone().into(),
-                                    &Denom::Usdc,
-                                ).await {
-                                    Ok(balance) => Decimal::from_str(&balance.amount.to_string()).unwrap_or(Decimal::ZERO) * Decimal::from_str("0.000001").unwrap(),
+                                let dydx_usdc_balance_final = match node_client_clone
+                                    .get_account_balance(
+                                        &dydx_address_clone.clone().into(),
+                                        &Denom::Usdc,
+                                    )
+                                    .await
+                                {
+                                    Ok(balance) => {
+                                        Decimal::from_str(&balance.amount.to_string())
+                                            .unwrap_or(Decimal::ZERO)
+                                            * Decimal::from_str("0.000001").unwrap()
+                                    }
                                     Err(e) => {
                                         error!(
                                             error = %e,
@@ -489,12 +562,19 @@ impl DydxClient {
                                         Decimal::ZERO
                                     }
                                 };
-                                let dydx_subaccount_usdc_balance_final = match indexer_client_clone.accounts().get_subaccount_asset_positions(&subaccount).await {
-                                    Ok(positions) => {
-                                        positions.iter().find(|pos| pos.symbol.0 == "USDC")
-                                        .map(|pos| Decimal::from_str(&pos.size.to_plain_string()).unwrap_or(Decimal::ZERO))
-                                        .unwrap_or(Decimal::ZERO)
-                                    },
+                                let dydx_subaccount_usdc_balance_final = match indexer_client_clone
+                                    .accounts()
+                                    .get_subaccount_asset_positions(&subaccount)
+                                    .await
+                                {
+                                    Ok(positions) => positions
+                                        .iter()
+                                        .find(|pos| pos.symbol.0 == "USDC")
+                                        .map(|pos| {
+                                            Decimal::from_str(&pos.size.to_plain_string())
+                                                .unwrap_or(Decimal::ZERO)
+                                        })
+                                        .unwrap_or(Decimal::ZERO),
                                     Err(e) => {
                                         error!(
                                             error = %e,
@@ -503,42 +583,57 @@ impl DydxClient {
                                         Decimal::ZERO
                                     }
                                 };
-                                let dydx_subaccount_free_collateral_final = match indexer_client_clone.accounts().get_subaccount(&subaccount).await {
-                                    Ok(summary) => Decimal::from_str(&summary.free_collateral.to_string()).unwrap_or(Decimal::ZERO),
-                                    Err(e) => {
-                                        error!(
-                                            error = %e,
-                                            "{} | Failed to fetch dYdX subaccount summary for free collateral", log_string
-                                        );
-                                        Decimal::ZERO
-                                    }
-                                };
+                                let dydx_subaccount_free_collateral_final =
+                                    match indexer_client_clone
+                                        .accounts()
+                                        .get_subaccount(&subaccount)
+                                        .await
+                                    {
+                                        Ok(summary) => {
+                                            Decimal::from_str(&summary.free_collateral.to_string())
+                                                .unwrap_or(Decimal::ZERO)
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                error = %e,
+                                                "{} | Failed to fetch dYdX subaccount summary for free collateral", log_string
+                                            );
+                                            Decimal::ZERO
+                                        }
+                                    };
 
-                                let dydx_subaccount_perp_positions_final = match indexer_client_clone.accounts().get_subaccount_perpetual_positions(&subaccount, None).await {
-                                    Ok(positions) => {
-                                        let mut perp_map = HashMap::new();
+                                let dydx_subaccount_perp_positions_final =
+                                    match indexer_client_clone
+                                        .accounts()
+                                        .get_subaccount_perpetual_positions(&subaccount, None)
+                                        .await
+                                    {
+                                        Ok(positions) => {
+                                            let mut perp_map = HashMap::new();
 
-                                        for pos in positions.iter() {
-                                            let ticker = pos.market.0.clone();
-                                            let size_decimal = Decimal::from_str(&pos.size.to_plain_string()).unwrap_or(Decimal::ZERO);
-                                            if size_decimal.is_zero()
+                                            for pos in positions.iter() {
+                                                let ticker = pos.market.0.clone();
+                                                let size_decimal =
+                                                    Decimal::from_str(&pos.size.to_plain_string())
+                                                        .unwrap_or(Decimal::ZERO);
+                                                if size_decimal.is_zero()
                                                 || pos.status == dydx::indexer::types::PerpetualPositionStatus::Closed
                                                 || pos.status == dydx::indexer::types::PerpetualPositionStatus::Liquidated
                                             {
                                                 continue;
                                             }
-                                            perp_map.insert(ticker.clone(), size_decimal);
+                                                perp_map.insert(ticker.clone(), size_decimal);
+                                            }
+                                            perp_map
                                         }
-                                        perp_map
-                                    },
-                                    Err(e) => {
-                                        error!(
-                                            error = %e,
-                                            "{} | Failed to fetch dYdX subaccount perpetual positions: {}", log_string, e
-                                        );
-                                        HashMap::new()
-                                    }
-                                };
+                                        Err(e) => {
+                                            error!(
+                                                error = %e,
+                                                "{} | Failed to fetch dYdX subaccount perpetual positions: {}", log_string, e
+                                            );
+                                            HashMap::new()
+                                        }
+                                    };
                                 info!(
                                     order_id_indexer = ?order_id_indexer,
                                     dydx_usdc_balance_final = ?dydx_usdc_balance_final,
@@ -556,16 +651,20 @@ impl DydxClient {
                                     outcome: PerpOrderOutcome::Filled,
                                     retry_count,
                                 });
-                            },
-                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Open) |
-                            dydx::indexer::ApiOrderStatus::BestEffort(dydx::indexer::types::BestEffortOpenedStatus::BestEffortOpened) => {
+                            }
+                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Open)
+                            | dydx::indexer::ApiOrderStatus::BestEffort(
+                                dydx::indexer::types::BestEffortOpenedStatus::BestEffortOpened,
+                            ) => {
                                 debug!(
                                     order_id_indexer = ?order_id_indexer,
                                     "{} | Order Still Open...", log_string
                                 );
                             }
-                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Canceled) |
-                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::BestEffortCanceled) => {
+                            dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Canceled)
+                            | dydx::indexer::ApiOrderStatus::OrderStatus(
+                                OrderStatus::BestEffortCanceled,
+                            ) => {
                                 warn!(
                                     order_id_indexer = ?order_id_indexer,
                                     "{} | Order Cancelled", log_string
@@ -597,7 +696,7 @@ impl DydxClient {
                         continue;
                     }
                 }
-                
+
                 let current_block_height = match node_client_clone.latest_block_height().await {
                     Ok(height) => height,
                     Err(e) => {
@@ -609,7 +708,10 @@ impl DydxClient {
                     }
                 };
                 if current_block_height > block_to_wait_until {
-                    warn!("{} | Order Timed Out After Reaching Target Block Height", log_string);
+                    warn!(
+                        "{} | Order Timed Out After Reaching Target Block Height",
+                        log_string
+                    );
                     return Ok(PerpOrderTaskResult {
                         token,
                         size,
@@ -636,20 +738,31 @@ impl DydxClient {
                 .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
         );
 
-        let subaccount_info = self.node_client.get_subaccount(&subaccount).await
+        let subaccount_info = self
+            .node_client
+            .get_subaccount(&subaccount)
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount info: {}", e))?;
         Ok(subaccount_info)
     }
 
     pub async fn deposit_to_subaccount(&mut self, amount: Decimal) -> Result<()> {
         // Fetch dYdX account info
-        let dydx_account_info = self.node_client.get_account(&self.dydx_address.clone().into()).await
+        let dydx_account_info = self
+            .node_client
+            .get_account(&self.dydx_address.clone().into())
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
         // Get dYdX account
-        let mut account = self.dydx_wallet.account(0, &mut self.node_client).await
+        let mut account = self
+            .dydx_wallet
+            .account(0, &mut self.node_client)
+            .await
             .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
         // Set next nonce
-        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account_info.sequence));
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(
+            dydx_account_info.sequence,
+        ));
 
         let subaccount = Subaccount::new(
             self.dydx_address.clone().into(),
@@ -660,14 +773,18 @@ impl DydxClient {
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
 
-        let tx_hash = self.node_client.deposit(
-            &mut account,
-            self.dydx_address.clone().into(),
-            subaccount,
-            dydx::indexer::tokens::Usdc::from_quantums(
-                decimal_to_u256(amount, USDC_DECIMALS)?.as_u64()
+        let tx_hash = self
+            .node_client
+            .deposit(
+                &mut account,
+                self.dydx_address.clone().into(),
+                subaccount,
+                dydx::indexer::tokens::Usdc::from_quantums(
+                    decimal_to_u256(amount, USDC_DECIMALS)?.as_u64(),
+                ),
             )
-        ).await.map_err(|e| eyre::eyre!("Failed to deposit to dYdX subaccount: {}", e))?;
+            .await
+            .map_err(|e| eyre::eyre!("Failed to deposit to dYdX subaccount: {}", e))?;
 
         info!(
             tx_hash = ?tx_hash,
@@ -677,7 +794,10 @@ impl DydxClient {
             "Deposit to dYdX subaccount submitted successfully"
         );
 
-        let _tx_result = self.node_client.query_transaction(&tx_hash).await
+        let _tx_result = self
+            .node_client
+            .query_transaction(&tx_hash)
+            .await
             .map_err(|e| eyre::eyre!("Failed to query dYdX deposit transaction result: {}", e))?;
 
         let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
@@ -696,13 +816,21 @@ impl DydxClient {
 
     pub async fn withdraw_from_subaccount(&mut self, amount: Decimal) -> Result<()> {
         // Fetch dYdX account info
-        let dydx_account_info = self.node_client.get_account(&self.dydx_address.clone().into()).await
+        let dydx_account_info = self
+            .node_client
+            .get_account(&self.dydx_address.clone().into())
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
         // Get dYdX account
-        let mut account = self.dydx_wallet.account(0, &mut self.node_client).await
+        let mut account = self
+            .dydx_wallet
+            .account(0, &mut self.node_client)
+            .await
             .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
         // Set next nonce
-        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account_info.sequence));
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(
+            dydx_account_info.sequence,
+        ));
 
         let subaccount = Subaccount::new(
             self.dydx_address.clone().into(),
@@ -713,14 +841,18 @@ impl DydxClient {
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
 
-        let tx_hash = self.node_client.withdraw(
-            &mut account,
-            subaccount,
-            self.dydx_address.clone().into(),
-            dydx::indexer::tokens::Usdc::from_quantums(
-                decimal_to_u256(amount, USDC_DECIMALS)?.as_u64()
+        let tx_hash = self
+            .node_client
+            .withdraw(
+                &mut account,
+                subaccount,
+                self.dydx_address.clone().into(),
+                dydx::indexer::tokens::Usdc::from_quantums(
+                    decimal_to_u256(amount, USDC_DECIMALS)?.as_u64(),
+                ),
             )
-        ).await.map_err(|e| eyre::eyre!("Failed to withdraw from dYdX subaccount: {}", e))?;
+            .await
+            .map_err(|e| eyre::eyre!("Failed to withdraw from dYdX subaccount: {}", e))?;
 
         info!(
             tx_hash = ?tx_hash,
@@ -730,8 +862,13 @@ impl DydxClient {
             "Withdrawal from dYdX subaccount submitted successfully"
         );
 
-        let _tx_result = self.node_client.query_transaction(&tx_hash).await
-            .map_err(|e| eyre::eyre!("Failed to query dYdX withdrawal transaction result: {}", e))?;
+        let _tx_result = self
+            .node_client
+            .query_transaction(&tx_hash)
+            .await
+            .map_err(|e| {
+                eyre::eyre!("Failed to query dYdX withdrawal transaction result: {}", e)
+            })?;
 
         let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
@@ -747,7 +884,11 @@ impl DydxClient {
         Ok(())
     }
 
-    pub async fn set_subaccount_usdc_balance(&mut self, target_balance: Decimal, deposit_only: bool) -> Result<()> {
+    pub async fn set_subaccount_usdc_balance(
+        &mut self,
+        target_balance: Decimal,
+        deposit_only: bool,
+    ) -> Result<()> {
         let current_balance = self.get_dydx_subaccount_usdc_balance().await?;
         if target_balance > current_balance {
             let deposit_amount = target_balance - current_balance;
@@ -779,9 +920,9 @@ impl DydxClient {
 
     #[instrument(skip(self))]
     pub async fn dydx_deposit(
-        &mut self, 
-        amount_in: Option<Decimal>, 
-        amount_out: Option<Decimal>, 
+        &mut self,
+        amount_in: Option<Decimal>,
+        amount_out: Option<Decimal>,
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
     ) -> Result<()> {
@@ -791,31 +932,30 @@ impl DydxClient {
         let initial_arbitrum_eth_balance = self.wallet_manager.get_native_balance().await?;
 
         // Sanity check request
-        let log_string = self.get_deposit_log_string(
-            initial_arbitrum_usdc_balance,
-            amount_in,
-            amount_out,
-        )?;
+        let log_string =
+            self.get_deposit_log_string(initial_arbitrum_usdc_balance, amount_in, amount_out)?;
 
         info!(
             initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
             initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
             initial_arbitrum_eth_balance = ?initial_arbitrum_eth_balance,
-            "{} Deposit Initiated", 
+            "{} Deposit Initiated",
             log_string
         );
 
         // Get SkipGo route and msgs
-        let (amount, estimated_time_secs, msgs) = self.skip_go_get_route_and_msgs(
-            amount_in,
-            amount_out,
-            go_fast,
-            slippage_tolerance_percent,
-            ARBITRUM_USDC_DENOM,
-            ARBITRUM_CHAIN_ID,
-            DYDX_USDC_DENOM,
-            DYDX_CHAIN_ID,
-        ).await?;
+        let (amount, estimated_time_secs, msgs) = self
+            .skip_go_get_route_and_msgs(
+                amount_in,
+                amount_out,
+                go_fast,
+                slippage_tolerance_percent,
+                ARBITRUM_USDC_DENOM,
+                ARBITRUM_CHAIN_ID,
+                DYDX_USDC_DENOM,
+                DYDX_CHAIN_ID,
+            )
+            .await?;
 
         // Validate requested transfer amount and estimated fees against balances
         let mut combined_gas_fees = Decimal::ZERO;
@@ -828,7 +968,9 @@ impl DydxClient {
                 combined_gas_fees += gas_fee_decimal;
             }
         }
-        if amount > initial_arbitrum_usdc_balance || combined_gas_fees > initial_arbitrum_eth_balance {
+        if amount > initial_arbitrum_usdc_balance
+            || combined_gas_fees > initial_arbitrum_eth_balance
+        {
             return Err(eyre::eyre!(
                 "Insufficient Arbitrum USDC balance for deposit: have {}, need {}",
                 initial_arbitrum_usdc_balance,
@@ -839,35 +981,33 @@ impl DydxClient {
                 initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
                 deposit_amount_including_fees = ?amount,
                 expected_time_to_complete_secs = ?estimated_time_secs,
-                "{} Deposit Validated", 
+                "{} Deposit Validated",
                 log_string
             );
         }
 
         // Execute SkipGo transfer
         self.execute_skip_go_transfer(
-            msgs.txs, 
+            msgs.txs,
             initial_dydx_usdc_balance,
             initial_arbitrum_usdc_balance,
-            initial_arbitrum_eth_balance, 
+            initial_arbitrum_eth_balance,
             log_string.clone(),
             estimated_time_secs,
-        ).await?;
+        )
+        .await?;
 
         // Final log
-        info!(
-            "{} Deposit Initiated Successfully",
-            log_string, 
-        );
+        info!("{} Deposit Initiated Successfully", log_string,);
 
         Ok(())
     }
 
     #[instrument(skip(self))]
     pub async fn dydx_withdrawal(
-        &mut self, 
-        amount_in: Option<Decimal>, 
-        amount_out: Option<Decimal>, 
+        &mut self,
+        amount_in: Option<Decimal>,
+        amount_out: Option<Decimal>,
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
     ) -> Result<()> {
@@ -877,29 +1017,28 @@ impl DydxClient {
         let initial_arbitrum_native_balance = self.wallet_manager.get_native_balance().await?;
 
         // Sanity check request
-        let log_string = self.get_withdrawal_log_string(
-            initial_dydx_usdc_balance,
-            amount_in,
-            amount_out,
-        )?;
+        let log_string =
+            self.get_withdrawal_log_string(initial_dydx_usdc_balance, amount_in, amount_out)?;
 
         info!(
             initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
             initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
-            "{} Withdrawal Initiated", 
+            "{} Withdrawal Initiated",
             log_string
         );
 
-        let (amount, estimated_time_secs, msgs) = self.skip_go_get_route_and_msgs(
-            amount_in,
-            amount_out,
-            go_fast,
-            slippage_tolerance_percent,
-            DYDX_USDC_DENOM,
-            DYDX_CHAIN_ID,
-            ARBITRUM_USDC_DENOM,
-            ARBITRUM_CHAIN_ID,
-        ).await?;
+        let (amount, estimated_time_secs, msgs) = self
+            .skip_go_get_route_and_msgs(
+                amount_in,
+                amount_out,
+                go_fast,
+                slippage_tolerance_percent,
+                DYDX_USDC_DENOM,
+                DYDX_CHAIN_ID,
+                ARBITRUM_USDC_DENOM,
+                ARBITRUM_CHAIN_ID,
+            )
+            .await?;
 
         // Validate requested transfer amount and estimated fees against balances
         if amount > initial_dydx_usdc_balance {
@@ -913,42 +1052,42 @@ impl DydxClient {
                 initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
                 withdrawal_amount_including_fees = ?amount,
                 expected_time_to_complete_secs = ?estimated_time_secs,
-                "{} Withdrawal Validated", 
+                "{} Withdrawal Validated",
                 log_string
             );
         }
 
         // Execute SkipGo transfer
         self.execute_skip_go_transfer(
-            msgs.txs, 
+            msgs.txs,
             initial_dydx_usdc_balance,
             initial_arbitrum_usdc_balance,
             initial_arbitrum_native_balance,
             log_string.clone(),
             estimated_time_secs,
-        ).await?;
+        )
+        .await?;
 
         // Final log
-        info!(
-            "{} Withdrawal Initiated Successfully",
-            log_string, 
-        );
+        info!("{} Withdrawal Initiated Successfully", log_string,);
 
         Ok(())
     }
 
     async fn get_arbitrum_usdc_balance(&self) -> Result<Decimal> {
-        let balance = self.wallet_manager.get_token_balance(
-            Address::from_str(ARBITRUM_USDC_DENOM)?
-        ).await?;
+        let balance = self
+            .wallet_manager
+            .get_token_balance(Address::from_str(ARBITRUM_USDC_DENOM)?)
+            .await?;
         Ok(balance)
     }
 
     pub async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
-        let balance = self.node_client.get_account_balance(
-            &self.dydx_address.clone().into(),
-            &Denom::Usdc
-        ).await.map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
+        let balance = self
+            .node_client
+            .get_account_balance(&self.dydx_address.clone().into(), &Denom::Usdc)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
         let balance_u256 = U256::from_dec_str(&balance.amount)?;
         let balance_decimal = u256_to_decimal(balance_u256, USDC_DECIMALS)?;
         Ok(balance_decimal)
@@ -961,8 +1100,11 @@ impl DydxClient {
                 .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
         );
 
-        let asset_positions = self.indexer_client.accounts()
-            .get_subaccount_asset_positions(&subaccount).await
+        let asset_positions = self
+            .indexer_client
+            .accounts()
+            .get_subaccount_asset_positions(&subaccount)
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount asset positions: {}", e))?;
         for position in asset_positions {
             if position.symbol.0 == "USDC" {
@@ -985,13 +1127,21 @@ impl DydxClient {
         );
 
         let mut perp_positions_map = HashMap::new();
-        let perp_positions = self.indexer_client.accounts()
-            .get_subaccount_perpetual_positions(&subaccount, None).await
-            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount perpetual positions: {}", e))?;
+        let perp_positions = self
+            .indexer_client
+            .accounts()
+            .get_subaccount_perpetual_positions(&subaccount, None)
+            .await
+            .map_err(|e| {
+                eyre::eyre!("Failed to fetch dYdX subaccount perpetual positions: {}", e)
+            })?;
         for position in perp_positions {
             let ticker = position.market.0.clone();
             let size = Decimal::from_str(&position.size.to_plain_string())?;
-            if size == Decimal::ZERO || position.status == dydx::indexer::types::PerpetualPositionStatus::Closed || position.status == dydx::indexer::types::PerpetualPositionStatus::Liquidated {
+            if size == Decimal::ZERO
+                || position.status == dydx::indexer::types::PerpetualPositionStatus::Closed
+                || position.status == dydx::indexer::types::PerpetualPositionStatus::Liquidated
+            {
                 continue;
             }
             perp_positions_map.insert(ticker, size);
@@ -1006,16 +1156,22 @@ impl DydxClient {
                 .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
         );
 
-        let subaccount_info = self.indexer_client.accounts()
-            .get_subaccount(&subaccount).await
+        let subaccount_info = self
+            .indexer_client
+            .accounts()
+            .get_subaccount(&subaccount)
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount info: {}", e))?;
 
         let equity = Decimal::from_str(&subaccount_info.equity.to_plain_string())?;
-        let free_collateral = Decimal::from_str(&subaccount_info.free_collateral.to_plain_string())?;
+        let free_collateral =
+            Decimal::from_str(&subaccount_info.free_collateral.to_plain_string())?;
         let usdc_balance = Decimal::from_str(
-            &subaccount_info.asset_positions.get(&Ticker("USDC".to_string()))
-            .map(|pos| pos.size.to_plain_string())
-            .unwrap_or("0".to_string())
+            &subaccount_info
+                .asset_positions
+                .get(&Ticker("USDC".to_string()))
+                .map(|pos| pos.size.to_plain_string())
+                .unwrap_or("0".to_string()),
         )?;
 
         Ok(DydxSubaccountSummary {
@@ -1028,23 +1184,37 @@ impl DydxClient {
     fn get_deposit_log_string(
         &self,
         arbitrum_usdc_balance: Decimal,
-        amount_in: Option<Decimal>, 
-        amount_out: Option<Decimal>
+        amount_in: Option<Decimal>,
+        amount_out: Option<Decimal>,
     ) -> Result<String> {
         match (amount_in, amount_out) {
             (Some(_), Some(_)) => Err(eyre::eyre!("Specify only one of amount_in or amount_out")),
             (Some(amount), None) => {
                 if amount > arbitrum_usdc_balance {
-                    return Err(eyre::eyre!("Insufficient USDC balance for deposit: have {}, need {}", arbitrum_usdc_balance, amount));
+                    return Err(eyre::eyre!(
+                        "Insufficient USDC balance for deposit: have {}, need {}",
+                        arbitrum_usdc_balance,
+                        amount
+                    ));
                 }
-                let log_string = format!("DYDX DEPOSIT REQUEST | Deposit {} (amount in) USDC |", amount);
+                let log_string = format!(
+                    "DYDX DEPOSIT REQUEST | Deposit {} (amount in) USDC |",
+                    amount
+                );
                 Ok(log_string)
             }
             (None, Some(amount)) => {
                 if amount > arbitrum_usdc_balance {
-                    return Err(eyre::eyre!("Insufficient USDC balance for deposit: have {}, need {}", arbitrum_usdc_balance, amount));
+                    return Err(eyre::eyre!(
+                        "Insufficient USDC balance for deposit: have {}, need {}",
+                        arbitrum_usdc_balance,
+                        amount
+                    ));
                 }
-                let log_string = format!("DYDX DEPOSIT REQUEST | Deposit {} (amount out) USDC |", amount);
+                let log_string = format!(
+                    "DYDX DEPOSIT REQUEST | Deposit {} (amount out) USDC |",
+                    amount
+                );
                 Ok(log_string)
             }
             (None, None) => Err(eyre::eyre!("Must specify one of amount_in or amount_out")),
@@ -1054,23 +1224,37 @@ impl DydxClient {
     fn get_withdrawal_log_string(
         &self,
         dydx_usdc_balance: Decimal,
-        amount_in: Option<Decimal>, 
-        amount_out: Option<Decimal>
+        amount_in: Option<Decimal>,
+        amount_out: Option<Decimal>,
     ) -> Result<String> {
         match (amount_in, amount_out) {
             (Some(_), Some(_)) => Err(eyre::eyre!("Specify only one of amount_in or amount_out")),
             (Some(amount), None) => {
                 if amount > dydx_usdc_balance {
-                    return Err(eyre::eyre!("Insufficient USDC balance for withdrawal: have {}, need {}", dydx_usdc_balance, amount));
+                    return Err(eyre::eyre!(
+                        "Insufficient USDC balance for withdrawal: have {}, need {}",
+                        dydx_usdc_balance,
+                        amount
+                    ));
                 }
-                let log_string = format!("DYDX WITHDRAWAL REQUEST | Withdraw {} (amount in) USDC |", amount);
+                let log_string = format!(
+                    "DYDX WITHDRAWAL REQUEST | Withdraw {} (amount in) USDC |",
+                    amount
+                );
                 Ok(log_string)
             }
             (None, Some(amount)) => {
                 if amount > dydx_usdc_balance {
-                    return Err(eyre::eyre!("Insufficient USDC balance for withdrawal: have {}, need {}", dydx_usdc_balance, amount));
+                    return Err(eyre::eyre!(
+                        "Insufficient USDC balance for withdrawal: have {}, need {}",
+                        dydx_usdc_balance,
+                        amount
+                    ));
                 }
-                let log_string = format!("DYDX WITHDRAWAL REQUEST | Withdraw {} (amount out) USDC |", amount);
+                let log_string = format!(
+                    "DYDX WITHDRAWAL REQUEST | Withdraw {} (amount out) USDC |",
+                    amount
+                );
                 Ok(log_string)
             }
             (None, None) => Err(eyre::eyre!("Must specify one of amount_in or amount_out")),
@@ -1115,17 +1299,26 @@ impl DydxClient {
         let true_amount_out = route["amount_out"].as_str().unwrap();
         let required_chain_addresses = route["required_chain_addresses"].clone();
         let operations = route["operations"].clone();
-        let estimated_time_secs = route["estimated_route_duration_seconds"].as_u64().unwrap_or(0);
+        let estimated_time_secs = route["estimated_route_duration_seconds"]
+            .as_u64()
+            .unwrap_or(0);
 
         let mut address_list = Vec::<String>::new();
         for chain in required_chain_addresses.as_array().unwrap() {
             let chain_str = chain.as_str().unwrap();
             if !chain_str.chars().all(|c| c.is_numeric()) {
-                let chain_prefix = chain_str.find('-').map(|idx| &chain_str[..idx]).unwrap_or(chain_str);
-                let address = derive_cosmos_address_from_mnemonic(&self.config, chain_prefix, None)?;
+                let chain_prefix = chain_str
+                    .find('-')
+                    .map(|idx| &chain_str[..idx])
+                    .unwrap_or(chain_str);
+                let address =
+                    derive_cosmos_address_from_mnemonic(&self.config, chain_prefix, None)?;
                 address_list.push(address);
             } else {
-                address_list.push(ethers::utils::to_checksum(&self.wallet_manager.address, None));
+                address_list.push(ethers::utils::to_checksum(
+                    &self.wallet_manager.address,
+                    None,
+                ));
             }
         }
 
@@ -1146,17 +1339,14 @@ impl DydxClient {
         let msgs = skip_go::get_msgs(msg_request).await?;
         debug!("SkipGo Msgs Response: {:#?}", msgs);
 
-        let amount = u256_to_decimal(
-            U256::from_dec_str(true_amount_in).unwrap(),
-            USDC_DECIMALS,
-        )?;
+        let amount = u256_to_decimal(U256::from_dec_str(true_amount_in).unwrap(), USDC_DECIMALS)?;
 
         Ok((amount, estimated_time_secs, msgs))
     }
 
     async fn execute_skip_go_transfer(
-        &mut self, 
-        txs: Vec<skip_go::SkipGoTx>, 
+        &mut self,
+        txs: Vec<skip_go::SkipGoTx>,
         dydx_usdc_balance_initial: Decimal,
         arbitrum_usdc_balance_initial: Decimal,
         arbitrum_native_balance_initial: Decimal,
@@ -1171,11 +1361,11 @@ impl DydxClient {
                     let tx_hash = self.construct_and_execute4_cosmos_tx(cosmos_tx).await?;
                     info!(
                         tx_hash = ?tx_hash,
-                        "{} Cosmos Transaction Submitted Successfully", 
+                        "{} Cosmos Transaction Submitted Successfully",
                         log_string
                     );
 
-                    // Track transaction 
+                    // Track transaction
                     let track_transaction_request = skip_go::SkipGoTrackTransactionRequest {
                         tx_hash: tx_hash.clone(),
                         chain_id: DYDX_CHAIN_ID.to_string(),
@@ -1183,20 +1373,21 @@ impl DydxClient {
                     skip_go::track_transaction(track_transaction_request).await?;
                     info!(
                         tx_hash = ?tx_hash,
-                        "{} Cosmos Transaction Tracked Successfully", 
+                        "{} Cosmos Transaction Tracked Successfully",
                         log_string
                     );
 
                     // Spawn status polling
                     self.spawn_status_polling_skipgo(
                         tx_hash,
-                        DYDX_CHAIN_ID.to_string(), 
+                        DYDX_CHAIN_ID.to_string(),
                         expected_time_to_complete_secs,
                         dydx_usdc_balance_initial,
                         arbitrum_usdc_balance_initial,
                         arbitrum_native_balance_initial,
                         log_string.clone(),
-                    ).await?;
+                    )
+                    .await?;
                 }
                 skip_go::SkipGoTx::EvmTx(evm_tx) => {
                     debug!("Executing EVM Tx: {:#?}", evm_tx);
@@ -1208,12 +1399,17 @@ impl DydxClient {
                     let evm_transaction = self.build_evm_transaction(evm_tx).await?;
                     debug!(transaction = ?evm_transaction, "{} Transaction Built", log_string);
 
-                    self.simulate_evm_transaction(&evm_transaction, arbitrum_native_balance_initial).await?;
+                    self.simulate_evm_transaction(
+                        &evm_transaction,
+                        arbitrum_native_balance_initial,
+                    )
+                    .await?;
                     debug!(transaction = ?evm_transaction, "{} Transaction Simulated", log_string);
 
                     let (tx_hash, receipt) = self.execute_evm_transaction(evm_transaction).await?;
                     let gas_used = u256_to_decimal(receipt.gas_used.unwrap_or(U256::zero()), 0)?;
-                    let gas_price = u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
+                    let gas_price =
+                        u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
                     let total_gas_cost = gas_used * gas_price;
                     info!(
                         tx_hash = ?tx_hash,
@@ -1221,23 +1417,27 @@ impl DydxClient {
                         gas_price = ?gas_price,
                         total_gas_cost = ?total_gas_cost,
                         total_gas_cost_usd = ?(total_gas_cost * self.wallet_manager.native_token.last_mid_price_usd),
-                        "{} Transaction Executed Successfully", 
+                        "{} Transaction Executed Successfully",
                         log_string
                     );
 
                     // Spawn status polling
                     self.spawn_status_polling_skipgo(
                         format!("{:#x}", tx_hash),
-                        ARBITRUM_CHAIN_ID.to_string(), 
+                        ARBITRUM_CHAIN_ID.to_string(),
                         expected_time_to_complete_secs,
                         dydx_usdc_balance_initial,
                         arbitrum_usdc_balance_initial,
                         arbitrum_native_balance_initial,
                         log_string.clone(),
-                    ).await?;
+                    )
+                    .await?;
                 }
                 skip_go::SkipGoTx::SvmTx(svm_tx) => {
-                    return Err(eyre::eyre!("No support for SVM transactions: {:#?}", svm_tx));
+                    return Err(eyre::eyre!(
+                        "No support for SVM transactions: {:#?}",
+                        svm_tx
+                    ));
                 }
             }
         }
@@ -1292,8 +1492,11 @@ impl DydxClient {
             None => Err(eyre::eyre!("ERC20 approval receipt not found")),
         }
     }
-    
-    async fn build_evm_transaction(&self, evm_tx_wrapper: skip_go::TxsEvmTx) -> Result<TransactionRequest> {
+
+    async fn build_evm_transaction(
+        &self,
+        evm_tx_wrapper: skip_go::TxsEvmTx,
+    ) -> Result<TransactionRequest> {
         let to_address = Address::from_str(&evm_tx_wrapper.evm_tx.to)?;
         let data = Bytes::from_str(&evm_tx_wrapper.evm_tx.data)?;
         let value = U256::from_dec_str(&evm_tx_wrapper.evm_tx.value)?;
@@ -1305,9 +1508,22 @@ impl DydxClient {
             .value(value);
 
         // Estimate gas using the provider
-        let gas_estimate = self.wallet_manager.signer.provider().estimate_gas(&tx.clone().into(), None).await?;
-        let gas_price_decimal = u256_to_decimal(self.wallet_manager.signer.provider().get_gas_price().await?, 0)?;
-        let gas_price_with_buf = gas_price_decimal * Decimal::from_f64(MAX_FEE_PER_GAS_BUFFER).unwrap();
+        let gas_estimate = self
+            .wallet_manager
+            .signer
+            .provider()
+            .estimate_gas(&tx.clone().into(), None)
+            .await?;
+        let gas_price_decimal = u256_to_decimal(
+            self.wallet_manager
+                .signer
+                .provider()
+                .get_gas_price()
+                .await?,
+            0,
+        )?;
+        let gas_price_with_buf =
+            gas_price_decimal * Decimal::from_f64(MAX_FEE_PER_GAS_BUFFER).unwrap();
         let gas_price_u256 = decimal_to_u256(gas_price_with_buf, 0)?;
 
         // Set tx gas and gas price
@@ -1324,7 +1540,11 @@ impl DydxClient {
         Ok(tx)
     }
 
-    async fn simulate_evm_transaction(&self, tx: &TransactionRequest, native_balance: Decimal) -> Result<()> {
+    async fn simulate_evm_transaction(
+        &self,
+        tx: &TransactionRequest,
+        native_balance: Decimal,
+    ) -> Result<()> {
         // Get gas limits from transaction request
         let gas_dec = u256_to_decimal(tx.gas.unwrap_or(U256::zero()), 0)?;
         let gas_price_dec = u256_to_decimal(tx.gas_price.unwrap_or(U256::zero()), 18)?;
@@ -1350,7 +1570,13 @@ impl DydxClient {
         let typed_tx: TypedTransaction = tx.clone().into();
 
         // Simulate the transaction using eth_call
-        match self.wallet_manager.signer.provider().call(&typed_tx, None).await {
+        match self
+            .wallet_manager
+            .signer
+            .provider()
+            .call(&typed_tx, None)
+            .await
+        {
             Ok(_) => {
                 debug!("EVM transaction simulation successful");
                 Ok(())
@@ -1359,8 +1585,15 @@ impl DydxClient {
         }
     }
 
-    async fn execute_evm_transaction(&self, tx: TransactionRequest) -> Result<(TxHash, TransactionReceipt)> {
-        let pending_tx = self.wallet_manager.signer.send_transaction(tx, None).await?;
+    async fn execute_evm_transaction(
+        &self,
+        tx: TransactionRequest,
+    ) -> Result<(TxHash, TransactionReceipt)> {
+        let pending_tx = self
+            .wallet_manager
+            .signer
+            .send_transaction(tx, None)
+            .await?;
         let tx_hash = pending_tx.tx_hash();
 
         debug!(
@@ -1385,7 +1618,10 @@ impl DydxClient {
                     ))
                 }
             }
-            None => Err(eyre::eyre!("EVM transaction receipt not found for tx_hash = {:?}", tx_hash)),
+            None => Err(eyre::eyre!(
+                "EVM transaction receipt not found for tx_hash = {:?}",
+                tx_hash
+            )),
         }
     }
 
@@ -1399,13 +1635,27 @@ impl DydxClient {
             let tx_msg = match m.msg_type_url.as_str() {
                 "/ibc.applications.transfer.v1.MsgTransfer" => {
                     let json_value: serde_json::Value = serde_json::from_str(&m.msg)?;
-                    let source_port = json_value["source_port"].as_str().ok_or_else(|| eyre::eyre!("Missing source_port in MsgTransfer"))?;
-                    let source_channel = json_value["source_channel"].as_str().ok_or_else(|| eyre::eyre!("Missing source_channel in MsgTransfer"))?;
-                    let token_denom = json_value["token"]["denom"].as_str().ok_or_else(|| eyre::eyre!("Missing token denom in MsgTransfer"))?;
-                    let token_amount = json_value["token"]["amount"].as_str().ok_or_else(|| eyre::eyre!("Missing token amount in MsgTransfer"))?;
-                    let sender = json_value["sender"].as_str().ok_or_else(|| eyre::eyre!("Missing sender in MsgTransfer"))?;
-                    let receiver = json_value["receiver"].as_str().ok_or_else(|| eyre::eyre!("Missing receiver in MsgTransfer"))?;
-                    let timeout_timestamp = json_value["timeout_timestamp"].as_u64().ok_or_else(|| eyre::eyre!("Missing timeout_timestamp in MsgTransfer"))?;
+                    let source_port = json_value["source_port"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("Missing source_port in MsgTransfer"))?;
+                    let source_channel = json_value["source_channel"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("Missing source_channel in MsgTransfer"))?;
+                    let token_denom = json_value["token"]["denom"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("Missing token denom in MsgTransfer"))?;
+                    let token_amount = json_value["token"]["amount"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("Missing token amount in MsgTransfer"))?;
+                    let sender = json_value["sender"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("Missing sender in MsgTransfer"))?;
+                    let receiver = json_value["receiver"]
+                        .as_str()
+                        .ok_or_else(|| eyre::eyre!("Missing receiver in MsgTransfer"))?;
+                    let timeout_timestamp = json_value["timeout_timestamp"]
+                        .as_u64()
+                        .ok_or_else(|| eyre::eyre!("Missing timeout_timestamp in MsgTransfer"))?;
                     let memo = json_value["memo"].as_str().unwrap_or("");
                     let msg = MsgTransfer {
                         source_port: source_port.to_string(),
@@ -1420,7 +1670,7 @@ impl DydxClient {
                         timeout_timestamp: timeout_timestamp,
                         memo: memo.to_string(),
                     };
-                    
+
                     Any {
                         type_url: m.msg_type_url.clone(),
                         value: msg.encode_to_vec(),
@@ -1433,28 +1683,41 @@ impl DydxClient {
             tx_msgs.push(tx_msg);
         }
         // Fetch dYdX account info
-        let dydx_account = self.node_client.get_account(&self.dydx_address.clone().into()).await
+        let dydx_account = self
+            .node_client
+            .get_account(&self.dydx_address.clone().into())
+            .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX account info: {}", e))?;
 
         // Get dYdX account
-        let mut account = self.dydx_wallet.account(0, &mut self.node_client)
+        let mut account = self
+            .dydx_wallet
+            .account(0, &mut self.node_client)
             .await
             .map_err(|e| eyre::eyre!("Failed to get dYdX wallet account: {}", e))?;
-        
+
         // Set next nonce
-        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(dydx_account.sequence));
+        account.set_next_nonce(dydx::node::sequencer::Nonce::Sequence(
+            dydx_account.sequence,
+        ));
 
         // Build transaction
-        let init_tx_raw = self.node_client
+        let init_tx_raw = self
+            .node_client
             .builder
             .build_transaction(&account, tx_msgs.clone(), None, None)
             .map_err(|e| eyre::eyre!("Failed to build dYdX transaction: {}", e))?;
-        
-        
+
         // Simulate transaction
-        let gas_info = self.node_client.simulate(&init_tx_raw).await
+        let gas_info = self
+            .node_client
+            .simulate(&init_tx_raw)
+            .await
             .map_err(|e| eyre::eyre!("Failed to simulate Cosmos transaction: {}", e))?;
-        let fee = self.node_client.builder.calculate_fee(Some(gas_info.gas_used))
+        let fee = self
+            .node_client
+            .builder
+            .calculate_fee(Some(gas_info.gas_used))
             .map_err(|e| eyre::eyre!("Failed to calculate fee for Cosmos transaction: {}", e))?;
         info!(
             gas_used = ?gas_info.gas_used,
@@ -1462,25 +1725,29 @@ impl DydxClient {
             estimated_fee = ?fee,
             "Cosmos transaction simulation successful"
         );
-        
+
         // Create new tx with adjusted fee
-        let final_tx_raw = self.node_client
+        let final_tx_raw = self
+            .node_client
             .builder
             .build_transaction(&account, tx_msgs, Some(fee), None)
             .map_err(|e| eyre::eyre!("Failed to build final Cosmos transaction: {}", e))?;
 
         // Broadcast transaction
-        let tx_hash = self.node_client.broadcast_transaction(final_tx_raw).await
+        let tx_hash = self
+            .node_client
+            .broadcast_transaction(final_tx_raw)
+            .await
             .map_err(|e| eyre::eyre!("Failed to broadcast Cosmos transaction: {}", e))?;
 
         Ok(tx_hash)
     }
 
     async fn spawn_status_polling_skipgo(
-        &self, 
+        &self,
         tx_hash: String,
-        chain_id: String, 
-        expected_time_to_complete_secs: u64, 
+        chain_id: String,
+        expected_time_to_complete_secs: u64,
         dydx_usdc_balance_initial: Decimal,
         arbitrum_usdc_balance_initial: Decimal,
         arbitrum_native_balance_initial: Decimal,
@@ -1488,17 +1755,17 @@ impl DydxClient {
     ) -> Result<()> {
         let config_path = std::env::var("DYDX_CONFIG_PATH")
             .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
-        let config = ClientConfig::from_file(&config_path).await
+        let config = ClientConfig::from_file(&config_path)
+            .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
-        let mut node_client_clone = NodeClient::connect(config.node).await
+        let mut node_client_clone = NodeClient::connect(config.node)
+            .await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
         let dydx_address_clone = self.dydx_address.clone();
         let wallet_manager_clone = self.wallet_manager.clone();
 
         let handle = tokio::spawn(async move {
-            let interval = Duration::from_secs(
-                60.max(expected_time_to_complete_secs / 5)
-            );
+            let interval = Duration::from_secs(60.max(expected_time_to_complete_secs / 5));
             let start_time = Instant::now();
             let tenth_expected = expected_time_to_complete_secs / 10;
             let warn_threshold = expected_time_to_complete_secs + tenth_expected;
@@ -1520,109 +1787,122 @@ impl DydxClient {
             loop {
                 sleep(interval).await;
                 let elapsed_secs = start_time.elapsed().as_secs();
-                
+
                 let response = skip_go::get_transaction_status(get_status_request.clone()).await;
                 match response {
-                    Ok(res) => {
-                        match res.state {
-                            skip_go::SkipGoTransactionState::StateCompletedSuccess => {
-                                let dydx_usdc_balance_final = match node_client_clone.get_account_balance(
+                    Ok(res) => match res.state {
+                        skip_go::SkipGoTransactionState::StateCompletedSuccess => {
+                            let dydx_usdc_balance_final = match node_client_clone
+                                .get_account_balance(
                                     &dydx_address_clone.clone().into(),
                                     &Denom::Usdc,
-                                ).await {
-                                    Ok(balance) => Decimal::from_str(&balance.amount.to_string()).unwrap_or(Decimal::ZERO) * Decimal::from_str("0.000001").unwrap(),
-                                    Err(e) => {
-                                        error!(
-                                            error = %e,
-                                            "{} Failed to fetch dYdX USDC balance: {}", log_string, e
-                                        );
-                                        Decimal::ZERO
-                                    }
-                                };
-                                let arbitrum_usdc_balance_final = match wallet_manager_clone.get_token_balance(
-                                    Address::from_str(ARBITRUM_USDC_DENOM).unwrap(),
-                                ).await {
-                                    Ok(balance) => balance,
-                                    Err(e) => {
-                                        error!(
-                                            error = %e,
-                                            "{} Failed to fetch Arbitrum USDC balance: {}", log_string, e
-                                        );
-                                        Decimal::ZERO
-                                    }
-                                };
-                                let arbitrum_native_balance_final = match wallet_manager_clone.get_native_balance().await {
-                                    Ok(balance) => balance,
-                                    Err(e) => {
-                                        error!(
-                                            error = %e,
-                                            "{} Failed to fetch Arbitrum native balance: {}", log_string, e
-                                        );
-                                        Decimal::ZERO
-                                    }
-                                };
-                                let dydx_usdc_change = dydx_usdc_balance_final - dydx_usdc_balance_initial;
-                                let arbitrum_usdc_change = arbitrum_usdc_balance_final - arbitrum_usdc_balance_initial;
-                                let arbitrum_native_change = arbitrum_native_balance_final - arbitrum_native_balance_initial;
-                                info!(
-                                    tx_hash = ?tx_hash,
-                                    dydx_usdc_balance_final = ?dydx_usdc_balance_final,
-                                    arbitrum_usdc_balance_final = ?arbitrum_usdc_balance_final,
-                                    arbitrum_native_balance_final = ?arbitrum_native_balance_final,
-                                    "{} SkipGo transaction completed successfully \n dYdX USDC change: {} Arbitrum USDC change: {} Arbitrum Native change: {}",
-                                    log_string,
-                                    dydx_usdc_change,
-                                    arbitrum_usdc_change,
-                                    arbitrum_native_change
-                                );
-                                break;
-                            }
-                            skip_go::SkipGoTransactionState::StateSubmitted | skip_go::SkipGoTransactionState::StatePending => {
-                                if elapsed_secs > (5 * error_threshold) {
-                                    error!(
-                                        tx_hash = ?tx_hash,
-                                        elapsed_secs = ?elapsed_secs,
-                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "{} SkipGo transaction pending for an extremely long time, exceeding 5x error threshold. Stopping polling.",
-                                        log_string
-                                    );
-                                    break;
-                                } else if elapsed_secs > error_threshold {
-                                    error!(
-                                        tx_hash = ?tx_hash,
-                                        elapsed_secs = ?elapsed_secs,
-                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "{} SkipGo transaction pending for too long, exceeding error threshold",
-                                        log_string
-                                    );
-                                } else if elapsed_secs > warn_threshold {
-                                    warn!(
-                                        tx_hash = ?tx_hash,
-                                        elapsed_secs = ?elapsed_secs,
-                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "{} SkipGo transaction pending for too long, exceeding warning threshold",
-                                        log_string
-                                    );
-                                } else {
-                                    info!(
-                                        tx_hash = ?tx_hash,
-                                        elapsed_secs = ?elapsed_secs,
-                                        expected_time_to_complete_secs = ?expected_time_to_complete_secs,
-                                        "{} SkipGo transaction pending",
-                                        log_string
-                                    );
+                                )
+                                .await
+                            {
+                                Ok(balance) => {
+                                    Decimal::from_str(&balance.amount.to_string())
+                                        .unwrap_or(Decimal::ZERO)
+                                        * Decimal::from_str("0.000001").unwrap()
                                 }
-                            }
-                            _ => {
+                                Err(e) => {
+                                    error!(
+                                        error = %e,
+                                        "{} Failed to fetch dYdX USDC balance: {}", log_string, e
+                                    );
+                                    Decimal::ZERO
+                                }
+                            };
+                            let arbitrum_usdc_balance_final = match wallet_manager_clone
+                                .get_token_balance(Address::from_str(ARBITRUM_USDC_DENOM).unwrap())
+                                .await
+                            {
+                                Ok(balance) => balance,
+                                Err(e) => {
+                                    error!(
+                                        error = %e,
+                                        "{} Failed to fetch Arbitrum USDC balance: {}", log_string, e
+                                    );
+                                    Decimal::ZERO
+                                }
+                            };
+                            let arbitrum_native_balance_final = match wallet_manager_clone
+                                .get_native_balance()
+                                .await
+                            {
+                                Ok(balance) => balance,
+                                Err(e) => {
+                                    error!(
+                                        error = %e,
+                                        "{} Failed to fetch Arbitrum native balance: {}", log_string, e
+                                    );
+                                    Decimal::ZERO
+                                }
+                            };
+                            let dydx_usdc_change =
+                                dydx_usdc_balance_final - dydx_usdc_balance_initial;
+                            let arbitrum_usdc_change =
+                                arbitrum_usdc_balance_final - arbitrum_usdc_balance_initial;
+                            let arbitrum_native_change =
+                                arbitrum_native_balance_final - arbitrum_native_balance_initial;
+                            info!(
+                                tx_hash = ?tx_hash,
+                                dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+                                arbitrum_usdc_balance_final = ?arbitrum_usdc_balance_final,
+                                arbitrum_native_balance_final = ?arbitrum_native_balance_final,
+                                "{} SkipGo transaction completed successfully \n dYdX USDC change: {} Arbitrum USDC change: {} Arbitrum Native change: {}",
+                                log_string,
+                                dydx_usdc_change,
+                                arbitrum_usdc_change,
+                                arbitrum_native_change
+                            );
+                            break;
+                        }
+                        skip_go::SkipGoTransactionState::StateSubmitted
+                        | skip_go::SkipGoTransactionState::StatePending => {
+                            if elapsed_secs > (5 * error_threshold) {
                                 error!(
                                     tx_hash = ?tx_hash,
-                                    state = ?res.state,
-                                    status_response = ?res,
-                                    "{} SkipGo transaction failed",
+                                    elapsed_secs = ?elapsed_secs,
+                                    expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                    "{} SkipGo transaction pending for an extremely long time, exceeding 5x error threshold. Stopping polling.",
                                     log_string
                                 );
                                 break;
+                            } else if elapsed_secs > error_threshold {
+                                error!(
+                                    tx_hash = ?tx_hash,
+                                    elapsed_secs = ?elapsed_secs,
+                                    expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                    "{} SkipGo transaction pending for too long, exceeding error threshold",
+                                    log_string
+                                );
+                            } else if elapsed_secs > warn_threshold {
+                                warn!(
+                                    tx_hash = ?tx_hash,
+                                    elapsed_secs = ?elapsed_secs,
+                                    expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                    "{} SkipGo transaction pending for too long, exceeding warning threshold",
+                                    log_string
+                                );
+                            } else {
+                                info!(
+                                    tx_hash = ?tx_hash,
+                                    elapsed_secs = ?elapsed_secs,
+                                    expected_time_to_complete_secs = ?expected_time_to_complete_secs,
+                                    "{} SkipGo transaction pending",
+                                    log_string
+                                );
                             }
+                        }
+                        _ => {
+                            error!(
+                                tx_hash = ?tx_hash,
+                                state = ?res.state,
+                                status_response = ?res,
+                                "{} SkipGo transaction failed",
+                                log_string
+                            );
+                            break;
                         }
                     },
                     Err(e) => {
@@ -1636,8 +1916,8 @@ impl DydxClient {
                     }
                 }
             }
-        });   
-        
+        });
+
         // Store the handle
         self.active_transfer_polling_tasks.lock().await.push(handle);
         Ok(())
@@ -1651,7 +1931,7 @@ fn decimal_to_u256(value: Decimal, decimals: u8) -> Result<U256> {
     let value_str = value.to_string();
     let formatted = ethers::utils::parse_units(&value_str, decimals as usize)
         .map_err(|e| eyre::eyre!("Failed to parse decimal value: {}", e))?;
-    
+
     match formatted {
         ethers::utils::ParseUnits::U256(u256_val) => Ok(u256_val),
         _ => Err(eyre::eyre!("Unexpected parse result type")),
@@ -1664,11 +1944,11 @@ fn u256_to_decimal(value: U256, decimals: u8) -> Result<Decimal> {
         .map_err(|e| eyre::eyre!("Failed to format U256 value: {}", e))?;
     Decimal::from_str(&formatted).map_err(|e| eyre::eyre!("Failed to parse formatted value: {}", e))
 }
-    
+
 /// Derive Cosmos address from mnemonic for a given chain
 fn derive_cosmos_address_from_mnemonic(
-    config: &config::Config, 
-    chain_prefix: &str, 
+    config: &config::Config,
+    chain_prefix: &str,
     index: Option<u32>,
 ) -> Result<String> {
     let index = index.unwrap_or(0);

@@ -1068,35 +1068,26 @@ impl ExecutionEngine {
         &self,
         market: Address,
     ) -> Result<HashMap<Address, Decimal>> {
-        let mut balances = HashMap::new();
         let market_info = match self.wallet_manager.market_tokens.get(&market) {
             Some(info) => info,
-            None => return Ok(balances),
+            None => return Ok(HashMap::new()),
         };
-
-        for token_address in [
+        let token_addresses = [
             market_info.long_token_address,
             market_info.short_token_address,
-        ] {
-            let balance = self.wallet_manager.get_token_balance(token_address).await?;
-            balances.insert(token_address, balance);
-        }
-
-        Ok(balances)
+        ];
+        self.wallet_manager.get_token_balances(&token_addresses).await
     }
 
     async fn get_live_stable_balances(&self) -> Result<HashMap<Address, Decimal>> {
-        let mut balances = HashMap::new();
-
-        for token in self.wallet_manager.asset_tokens.values() {
-            if !hedge_utils::STABLE_COINS.contains(&token.symbol.as_str()) {
-                continue;
-            }
-            let balance = self.wallet_manager.get_token_balance(token.address).await?;
-            balances.insert(token.address, balance);
-        }
-
-        Ok(balances)
+        let stable_addresses: Vec<Address> = self
+            .wallet_manager
+            .asset_tokens
+            .values()
+            .filter(|token| hedge_utils::STABLE_COINS.contains(&token.symbol.as_str()))
+            .map(|token| token.address)
+            .collect();
+        self.wallet_manager.get_token_balances(&stable_addresses).await
     }
 
     fn invalidate_markets_for_token(

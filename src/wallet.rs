@@ -1,5 +1,6 @@
 use ethers::prelude::*;
 use ethers::contract::Multicall;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -209,22 +210,60 @@ impl WalletManager {
     /// Get all token balances
     #[instrument(skip(self))]
     pub async fn get_all_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
-        debug!("Fetching all token balances using multicall");
+        let token_addresses: Vec<Address> = self.all_tokens.keys().cloned().collect();
+        self.get_token_balances(&token_addresses).await
+    }
+
+    /// Get balances for an arbitrary subset of token addresses.
+    #[instrument(skip(self, token_addresses))]
+    pub async fn get_token_balances(
+        &self,
+        token_addresses: &[Address],
+    ) -> Result<HashMap<Address, Decimal>> {
+        if token_addresses.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut unique_addresses = Vec::new();
+        let mut seen = HashSet::new();
+        for address in token_addresses {
+            if seen.insert(*address) {
+                unique_addresses.push(*address);
+            }
+        }
+
+        let mut balances = HashMap::new();
+        let mut erc20_tokens = Vec::new();
+
+        for address in unique_addresses {
+            if address == self.native_token.address {
+                balances.insert(address, self.get_native_balance().await?);
+                continue;
+            }
+
+            let token_info = self
+                .all_tokens
+                .get(&address)
+                .ok_or_else(|| eyre::eyre!("Token not found: {}", address))?;
+            erc20_tokens.push((address, token_info.decimals));
+        }
+
+        if erc20_tokens.is_empty() {
+            return Ok(balances);
+        }
+
+        debug!(token_count = erc20_tokens.len(), "Fetching token balances using subset multicall");
         let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
-        for token in self.all_tokens.values() {
-            let contract = IERC20::new(token.address, self.signer.provider().clone().into());
+        for (address, _) in erc20_tokens.iter() {
+            let contract = IERC20::new(*address, self.signer.provider().clone().into());
             let call = contract.balance_of(self.address);
             multicall.add_call(call, false);
         }
 
-        // Execute multicall
         let results: Vec<U256> = multicall.call_array().await?;
-
-        // Parse results into a map
-        let mut balances = HashMap::new();
-        for (i, token) in self.all_tokens.values().enumerate() {
-            let balance = Self::u256_to_decimal(results[i], token.decimals);
-            balances.insert(token.address, balance);
+        for (i, (address, decimals)) in erc20_tokens.iter().enumerate() {
+            let balance = Self::u256_to_decimal(results[i], *decimals);
+            balances.insert(*address, balance);
         }
 
         Ok(balances)
@@ -233,49 +272,15 @@ impl WalletManager {
     /// Get all asset token balances
     #[instrument(skip(self))]
     pub async fn get_asset_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
-        debug!("Fetching all asset token balances");
-        let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
-        for asset_token in self.asset_tokens.values() {
-            let contract = IERC20::new(asset_token.address, self.signer.provider().clone().into());
-            let call = contract.balance_of(self.address);
-            multicall.add_call(call, false);
-        }
-
-        // Execute multicall
-        let results: Vec<U256> = multicall.call_array().await?;
-
-        // Parse results into a map
-        let mut balances = HashMap::new();
-        for (i, asset_token) in self.asset_tokens.values().enumerate() {
-            let balance = Self::u256_to_decimal(results[i], asset_token.decimals);
-            balances.insert(asset_token.address, balance);
-        }
-
-        Ok(balances)
+        let token_addresses: Vec<Address> = self.asset_tokens.keys().cloned().collect();
+        self.get_token_balances(&token_addresses).await
     }
 
     /// Get all market token balances
     #[instrument(skip(self))]
     pub async fn get_market_token_balances(&self) -> Result<HashMap<Address, Decimal>> {
-        debug!("Fetching all market token balances");
-        let mut multicall = Multicall::new(self.signer.provider().clone(), None).await?;
-        for market_token in self.market_tokens.values() {
-            let contract = IERC20::new(market_token.address, self.signer.provider().clone().into());
-            let call = contract.balance_of(self.address);
-            multicall.add_call(call, false);
-        }
-
-        // Execute multicall
-        let results: Vec<U256> = multicall.call_array().await?;
-
-        // Parse results into a map
-        let mut balances = HashMap::new();
-        for (i, market_token) in self.market_tokens.values().enumerate() {
-            let balance = Self::u256_to_decimal(results[i], market_token.decimals);
-            balances.insert(market_token.address, balance);
-        }
-
-        Ok(balances)
+        let token_addresses: Vec<Address> = self.market_tokens.keys().cloned().collect();
+        self.get_token_balances(&token_addresses).await
     }
 
     /// Print comprehensive wallet balances including native, all ERC20 tokens, and all market tokens

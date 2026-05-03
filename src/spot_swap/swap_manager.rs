@@ -1,20 +1,19 @@
+use ethers::prelude::*;
 use ethers::types::{
-    U256, TransactionRequest, U64,
-    TxHash, TransactionReceipt,
+    TransactionReceipt, TransactionRequest, TxHash, U64, U256,
     transaction::eip2718::TypedTransaction,
 };
-use ethers::prelude::*;
-use tracing::{debug, info, warn, instrument};
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
+use tracing::{debug, info, instrument, warn};
 
-use crate::config::Config;
-use crate::wallet::WalletManager;
-use crate::constants::WNT_ADDRESS;
-use super::types::{SwapRequest, QuoteRequest, QuoteResponse};
 use super::paraswap_api_client::ParaSwapClient;
+use super::types::{QuoteRequest, QuoteResponse, SwapRequest};
+use crate::config::Config;
+use crate::constants::WNT_ADDRESS;
+use crate::wallet::WalletManager;
 
 // Add ERC20 ABI for approve function
 abigen!(
@@ -58,7 +57,7 @@ impl SwapManager {
 
     /// Executes a swap request using the ParaSwap API and smart contract - assumes wallet manager tokens have been loaded
     #[instrument(skip(self, swap_request), fields(on_close = true))]
-    pub async fn execute_swap(&self, swap_request: &SwapRequest) -> Result<()> {
+    pub async fn execute_swap(&self, swap_request: &SwapRequest) -> Result<String> {
         let (swap_log_string, quote_request) = self.validate_swap_request(swap_request).await?;
 
         // Check if this is an ETH/WETH swap
@@ -68,27 +67,35 @@ impl SwapManager {
             quote_request.to_token,
             weth_address,
         ) {
-            return self.execute_eth_weth_swap(swap_request, is_wrap, &swap_log_string).await;
+            return self
+                .execute_eth_weth_swap(swap_request, is_wrap, &swap_log_string)
+                .await;
         }
 
         // Get initial balances
         let initial_native_balance = self.wallet_manager.get_native_balance().await?;
-        let initial_from_balance = if quote_request.from_token == self.wallet_manager.native_token.address {
-            initial_native_balance
-        } else {
-            self.wallet_manager.get_token_balance(quote_request.from_token).await?
-        };
-        let initial_to_balance = if quote_request.to_token == self.wallet_manager.native_token.address {
-            initial_native_balance
-        } else {
-            self.wallet_manager.get_token_balance(quote_request.to_token).await?
-        };
+        let initial_from_balance =
+            if quote_request.from_token == self.wallet_manager.native_token.address {
+                initial_native_balance
+            } else {
+                self.wallet_manager
+                    .get_token_balance(quote_request.from_token)
+                    .await?
+            };
+        let initial_to_balance =
+            if quote_request.to_token == self.wallet_manager.native_token.address {
+                initial_native_balance
+            } else {
+                self.wallet_manager
+                    .get_token_balance(quote_request.to_token)
+                    .await?
+            };
 
         info!(
             initial_from_balance = %initial_from_balance,
             initial_to_balance = %initial_to_balance,
             initial_native_balance = %initial_native_balance,
-            "{} Swap Initiated", 
+            "{} Swap Initiated",
             swap_log_string
         );
 
@@ -97,12 +104,14 @@ impl SwapManager {
         debug!(quote = ?quote, "{} Quote Received", swap_log_string);
 
         // Validate the transaction
-        self.validate_transaction(&quote, initial_from_balance).await?;
+        self.validate_transaction(&quote, initial_from_balance)
+            .await?;
         debug!("{} Transaction Validated", swap_log_string);
 
         // Handle token approval if needed (for ERC20 tokens)
         if quote.from_token != self.wallet_manager.native_token.address {
-            self.ensure_token_approval(&quote, quote_request.from_token_decimals).await?;
+            self.ensure_token_approval(&quote, quote_request.from_token_decimals)
+                .await?;
         }
         debug!("{} Token Approval Ensured", swap_log_string);
 
@@ -111,13 +120,15 @@ impl SwapManager {
         debug!(transaction = ?tx, "{} Transaction Built", swap_log_string);
 
         // Simulate the transaction to ensure it will succeed
-        self.simulate_transaction(&tx, initial_native_balance).await?;
+        self.simulate_transaction(&tx, initial_native_balance)
+            .await?;
         debug!("{} Transaction Simulation Successful", swap_log_string);
 
         // Execute the transaction
         let (tx_hash, receipt) = self.execute_transaction(tx).await?;
         let gas_used = self.u256_to_decimal(receipt.gas_used.unwrap_or(U256::zero()), 0)?;
-        let gas_price = self.u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
+        let gas_price =
+            self.u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
         info!(
             tx_hash = ?tx_hash,
             block_number = ?receipt.block_number.unwrap_or(U64::zero()),
@@ -134,18 +145,26 @@ impl SwapManager {
         let final_from_balance = if quote.from_token == self.wallet_manager.native_token.address {
             final_native_balance
         } else {
-            self.wallet_manager.get_token_balance(quote.from_token).await?
+            self.wallet_manager
+                .get_token_balance(quote.from_token)
+                .await?
         };
         let final_to_balance = if quote.to_token == self.wallet_manager.native_token.address {
             final_native_balance
         } else {
-            self.wallet_manager.get_token_balance(quote.to_token).await?
+            self.wallet_manager
+                .get_token_balance(quote.to_token)
+                .await?
         };
 
         let from_token_delta = final_from_balance - initial_from_balance;
         let to_token_delta = final_to_balance - initial_to_balance;
         let native_token_delta = final_native_balance - initial_native_balance;
-        let from_token_info = self.wallet_manager.all_tokens.get(&quote.from_token).unwrap();
+        let from_token_info = self
+            .wallet_manager
+            .all_tokens
+            .get(&quote.from_token)
+            .unwrap();
         let to_token_info = self.wallet_manager.all_tokens.get(&quote.to_token).unwrap();
 
         info!(
@@ -162,34 +181,58 @@ impl SwapManager {
             native_token_delta * self.wallet_manager.native_token.last_mid_price_usd
         );
 
-        Ok(())
+        Ok(format!("{:#x}", tx_hash))
     }
 
     /// Validate swap request, create log string and quote request
     #[instrument(skip(self, swap_request))]
-    async fn validate_swap_request(&self, swap_request: &SwapRequest) -> Result<(String, QuoteRequest)> {
+    async fn validate_swap_request(
+        &self,
+        swap_request: &SwapRequest,
+    ) -> Result<(String, QuoteRequest)> {
         if swap_request.side != "BUY" && swap_request.side != "SELL" {
             return Err(eyre::eyre!("Invalid swap side: {}", swap_request.side));
         }
-        let from_token = if swap_request.from_token_address == self.wallet_manager.native_token.address {
+        let from_token =
+            if swap_request.from_token_address == self.wallet_manager.native_token.address {
+                &self.wallet_manager.native_token
+            } else {
+                self.wallet_manager
+                    .all_tokens
+                    .get(&swap_request.from_token_address)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "From token not found in wallet manager: {:?}",
+                            swap_request.from_token_address
+                        )
+                    })?
+            };
+        let to_token = if swap_request.to_token_address == self.wallet_manager.native_token.address
+        {
             &self.wallet_manager.native_token
         } else {
-            self.wallet_manager.all_tokens.get(&swap_request.from_token_address).ok_or_else(|| {
-                eyre::eyre!("From token not found in wallet manager: {:?}", swap_request.from_token_address)
-            })?
-        };
-        let to_token = if swap_request.to_token_address == self.wallet_manager.native_token.address {
-            &self.wallet_manager.native_token
-        } else {
-            self.wallet_manager.all_tokens.get(&swap_request.to_token_address).ok_or_else(|| {
-                eyre::eyre!("To token not found in wallet manager: {:?}", swap_request.to_token_address)
-            })?
+            self.wallet_manager
+                .all_tokens
+                .get(&swap_request.to_token_address)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "To token not found in wallet manager: {:?}",
+                        swap_request.to_token_address
+                    )
+                })?
         };
 
         let swap_log_string = format!(
             "SWAP REQUEST | {} -> {} | {} {} {} |",
-            from_token.symbol, to_token.symbol, swap_request.side, swap_request.amount,
-            if swap_request.side == "BUY" { &to_token.symbol } else { &from_token.symbol }
+            from_token.symbol,
+            to_token.symbol,
+            swap_request.side,
+            swap_request.amount,
+            if swap_request.side == "BUY" {
+                &to_token.symbol
+            } else {
+                &from_token.symbol
+            }
         );
 
         let request = QuoteRequest {
@@ -207,7 +250,11 @@ impl SwapManager {
 
     /// Validate that we have sufficient balance for the swap
     #[instrument(skip(self, quote))]
-    async fn validate_transaction(&self, quote: &QuoteResponse, from_token_balance: Decimal) -> Result<()> {
+    async fn validate_transaction(
+        &self,
+        quote: &QuoteResponse,
+        from_token_balance: Decimal,
+    ) -> Result<()> {
         debug!(
             from_token = ?quote.from_token,
             to_token = ?quote.to_token,
@@ -215,7 +262,7 @@ impl SwapManager {
             to_amount = %quote.to_amount,
             "Validating transaction requirements"
         );
-        
+
         if from_token_balance < quote.from_amount {
             return Err(eyre::eyre!(
                 "Insufficient balance: need {} but have {} of token {:?}",
@@ -224,23 +271,28 @@ impl SwapManager {
                 quote.from_token
             ));
         }
-        
+
         debug!(
             from_token_balance = %from_token_balance,
             required_amount = %quote.from_amount,
             "Transaction validation successful"
         );
-        
+
         Ok(())
     }
 
     /// Ensure the ParaSwap contract has sufficient allowance to spend our tokens
     #[instrument(skip(self, quote, from_token_decimals))]
-    async fn ensure_token_approval(&self, quote: &QuoteResponse, from_token_decimals: u8) -> Result<()> {
+    async fn ensure_token_approval(
+        &self,
+        quote: &QuoteResponse,
+        from_token_decimals: u8,
+    ) -> Result<()> {
         debug!("Checking token approval for ParaSwap contract");
-        
-        let token_contract = IERC20Approve::new(quote.from_token, self.wallet_manager.signer.clone());
-        
+
+        let token_contract =
+            IERC20Approve::new(quote.from_token, self.wallet_manager.signer.clone());
+
         // Check current allowance
         let current_allowance = token_contract
             .allowance(self.wallet_manager.address, quote.to_contract)
@@ -255,14 +307,14 @@ impl SwapManager {
                 required_amount = %required_amount,
                 "Insufficient allowance, approving tokens"
             );
-            
+
             // Approve maximum amount to avoid repeated approvals
             let max_approval = U256::MAX;
             let approve_tx = token_contract.approve(quote.to_contract, max_approval);
-            
+
             let pending_tx = approve_tx.send().await?;
             let receipt = pending_tx.await?;
-            
+
             match receipt {
                 Some(receipt) => {
                     if receipt.status == Some(U64::from(1)) {
@@ -285,7 +337,7 @@ impl SwapManager {
                 "Sufficient allowance already exists"
             );
         }
-        
+
         Ok(())
     }
 
@@ -304,7 +356,7 @@ impl SwapManager {
                     quote.value
                 } else {
                     U256::zero()
-                }
+                },
             )
             .chain_id(self.chain_id);
 
@@ -320,14 +372,26 @@ impl SwapManager {
         );
 
         // Estimate gas using the provider
-        let gas_estimate = self.wallet_manager.signer.provider().estimate_gas(&tx.clone().into(), None).await?;
-        let gas_price_decimal = self.u256_to_decimal(self.wallet_manager.signer.provider().get_gas_price().await?, 0)?;
+        let gas_estimate = self
+            .wallet_manager
+            .signer
+            .provider()
+            .estimate_gas(&tx.clone().into(), None)
+            .await?;
+        let gas_price_decimal = self.u256_to_decimal(
+            self.wallet_manager
+                .signer
+                .provider()
+                .get_gas_price()
+                .await?,
+            0,
+        )?;
         let gas_price_with_buf = gas_price_decimal * self.max_fee_per_gas_buffer;
         let gas_price = self.decimal_to_u256(gas_price_with_buf, 0)?;
 
         // Set tx gas limit and gas price
         let tx = tx.gas(gas_estimate).gas_price(gas_price);
-        
+
         debug!(
             to = ?quote.to_contract,
             value = %tx.value.unwrap_or(U256::zero()),
@@ -335,13 +399,17 @@ impl SwapManager {
             gas_limit = %tx.gas.unwrap_or(U256::zero()),
             "Transaction built"
         );
-        
+
         Ok(tx)
     }
 
     /// Simulate the transaction to ensure it will succeed
     #[instrument(skip(self, tx))]
-    async fn simulate_transaction(&self, tx: &TransactionRequest, native_balance: Decimal) -> Result<()> {
+    async fn simulate_transaction(
+        &self,
+        tx: &TransactionRequest,
+        native_balance: Decimal,
+    ) -> Result<()> {
         debug!("Simulating transaction");
 
         // Get gas limits from transaction request
@@ -365,12 +433,17 @@ impl SwapManager {
             "Simulating transaction with gas limits"
         );
 
-
         // Convert TransactionRequest to TypedTransaction
         let typed_tx: TypedTransaction = tx.clone().into();
-        
+
         // Use eth_call to simulate the transaction
-        match self.wallet_manager.signer.provider().call(&typed_tx, None).await {
+        match self
+            .wallet_manager
+            .signer
+            .provider()
+            .call(&typed_tx, None)
+            .await
+        {
             Ok(_) => {
                 debug!("Transaction simulation successful");
                 Ok(())
@@ -384,18 +457,25 @@ impl SwapManager {
 
     /// Execute the transaction
     #[instrument(skip(self, tx))]
-    async fn execute_transaction(&self, tx: TransactionRequest) -> Result<(TxHash, TransactionReceipt)> {
+    async fn execute_transaction(
+        &self,
+        tx: TransactionRequest,
+    ) -> Result<(TxHash, TransactionReceipt)> {
         debug!("Executing transaction");
-        
+
         // Send the transaction
-        let pending_tx = self.wallet_manager.signer.send_transaction(tx, None).await?;
+        let pending_tx = self
+            .wallet_manager
+            .signer
+            .send_transaction(tx, None)
+            .await?;
         let tx_hash = pending_tx.tx_hash();
-        
+
         debug!(
             tx_hash = %tx_hash,
             "Transaction sent, waiting for confirmation"
         );
-        
+
         // Wait for confirmation
         let receipt = match pending_tx.await? {
             Some(receipt) => {
@@ -409,7 +489,7 @@ impl SwapManager {
                 return Err(eyre::eyre!("Transaction receipt not found"));
             }
         };
-        
+
         Ok((tx_hash, receipt))
     }
 
@@ -418,7 +498,7 @@ impl SwapManager {
         let value_str = value.to_string();
         let formatted = ethers::utils::parse_units(&value_str, decimals as usize)
             .map_err(|e| eyre::eyre!("Failed to parse decimal value: {}", e))?;
-        
+
         match formatted {
             ethers::utils::ParseUnits::U256(u256_val) => Ok(u256_val),
             _ => Err(eyre::eyre!("Unexpected parse result type")),
@@ -429,7 +509,8 @@ impl SwapManager {
     pub fn u256_to_decimal(&self, value: U256, decimals: u8) -> Result<Decimal> {
         let formatted = ethers::utils::format_units(value, decimals as usize)
             .map_err(|e| eyre::eyre!("Failed to format U256 value: {}", e))?;
-        Decimal::from_str(&formatted).map_err(|e| eyre::eyre!("Failed to parse formatted value: {}", e))
+        Decimal::from_str(&formatted)
+            .map_err(|e| eyre::eyre!("Failed to parse formatted value: {}", e))
     }
 
     /// Execute ETH/WETH wrap or unwrap operation
@@ -439,7 +520,7 @@ impl SwapManager {
         swap_request: &SwapRequest,
         is_wrap: bool,
         swap_log_string: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let weth_address = Address::from_str(WNT_ADDRESS).unwrap();
 
         // Get initial balances
@@ -474,17 +555,24 @@ impl SwapManager {
         debug!("{} ETH/WETH Operation Validated", swap_log_string);
 
         // Build the transaction
-        let tx = self.build_weth_transaction(weth_address, is_wrap, swap_request.amount).await?;
+        let tx = self
+            .build_weth_transaction(weth_address, is_wrap, swap_request.amount)
+            .await?;
         debug!(transaction = ?tx, "{} ETH/WETH Operation Transaction Built", swap_log_string);
 
         // Simulate the transaction
-        self.simulate_transaction(&tx, initial_native_balance).await?;
-        debug!("{} ETH/WETH Operation Simulation Successful", swap_log_string);
+        self.simulate_transaction(&tx, initial_native_balance)
+            .await?;
+        debug!(
+            "{} ETH/WETH Operation Simulation Successful",
+            swap_log_string
+        );
 
         // Execute the transaction
         let (tx_hash, receipt) = self.execute_transaction(tx).await?;
         let gas_used = self.u256_to_decimal(receipt.gas_used.unwrap_or(U256::zero()), 0)?;
-        let gas_price = self.u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
+        let gas_price =
+            self.u256_to_decimal(receipt.effective_gas_price.unwrap_or(U256::zero()), 18)?;
         info!(
             tx_hash = ?tx_hash,
             block_number = ?receipt.block_number.unwrap_or(U64::zero()),
@@ -513,7 +601,7 @@ impl SwapManager {
             weth_delta * self.wallet_manager.all_tokens.get(&weth_address).unwrap().last_mid_price_usd
         );
 
-        Ok(())
+        Ok(format!("{:#x}", tx_hash))
     }
 
     /// Check if a swap is between ETH and WETH
@@ -525,7 +613,8 @@ impl SwapManager {
     ) -> Option<bool> {
         if from_token == self.wallet_manager.native_token.address && to_token == weth_address {
             Some(true) // wrap ETH to WETH
-        } else if from_token == weth_address && to_token == self.wallet_manager.native_token.address {
+        } else if from_token == weth_address && to_token == self.wallet_manager.native_token.address
+        {
             Some(false) // unwrap WETH to ETH
         } else {
             None // not an ETH/WETH swap
@@ -534,7 +623,12 @@ impl SwapManager {
 
     /// Build transaction for wrapping or unwrapping WETH
     #[instrument(skip(self))]
-    async fn build_weth_transaction(&self, weth_address: Address, is_wrap: bool, amount: Decimal) -> Result<TransactionRequest> {
+    async fn build_weth_transaction(
+        &self,
+        weth_address: Address,
+        is_wrap: bool,
+        amount: Decimal,
+    ) -> Result<TransactionRequest> {
         let tx = if is_wrap {
             WETH9::new(weth_address, self.wallet_manager.signer.clone())
                 .deposit()
@@ -545,17 +639,31 @@ impl SwapManager {
         };
 
         let mut tx_request: TransactionRequest = tx.tx.clone().into();
-        tx_request = tx_request.from(self.wallet_manager.address).chain_id(self.chain_id);
+        tx_request = tx_request
+            .from(self.wallet_manager.address)
+            .chain_id(self.chain_id);
 
         // Estimate gas using the provider
-        let gas_estimate = self.wallet_manager.signer.provider().estimate_gas(&tx_request.clone().into(), None).await?;
-        let gas_price_decimal = self.u256_to_decimal(self.wallet_manager.signer.provider().get_gas_price().await?, 0)?;
+        let gas_estimate = self
+            .wallet_manager
+            .signer
+            .provider()
+            .estimate_gas(&tx_request.clone().into(), None)
+            .await?;
+        let gas_price_decimal = self.u256_to_decimal(
+            self.wallet_manager
+                .signer
+                .provider()
+                .get_gas_price()
+                .await?,
+            0,
+        )?;
         let gas_price_with_buf = gas_price_decimal * self.max_fee_per_gas_buffer;
         let gas_price = self.decimal_to_u256(gas_price_with_buf, 0)?;
 
         // Set tx gas limit and gas price
         tx_request = tx_request.gas(gas_estimate).gas_price(gas_price);
-        
+
         debug!(
             to = ?weth_address,
             value = %tx_request.value.unwrap_or(U256::zero()),
@@ -563,7 +671,7 @@ impl SwapManager {
             gas_limit = %tx_request.gas.unwrap_or(U256::zero()),
             "Transaction built"
         );
-        
+
         Ok(tx_request)
     }
 }

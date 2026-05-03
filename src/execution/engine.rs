@@ -722,6 +722,7 @@ impl ExecutionEngine {
 
         let mut preferred_tokens = HashSet::new();
         let mut deposit_token_cache = HashMap::new();
+        let mut invalidated_markets = HashSet::new();
         for (market, _) in deposit_targets.iter() {
             if let Some(token) = self
                 .select_deposit_token_with_fallback_cached(
@@ -765,7 +766,15 @@ impl ExecutionEngine {
                 continue;
             }
 
-            let deposit_token = match deposit_token_cache.get(&market).cloned() {
+            let deposit_token = match self
+                .get_cached_or_recomputed_deposit_token(
+                    market,
+                    &base_stable,
+                    &mut deposit_token_cache,
+                    &mut invalidated_markets,
+                )
+                .await?
+            {
                 Some(token) => token,
                 None => continue,
             };
@@ -791,7 +800,13 @@ impl ExecutionEngine {
                             amount: wrap_amount,
                             side: "BUY".to_string(),
                         };
-                        changed = self.execute_and_log(&action, strategy_run_id).await || changed;
+                        if self.execute_and_log(&action, strategy_run_id).await {
+                            changed = true;
+                            self.invalidate_markets_for_token(
+                                &mut invalidated_markets,
+                                deposit_token.address,
+                            );
+                        }
                     }
                 }
 
@@ -801,8 +816,9 @@ impl ExecutionEngine {
                     .await?;
                 if funding_balance < amount_needed {
                     let remaining = amount_needed - funding_balance;
+                    let live_stable_balances = self.get_live_stable_balances().await?;
                     if let Some(source_stable) =
-                        self.get_stable_source_token(&refreshed.asset_balances, base_stable.address)
+                        self.get_stable_source_token(&live_stable_balances, base_stable.address)
                     {
                         let action = TradeAction::SpotSwap {
                             from_token: source_stable.address,
@@ -810,7 +826,13 @@ impl ExecutionEngine {
                             amount: remaining,
                             side: "BUY".to_string(),
                         };
-                        changed = self.execute_and_log(&action, strategy_run_id).await || changed;
+                        if self.execute_and_log(&action, strategy_run_id).await {
+                            changed = true;
+                            self.invalidate_markets_for_token(
+                                &mut invalidated_markets,
+                                deposit_token.address,
+                            );
+                        }
                     }
                 }
             }
@@ -839,8 +861,18 @@ impl ExecutionEngine {
             };
             if self.execute_and_log(&action, strategy_run_id).await {
                 changed = true;
+                if deposit_token.address != base_stable.address {
+                    self.invalidate_markets_for_token(
+                        &mut invalidated_markets,
+                        deposit_token.address,
+                    );
+                }
                 refreshed = self.build_snapshot().await?;
             }
+        }
+
+        if changed {
+            refreshed = self.build_snapshot().await?;
         }
 
         changed = self
@@ -1006,6 +1038,79 @@ impl ExecutionEngine {
         }
 
         Ok(selected)
+    }
+
+    async fn get_cached_or_recomputed_deposit_token(
+        &self,
+        market: Address,
+        base_stable: &TokenInfo,
+        deposit_token_cache: &mut HashMap<Address, TokenInfo>,
+        invalidated_markets: &mut HashSet<Address>,
+    ) -> Result<Option<TokenInfo>> {
+        if invalidated_markets.remove(&market) {
+            let live_balances = self.get_live_market_pair_balances(market).await?;
+            let selected = self
+                .select_deposit_token(market, base_stable, &live_balances)
+                .await?
+                .or_else(|| self.default_deposit_token_for_market(market));
+            if let Some(token) = selected.clone() {
+                deposit_token_cache.insert(market, token);
+            } else {
+                deposit_token_cache.remove(&market);
+            }
+            return Ok(selected);
+        }
+
+        Ok(deposit_token_cache.get(&market).cloned())
+    }
+
+    async fn get_live_market_pair_balances(
+        &self,
+        market: Address,
+    ) -> Result<HashMap<Address, Decimal>> {
+        let mut balances = HashMap::new();
+        let market_info = match self.wallet_manager.market_tokens.get(&market) {
+            Some(info) => info,
+            None => return Ok(balances),
+        };
+
+        for token_address in [
+            market_info.long_token_address,
+            market_info.short_token_address,
+        ] {
+            let balance = self.wallet_manager.get_token_balance(token_address).await?;
+            balances.insert(token_address, balance);
+        }
+
+        Ok(balances)
+    }
+
+    async fn get_live_stable_balances(&self) -> Result<HashMap<Address, Decimal>> {
+        let mut balances = HashMap::new();
+
+        for token in self.wallet_manager.asset_tokens.values() {
+            if !hedge_utils::STABLE_COINS.contains(&token.symbol.as_str()) {
+                continue;
+            }
+            let balance = self.wallet_manager.get_token_balance(token.address).await?;
+            balances.insert(token.address, balance);
+        }
+
+        Ok(balances)
+    }
+
+    fn invalidate_markets_for_token(
+        &self,
+        invalidated_markets: &mut HashSet<Address>,
+        token_address: Address,
+    ) {
+        for (market, market_info) in self.wallet_manager.market_tokens.iter() {
+            if market_info.long_token_address == token_address
+                || market_info.short_token_address == token_address
+            {
+                invalidated_markets.insert(*market);
+            }
+        }
     }
 
     fn default_deposit_token_for_market(&self, market: Address) -> Option<TokenInfo> {

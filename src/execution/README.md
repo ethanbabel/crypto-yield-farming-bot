@@ -147,7 +147,7 @@ $$
 and:
 
 $$
-\text{`total\\_value\\_usd`} = \text{`arbitrum\\_value\\_usd`} + \text{`dydx\\_main\\_usdc`} + \text{`dydx\\_subaccount\\_equity`}
+\text{total\\_value\\_usd} = \text{arbitrum\\_value\\_usd} + \text{dydx\\_main\\_usdc} + \text{dydx\\_subaccount\\_equity}
 $$
 
 This means native ETH is tracked separately for operational purposes, but it is not added into `arbitrum_value_usd` or `total_value_usd`. That is the current implementation and should be understood as such when interpreting reserve calculations.

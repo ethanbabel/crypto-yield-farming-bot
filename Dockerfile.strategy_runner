@@ -7,12 +7,12 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source structure to cache dependencies
 RUN mkdir -p src/bin
-RUN echo "fn main() {}" > src/bin/data_collector.rs
+RUN echo "fn main() {}" > src/bin/strategy_runner.rs
 RUN echo "fn main() {}" > src/lib.rs
 
 # Build dependencies only (this layer will be cached unless Cargo.toml/Cargo.lock changes)
 RUN cargo fetch
-RUN cargo check --bin data_collector
+RUN cargo check --bin strategy_runner
 RUN rm -rf src
 
 # Copy actual source code, data directory, abis, and .env file
@@ -22,7 +22,7 @@ COPY abis ./abis
 COPY .env ./
 
 # Build the actual application binary (dev)
-RUN cargo build --bin data_collector
+RUN cargo build --bin strategy_runner
 
 # Stage 2: Runtime image
 FROM debian:bookworm-slim
@@ -30,12 +30,12 @@ RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /v
 
 # Copy data directory for token registry runtime access
 COPY --from=builder /app/data ./data
-# Copy dYdX config used by data_collector
+# Copy dYdX config used by strategy_runner
 COPY --from=builder /app/src/hedging/dydx_mainnet.toml ./dydx_mainnet.toml
 # Copy .env file for runtime environment loading
 COPY --from=builder /app/.env ./
 
 # Copy the built (dev) binary
-COPY --from=builder /app/target/debug/data_collector /usr/local/bin/data_collector
+COPY --from=builder /app/target/debug/strategy_runner /usr/local/bin/strategy_runner
 
-ENTRYPOINT ["/usr/local/bin/data_collector"]
+ENTRYPOINT ["/usr/local/bin/strategy_runner"]

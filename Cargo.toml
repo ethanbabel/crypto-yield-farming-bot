@@ -13,12 +13,24 @@ name = "data_recorder"
 path = "src/bin/data_recorder.rs"
 
 [[bin]]
-name = "trading_bot"
-path = "src/bin/trading_bot.rs"
+name = "strategy_runner"
+path = "src/bin/strategy_runner.rs"
+
+[[bin]]
+name = "executor"
+path = "src/bin/executor.rs"
+
+[[bin]]
+name = "backtest"
+path = "src/bin/backtest.rs"
 
 [[bin]]
 name = "main"   # For development and testing
 path = "src/bin/main.rs"
+
+[[bin]]        # Utility to initialize database schema
+name = "init_db_schema"
+path = "src/bin/init_db_schema.rs"
 
 [[bin]]         # Utility to see wallet balances
 name = "see_balances"

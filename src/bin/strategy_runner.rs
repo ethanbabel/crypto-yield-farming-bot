@@ -1,0 +1,247 @@
+use chrono::{Duration, Utc};
+use dotenvy::dotenv;
+use futures::StreamExt;
+use redis::AsyncCommands;
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::time;
+use tracing::{error, info, instrument, warn};
+
+use crypto_yield_farming_bot::config;
+use crypto_yield_farming_bot::db::db_manager::DbManager;
+use crypto_yield_farming_bot::db::models::strategy_runs::NewStrategyRunModel;
+use crypto_yield_farming_bot::db::models::strategy_targets::NewStrategyTargetModel;
+use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
+use crypto_yield_farming_bot::logging;
+use crypto_yield_farming_bot::strategy::engine;
+use crypto_yield_farming_bot::strategy::types::PortfolioData;
+use crypto_yield_farming_bot::wallet::WalletManager;
+
+const DATA_COLLECTION_COMPLETED_CHANNEL: &str = "data_collection_completed";
+const STRATEGY_RUN_COMPLETED_CHANNEL: &str = "strategy_run_completed";
+const DEFAULT_HANG_TIMEOUT_SECS: u64 = 3000; // 50m - strategy runner should run every 30 minutes so after 50m+ assume it's hung
+const DEFAULT_RUN_TIMEOUT_SECS: u64 = 600; // 10m
+const INIT_RETRY_BASE_SECS: u64 = 5;
+const INIT_RETRY_MAX_SECS: u64 = 120;
+
+#[instrument(name = "strategy_runner_main")]
+#[tokio::main]
+async fn main() -> eyre::Result<()> {
+    // Load environment variables from .env file
+    dotenv()?;
+
+    // Initialize logging
+    if let Err(e) = logging::init_logging(env!("CARGO_BIN_NAME").to_string()) {
+        eprintln!("Failed to initialize logging: {}", e);
+        return Err(e.into());
+    }
+
+    // Load configuration (including provider)
+    let cfg = config::Config::load().await;
+    info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
+
+    // Initialize database manager with retry to avoid rapid restart loops under DB pressure
+    let mut init_attempt = 0u64;
+    let db_manager = loop {
+        match DbManager::init(&cfg).await {
+            Ok(db_manager) => break db_manager,
+            Err(e) => {
+                init_attempt += 1;
+                let retry_secs = (INIT_RETRY_BASE_SECS.saturating_mul(init_attempt)).min(INIT_RETRY_MAX_SECS);
+                error!(
+                    error = ?e,
+                    init_attempt,
+                    retry_secs,
+                    "Failed to initialize database manager, retrying"
+                );
+                time::sleep(std::time::Duration::from_secs(retry_secs)).await;
+            }
+        }
+    };
+    let db_manager = Arc::new(db_manager);
+    info!("Database manager initialized");
+
+    // Create Redis client
+    let redis_client = redis::Client::open("redis://redis:6379")?;
+    let mut pubsub = redis_client.get_async_pubsub().await?;
+    pubsub.subscribe(DATA_COLLECTION_COMPLETED_CHANNEL).await?;
+    let mut messages = pubsub.on_message();
+    let mut publish_conn = redis_client.get_multiplexed_async_connection().await?;
+
+    // Get the timestamp of the last strategy run
+    let mut last_run_time = db_manager.get_latest_strategy_run().await?.map(|run| run.timestamp);
+
+    let last_progress = Arc::new(AtomicU64::new(Utc::now().timestamp() as u64));
+    let hang_timeout_secs = std::env::var("STRATEGY_RUNNER_HANG_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_HANG_TIMEOUT_SECS);
+    let run_timeout_secs = std::env::var("STRATEGY_RUNNER_RUN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RUN_TIMEOUT_SECS);
+
+    let watchdog_progress = last_progress.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let last = watchdog_progress.load(Ordering::Relaxed);
+            let now = Utc::now().timestamp() as u64;
+            if now.saturating_sub(last) > hang_timeout_secs {
+                error!(
+                    last_progress = last,
+                    hang_timeout_secs,
+                    "Strategy runner appears hung; exiting for restart"
+                );
+                std::process::exit(1);
+            }
+        }
+    });
+
+    info!("Waiting for data_collection_completed signals");
+    loop {
+        last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+        let now = Utc::now();
+        let ready_at = last_run_time.map(|t| t + Duration::minutes(30));
+
+        if let Some(ready_at) = ready_at {
+            if now < ready_at {
+                let wait = (ready_at - now).to_std().unwrap_or_else(|_| std::time::Duration::from_secs(0));
+                tokio::select! {
+                    msg = messages.next() => {
+                        if let Some(msg) = msg {
+                            last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+                            let payload: String = msg.get_payload().unwrap_or_default();
+                            info!(payload = %payload, "Received data collection completion signal");
+                            if let Some(last_run_time) = last_run_time {
+                                let elapsed = Utc::now() - last_run_time;
+                                if elapsed < Duration::minutes(30) {
+                                    info!(elapsed_minutes = %elapsed.num_minutes(), "Skipping strategy run due to cadence");
+                                }
+                            }
+                        } else {
+                            warn!("Data collection pubsub stream ended");
+                            break;
+                        }
+                    }
+                    _ = time::sleep(wait) => {
+                        continue;
+                    }
+                }
+                continue;
+            }
+        }
+
+        match time::timeout(std::time::Duration::from_secs(600), messages.next()).await {
+            Ok(Some(msg)) => { // 30 minutes have passed and we received a data collection completed signal
+                last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+                let payload: String = msg.get_payload().unwrap_or_default();
+                info!(payload = %payload, "Received data collection completion signal");
+
+                let run_started_at = Utc::now();
+                let mut wallet_manager = WalletManager::new(&cfg)?;
+                wallet_manager.load_tokens(&db_manager).await?;
+                let wallet_manager = Arc::new(wallet_manager);
+
+                let dydx_client = DydxClient::new(cfg.clone(), wallet_manager).await?;
+                let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
+                let portfolio_data = match time::timeout(
+                    std::time::Duration::from_secs(run_timeout_secs),
+                    engine::run_strategy_engine(db_manager.clone(), dydx_client.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(e)) => {
+                        error!(error = ?e, "Strategy engine failed");
+                        continue;
+                    }
+                    Err(_) => {
+                        error!(
+                            run_timeout_secs,
+                            "Strategy engine timed out; skipping run"
+                        );
+                        continue;
+                    }
+                };
+                info!(
+                    "Strategy engine completed with {} markets",
+                    portfolio_data.market_addresses.len()
+                );
+                portfolio_data.log_portfolio_data();
+
+                if let Err(e) = record_strategy_run(&db_manager, &cfg, run_started_at, &portfolio_data).await {
+                    error!(error = ?e, "Failed to record strategy run");
+                } else {
+                    let _: () = publish_conn
+                        .publish(STRATEGY_RUN_COMPLETED_CHANNEL, run_started_at.to_rfc3339())
+                        .await
+                        .unwrap_or(());
+                }
+
+                last_run_time = Some(run_started_at);
+            }
+            Ok(None) => {
+                warn!("Data collection pubsub stream ended");
+                break;
+            }
+            Err(_) => {
+                warn!("Did not receive data collection completion signal within 10 minutes after cadence window");
+                continue;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn record_strategy_run(
+    db_manager: &Arc<DbManager>,
+    cfg: &config::Config,
+    run_started_at: chrono::DateTime<Utc>,
+    portfolio_data: &PortfolioData,
+) -> eyre::Result<i32> {
+    let total_weight = portfolio_data.weights.sum();
+    let portfolio_return = portfolio_data.weights.dot(&portfolio_data.expected_returns);
+    let portfolio_variance = portfolio_data
+        .weights
+        .dot(&portfolio_data.covariance_matrix.dot(&portfolio_data.weights));
+    let portfolio_volatility = portfolio_variance.sqrt().unwrap_or(Decimal::ZERO);
+    let sharpe = if portfolio_volatility > Decimal::ZERO {
+        portfolio_return / portfolio_volatility
+    } else {
+        Decimal::ZERO
+    };
+
+    let run = NewStrategyRunModel {
+        timestamp: run_started_at,
+        strategy_version: cfg.strategy_version.clone(),
+        total_weight,
+        expected_return_bps: portfolio_return * Decimal::from_f64(10000.0).unwrap(),
+        volatility_bps: portfolio_volatility * Decimal::from_f64(10000.0).unwrap(),
+        sharpe,
+    };
+    let run_id = db_manager.insert_strategy_run(&run).await?;
+
+    for (i, market) in portfolio_data.market_addresses.iter().enumerate() {
+        if let Some(market_id) = db_manager.get_market_id_with_fallback(*market).await? {
+            let mkt_return = portfolio_data.expected_returns[i];
+            let mkt_variance = portfolio_data.covariance_matrix[[i, i]];
+            let target = NewStrategyTargetModel {
+                strategy_run_id: run_id,
+                market_id,
+                target_weight: portfolio_data.weights[i],
+                expected_return_bps: mkt_return * Decimal::from_f64(10000.0).unwrap(),
+                variance_bps: mkt_variance * Decimal::from_f64(10000.0).unwrap(),
+            };
+            db_manager.insert_strategy_target(&target).await?;
+        } else {
+            warn!(market_address = ?market, "Skipping strategy target insert: market ID not found");
+        }
+    }
+
+    Ok(run_id)
+}

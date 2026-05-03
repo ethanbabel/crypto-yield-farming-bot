@@ -17,7 +17,10 @@ use crate::hedging::dydx_client::DydxClient;
 
 /// Entry point for the strategy engine — run on each data refresh
 #[instrument(name = "strategy_engine", skip(db_manager, dydx_client))]
-pub async fn run_strategy_engine(db_manager: Arc<DbManager>, dydx_client: Arc<DydxClient>) -> Result<PortfolioData> {
+pub async fn run_strategy_engine(
+    db_manager: Arc<DbManager>,
+    dydx_client: Arc<tokio::sync::Mutex<DydxClient>>,
+) -> Result<PortfolioData> {
     info!("Starting strategy engine...");
 
     // Fetch all data from DB
@@ -97,7 +100,10 @@ pub async fn run_strategy_engine(db_manager: Arc<DbManager>, dydx_client: Arc<Dy
     let mut display_names = Vec::with_capacity(n_markets);
     let mut expected_returns = Array1::zeros(n_markets);
 
-    let token_hedgeinfo_map = dydx_client.get_token_hedgeinfo_map().await?;
+    let token_hedgeinfo_map = {
+        let client = dydx_client.lock().await;
+        client.get_token_hedgeinfo_map().await?
+    };
 
     // Run models on each market sequentially to respect rate limits
     for (i, slice) in market_slices.iter().enumerate() {

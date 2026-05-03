@@ -1,13 +1,13 @@
 use dotenvy::dotenv;
 use eyre::Result;
 use tracing::{info};
-use std::sync::Arc;
 
 use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::config;
-use crypto_yield_farming_bot::db::db_manager::DbManager;
-use crypto_yield_farming_bot::wallet::WalletManager;
-use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
+use crypto_yield_farming_bot::db::{
+    connection,
+    schema,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,20 +24,13 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load().await;
     info!(network_mode = %cfg.network_mode, "Configuration loaded and logging initialized");
 
-    // Initialize db manager
-    let db = DbManager::init(&cfg).await?;
-    let db = Arc::new(db);
-    info!("Database manager initialized");
+    // Initialize database connection pool
+    let pool = connection::create_pool(&cfg).await?;
+    info!("Database connection pool created");
 
-    // Initialize and load wallet manager
-    let mut wallet_manager = WalletManager::new(&cfg)?;
-    wallet_manager.load_tokens(&db).await?;
-    let wallet_manager = Arc::new(wallet_manager);
-    info!("Wallet manager initialized and tokens loaded");
-
-    // Initialize dydx client
-    let _dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
-    info!("dYdX client initialized");
+    // Initialize database schema
+    schema::init_schema(&pool).await?;
+    info!("Database schema initialized");
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

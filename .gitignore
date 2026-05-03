@@ -15,3 +15,10 @@
 
 # Ignore dydx config file
 /src/hedging/dydx_mainnet.toml
+
+# Ignore backtest output
+/backtest_output/*
+!/backtest_output/.gitkeep
+
+# Ignore Codex/LLM files
+.codex

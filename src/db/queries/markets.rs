@@ -1,6 +1,6 @@
-use sqlx::{PgPool, Error};
-use std::collections::HashMap;
 use ethers::types::Address;
+use sqlx::{Error, PgPool, Row};
+use std::collections::HashMap;
 use crate::db::models::markets::{MarketModel, NewMarketModel};
 
 /// Fetch a market by its database ID
@@ -61,6 +61,26 @@ pub async fn get_market_id_map(pool: &PgPool) -> Result<HashMap<Address, i32>, E
         .collect();
 
     Ok(map)
+}
+
+/// Resolve a market ID by address using case-insensitive matching.
+pub async fn get_market_id_by_address_insensitive(
+    pool: &PgPool,
+    address: &str,
+) -> Result<Option<i32>, Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM markets
+        WHERE lower(address) = lower($1)
+        LIMIT 1
+        "#,
+    )
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| row.get(0)))
 }
 
 /// Get the index token ID for a market

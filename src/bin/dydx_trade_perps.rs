@@ -68,7 +68,11 @@ async fn main() -> Result<()> {
         info!("dYdX market order submitted successfully");
     }
     
-    dydx_client.wait_for_active_tasks().await; // Wait before closing position
+    dydx_client.wait_for_active_perp_tasks().await; // Wait before closing position
+
+    // Get Subaccount summary after order
+    let summary = dydx_client.get_subaccount_summary().await?;
+    info!(subaccount_summary = ?summary, "Subaccount summary after placing perp order");
 
     // Close the position
     info!(token = %token, "Closing dYdX perp position");
@@ -78,7 +82,11 @@ async fn main() -> Result<()> {
         info!("dYdX perp position closed successfully");
     }
 
-    dydx_client.wait_for_active_tasks().await; // Wait before exiting
+    dydx_client.wait_for_active_perp_tasks().await; // Wait before exiting
+
+    // Final subaccount summary
+    let final_summary = dydx_client.get_subaccount_summary().await?;
+    info!(final_subaccount_summary = ?final_summary, "Final subaccount summary after closing perp position");
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Allow time for logging to flush
     Ok(())

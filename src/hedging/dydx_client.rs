@@ -81,6 +81,32 @@ pub struct DydxClient {
     dydx_wallet: Wallet,
     dydx_address: String,
     active_transfer_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
+    active_perp_polling_tasks: Arc<tokio::sync::Mutex<Vec<JoinHandle<Result<PerpOrderTaskResult>>>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerpOrderOutcome {
+    Filled,
+    Canceled,
+    TimedOut,
+}
+
+#[derive(Debug)]
+struct PerpOrderTaskResult {
+    token: String,
+    size: Decimal,
+    side_is_buy: bool,
+    is_position_reduction: bool,
+    log_string: String,
+    outcome: PerpOrderOutcome,
+    retry_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct DydxSubaccountSummary {
+    pub equity: Decimal,
+    pub free_collateral: Decimal,
+    pub usdc_balance: Decimal,
 }
 
 impl DydxClient {
@@ -88,7 +114,9 @@ impl DydxClient {
         // Initialize crypto provider
         config::init_crypto_provider();
 
-        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml")
+        let config_path = std::env::var("DYDX_CONFIG_PATH")
+            .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
+        let config = ClientConfig::from_file(&config_path)
             .await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let node_client = NodeClient::connect(config.node)
@@ -108,11 +136,12 @@ impl DydxClient {
             dydx_wallet,
             dydx_address,
             active_transfer_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            active_perp_polling_tasks: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
     }
 
     #[instrument(skip(self))]
-    pub async fn wait_for_active_tasks(&self) {
+    pub async fn wait_for_active_transfer_tasks(&self) {
         let mut tasks = self.active_transfer_polling_tasks.lock().await;
         info!("Waiting for {} active transfer polling tasks to complete...", tasks.len());
         while let Some(handle) = tasks.pop() {
@@ -121,6 +150,57 @@ impl DydxClient {
             }
         }
         info!("All active transfer polling tasks completed.");
+    }
+
+    #[instrument(skip(self))]
+    pub async fn wait_for_active_perp_tasks(&mut self) {
+        let max_retries = 5u32;
+        loop {
+            let perp_handles = {
+                let mut tasks = self.active_perp_polling_tasks.lock().await;
+                std::mem::take(&mut *tasks)
+            };
+            if perp_handles.is_empty() {
+                break;
+            }
+
+            info!("Waiting for {} active perp polling tasks to complete...", perp_handles.len());
+            for handle in perp_handles {
+                match handle.await {
+                    Ok(Ok(result)) => {
+                        if result.outcome == PerpOrderOutcome::TimedOut && result.retry_count < max_retries {
+                            warn!(
+                                token = %result.token,
+                                size = %result.size,
+                                side_is_buy = result.side_is_buy,
+                                retry_count = result.retry_count + 1,
+                                "Perp order timed out; retrying"
+                            );
+                            let retry_log = format!("{} | Retry {}/{}", result.log_string, result.retry_count + 1, max_retries);
+                            if let Err(e) = self
+                                .execute_perp_order(
+                                    &result.token,
+                                    result.size,
+                                    result.side_is_buy,
+                                    retry_log,
+                                    result.is_position_reduction,
+                                    result.retry_count + 1,
+                                )
+                                .await
+                            {
+                                error!(error = ?e, token = %result.token, "Failed to retry perp order");
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("Error in perp polling task: {}", e);
+                    }
+                    Err(e) => {
+                        error!("Join error in perp polling task: {}", e);
+                    }
+                }
+            }
+        }
     }
 
     #[instrument(skip(self))]
@@ -220,7 +300,7 @@ impl DydxClient {
     pub async fn submit_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool) -> Result<()> {
         let log_string = self.get_perp_order_log_string(&token, size, side_is_buy, false)?;
 
-        self.execute_perp_order(&token, size, side_is_buy, log_string).await
+        self.execute_perp_order(&token, size, side_is_buy, log_string, false, 0).await
     }
 
     pub async fn reduce_perp_position(&mut self, token: &str, reduce_by: Option<Decimal>) -> Result<()> {
@@ -235,17 +315,27 @@ impl DydxClient {
         };
         let log_string = self.get_perp_order_log_string(&token, reduce_by, side_is_buy, true)?;
 
-        self.execute_perp_order(token, reduce_by, side_is_buy, log_string).await
+        self.execute_perp_order(token, reduce_by, side_is_buy, log_string, true, 0).await
     }
 
-    async fn execute_perp_order(&mut self, token: &str, size: Decimal, side_is_buy: bool, log_string: String) -> Result<()> {
+    async fn execute_perp_order(
+        &mut self,
+        token: &str,
+        size: Decimal,
+        side_is_buy: bool,
+        log_string: String,
+        is_position_reduction: bool,
+        retry_count: u32,
+    ) -> Result<()> {
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
         let dydx_subaccount_perp_positions_initial = self.get_dydx_subaccount_perp_positions().await?;
+        let dydx_subaccount_summary_initial = self.get_subaccount_summary().await?;
         info!(
             dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
             dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_usdc_balance_initial,
             dydx_subaccount_perp_positions_initial = ?dydx_subaccount_perp_positions_initial,
+            dydx_subaccount_free_collateral_initial = ?dydx_subaccount_summary_initial.free_collateral,
             "{} | Order Initiated", log_string
         );
 
@@ -297,7 +387,18 @@ impl DydxClient {
         );
 
         // Spawn status polling
-        self.spawn_status_polling_perp_order(log_string, false, order_id, current_block_height.ahead(40)).await?;
+        self.spawn_status_polling_perp_order(
+            token.to_string(),
+            size,
+            side_is_buy,
+            log_string,
+            is_position_reduction,
+            retry_count,
+            order_id,
+            current_block_height.ahead(40),
+            current_block_height.ahead(42), // Wait until 2 blocks after order expiry
+        )
+        .await?;
 
         Ok(())
     }
@@ -329,12 +430,21 @@ impl DydxClient {
 
     async fn spawn_status_polling_perp_order(
         &self, 
+        token: String,
+        size: Decimal,
+        side_is_buy: bool,
         log_string: String, 
         is_position_reduction: bool,
+        retry_count: u32,
         order_id_node: OrderId,
+        good_til_block_height: Height,
         block_to_wait_until: Height,
     ) -> Result<()> {
-        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
+        sleep(Duration::from_millis(500)).await; // Small delay to ensure order is indexed
+
+        let config_path = std::env::var("DYDX_CONFIG_PATH")
+            .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
+        let config = ClientConfig::from_file(&config_path).await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let mut node_client_clone = NodeClient::connect(config.node).await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;
@@ -349,7 +459,7 @@ impl DydxClient {
             .map_err(|e| eyre::eyre!("Failed to fetch subaccount orders for order ID string: {}", e))?;
         let order_id_indexer = subaccount_orders
             .iter()
-            .find(|order| order.client_id.0 == order_id_node.client_id && order.good_til_block == Some(block_to_wait_until.clone()))
+            .find(|order| order.client_id.0 == order_id_node.client_id && order.good_til_block == Some(good_til_block_height.clone()))
             .ok_or_else(|| eyre::eyre!("Order not found in subaccount orders"))?
             .id
             .clone();
@@ -393,16 +503,33 @@ impl DydxClient {
                                         Decimal::ZERO
                                     }
                                 };
+                                let dydx_subaccount_free_collateral_final = match indexer_client_clone.accounts().get_subaccount(&subaccount).await {
+                                    Ok(summary) => Decimal::from_str(&summary.free_collateral.to_string()).unwrap_or(Decimal::ZERO),
+                                    Err(e) => {
+                                        error!(
+                                            error = %e,
+                                            "{} | Failed to fetch dYdX subaccount summary for free collateral", log_string
+                                        );
+                                        Decimal::ZERO
+                                    }
+                                };
+
                                 let dydx_subaccount_perp_positions_final = match indexer_client_clone.accounts().get_subaccount_perpetual_positions(&subaccount, None).await {
                                     Ok(positions) => {
-                                        positions.iter()
-                                        .filter_map(|pos| {
+                                        let mut perp_map = HashMap::new();
+
+                                        for pos in positions.iter() {
                                             let ticker = pos.market.0.clone();
-                                            let size_decimal = Decimal::from_str(&pos.size.to_plain_string()).ok()?;
-                                            if size_decimal.is_zero() { return None; }
-                                            Some((ticker, size_decimal))
-                                        })
-                                        .collect::<HashMap<String, Decimal>>()
+                                            let size_decimal = Decimal::from_str(&pos.size.to_plain_string()).unwrap_or(Decimal::ZERO);
+                                            if size_decimal.is_zero()
+                                                || pos.status == dydx::indexer::types::PerpetualPositionStatus::Closed
+                                                || pos.status == dydx::indexer::types::PerpetualPositionStatus::Liquidated
+                                            {
+                                                continue;
+                                            }
+                                            perp_map.insert(ticker.clone(), size_decimal);
+                                        }
+                                        perp_map
                                     },
                                     Err(e) => {
                                         error!(
@@ -417,9 +544,18 @@ impl DydxClient {
                                     dydx_usdc_balance_final = ?dydx_usdc_balance_final,
                                     dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
                                     dydx_subaccount_perp_positions_final = ?dydx_subaccount_perp_positions_final,
+                                    dydx_subaccount_free_collateral_final = ?dydx_subaccount_free_collateral_final,
                                     "{} | {}", log_string, complete_msg
                                 );
-                                break;
+                                return Ok(PerpOrderTaskResult {
+                                    token,
+                                    size,
+                                    side_is_buy,
+                                    is_position_reduction,
+                                    log_string,
+                                    outcome: PerpOrderOutcome::Filled,
+                                    retry_count,
+                                });
                             },
                             dydx::indexer::ApiOrderStatus::OrderStatus(OrderStatus::Open) |
                             dydx::indexer::ApiOrderStatus::BestEffort(dydx::indexer::types::BestEffortOpenedStatus::BestEffortOpened) => {
@@ -434,7 +570,15 @@ impl DydxClient {
                                     order_id_indexer = ?order_id_indexer,
                                     "{} | Order Cancelled", log_string
                                 );
-                                break;
+                                return Ok(PerpOrderTaskResult {
+                                    token,
+                                    size,
+                                    side_is_buy,
+                                    is_position_reduction,
+                                    log_string,
+                                    outcome: PerpOrderOutcome::Canceled,
+                                    retry_count,
+                                });
                             }
                             _ => {
                                 warn!(
@@ -466,14 +610,22 @@ impl DydxClient {
                 };
                 if current_block_height > block_to_wait_until {
                     warn!("{} | Order Timed Out After Reaching Target Block Height", log_string);
-                    break;
+                    return Ok(PerpOrderTaskResult {
+                        token,
+                        size,
+                        side_is_buy,
+                        is_position_reduction,
+                        log_string,
+                        outcome: PerpOrderOutcome::TimedOut,
+                        retry_count,
+                    });
                 }
                 sleep(Duration::from_secs(5)).await;
             }
         });
 
         // Store the handle
-        self.active_transfer_polling_tasks.lock().await.push(handle);
+        self.active_perp_polling_tasks.lock().await.push(handle);
         Ok(())
     }
 
@@ -792,7 +944,7 @@ impl DydxClient {
         Ok(balance)
     }
 
-    async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
+    pub async fn get_dydx_usdc_balance(&mut self) -> Result<Decimal> {
         let balance = self.node_client.get_account_balance(
             &self.dydx_address.clone().into(),
             &Denom::Usdc
@@ -845,6 +997,32 @@ impl DydxClient {
             perp_positions_map.insert(ticker, size);
         }
         Ok(perp_positions_map)
+    }
+
+    pub async fn get_subaccount_summary(&self) -> Result<DydxSubaccountSummary> {
+        let subaccount = Subaccount::new(
+            self.dydx_address.clone().into(),
+            SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
+                .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
+        );
+
+        let subaccount_info = self.indexer_client.accounts()
+            .get_subaccount(&subaccount).await
+            .map_err(|e| eyre::eyre!("Failed to fetch dYdX subaccount info: {}", e))?;
+
+        let equity = Decimal::from_str(&subaccount_info.equity.to_plain_string())?;
+        let free_collateral = Decimal::from_str(&subaccount_info.free_collateral.to_plain_string())?;
+        let usdc_balance = Decimal::from_str(
+            &subaccount_info.asset_positions.get(&Ticker("USDC".to_string()))
+            .map(|pos| pos.size.to_plain_string())
+            .unwrap_or("0".to_string())
+        )?;
+
+        Ok(DydxSubaccountSummary {
+            equity,
+            free_collateral,
+            usdc_balance,
+        })
     }
 
     fn get_deposit_log_string(
@@ -1308,7 +1486,9 @@ impl DydxClient {
         arbitrum_native_balance_initial: Decimal,
         log_string: String,
     ) -> Result<()> {
-        let config = ClientConfig::from_file("src/hedging/dydx_mainnet.toml").await
+        let config_path = std::env::var("DYDX_CONFIG_PATH")
+            .unwrap_or_else(|_| "src/hedging/dydx_mainnet.toml".to_string());
+        let config = ClientConfig::from_file(&config_path).await
             .map_err(|e| eyre::eyre!("Failed to load dYdX config: {}", e))?;
         let mut node_client_clone = NodeClient::connect(config.node).await
             .map_err(|e| eyre::eyre!("Failed to connect to dYdX node: {}", e))?;

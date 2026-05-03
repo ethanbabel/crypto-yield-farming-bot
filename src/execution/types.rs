@@ -23,6 +23,23 @@ pub struct PortfolioSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExecutionTargets {
+    pub market_addresses: Vec<Address>,
+    pub weights: Vec<Decimal>,
+}
+
+impl ExecutionTargets {
+    pub fn new(market_addresses: Vec<Address>, weights: Vec<Decimal>) -> Self {
+        assert_eq!(market_addresses.len(), weights.len());
+
+        Self {
+            market_addresses,
+            weights,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum TradeAction {
     GmDeposit {
         market: Address,

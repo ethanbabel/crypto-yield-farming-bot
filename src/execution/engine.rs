@@ -154,7 +154,7 @@ impl ExecutionEngine {
 
         // Stage 3: Deposits + cleanup swaps
         if self
-            .execute_deposit_stage(&snapshot, &deltas, strategy_run_id)
+            .execute_deposit_stage(&snapshot, &deltas, &reserve_state, strategy_run_id)
             .await?
         {
             snapshot = self.build_snapshot().await?;
@@ -695,6 +695,7 @@ impl ExecutionEngine {
         &self,
         snapshot: &PortfolioSnapshot,
         deltas: &HashMap<Address, Decimal>,
+        reserve_state: &ReserveState,
         strategy_run_id: i32,
     ) -> Result<bool> {
         let mut deposit_targets: Vec<(Address, Decimal)> = deltas
@@ -792,8 +793,10 @@ impl ExecutionEngine {
                 let shortfall = amount_needed - funding_balance;
                 if deposit_token.address == WNT_ADDRESS.parse().unwrap() {
                     let native_balance = self.wallet_manager.get_native_balance().await?;
-                    if native_balance > Decimal::ZERO {
-                        let wrap_amount = native_balance.min(shortfall);
+                    let wrappable_native =
+                        (native_balance - reserve_state.gas_reserve_target_eth).max(Decimal::ZERO);
+                    if wrappable_native > Decimal::ZERO {
+                        let wrap_amount = wrappable_native.min(shortfall);
                         let action = TradeAction::SpotSwap {
                             from_token: NATIVE_ADDRESS.parse().unwrap(),
                             to_token: deposit_token.address,

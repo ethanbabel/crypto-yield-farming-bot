@@ -49,7 +49,8 @@ async fn main() -> eyre::Result<()> {
             Ok(db_manager) => break db_manager,
             Err(e) => {
                 init_attempt += 1;
-                let retry_secs = (INIT_RETRY_BASE_SECS.saturating_mul(init_attempt)).min(INIT_RETRY_MAX_SECS);
+                let retry_secs =
+                    (INIT_RETRY_BASE_SECS.saturating_mul(init_attempt)).min(INIT_RETRY_MAX_SECS);
                 error!(
                     error = ?e,
                     init_attempt,
@@ -71,7 +72,10 @@ async fn main() -> eyre::Result<()> {
     let mut publish_conn = redis_client.get_multiplexed_async_connection().await?;
 
     // Get the timestamp of the last strategy run
-    let mut last_run_time = db_manager.get_latest_strategy_run().await?.map(|run| run.timestamp);
+    let mut last_run_time = db_manager
+        .get_latest_strategy_run()
+        .await?
+        .map(|run| run.timestamp);
 
     let last_progress = Arc::new(AtomicU64::new(Utc::now().timestamp() as u64));
     let hang_timeout_secs = std::env::var("STRATEGY_RUNNER_HANG_TIMEOUT_SECS")
@@ -136,7 +140,8 @@ async fn main() -> eyre::Result<()> {
         }
 
         match time::timeout(std::time::Duration::from_secs(600), messages.next()).await {
-            Ok(Some(msg)) => { // 30 minutes have passed and we received a data collection completed signal
+            Ok(Some(msg)) => {
+                // 30 minutes have passed and we received a data collection completed signal
                 last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
                 let payload: String = msg.get_payload().unwrap_or_default();
                 info!(payload = %payload, "Received data collection completion signal");
@@ -160,10 +165,7 @@ async fn main() -> eyre::Result<()> {
                         continue;
                     }
                     Err(_) => {
-                        error!(
-                            run_timeout_secs,
-                            "Strategy engine timed out; skipping run"
-                        );
+                        error!(run_timeout_secs, "Strategy engine timed out; skipping run");
                         continue;
                     }
                 };
@@ -173,13 +175,17 @@ async fn main() -> eyre::Result<()> {
                 );
                 portfolio_data.log_portfolio_data();
 
-                if let Err(e) = record_strategy_run(&db_manager, &cfg, run_started_at, &portfolio_data).await {
-                    error!(error = ?e, "Failed to record strategy run");
-                } else {
-                    let _: () = publish_conn
-                        .publish(STRATEGY_RUN_COMPLETED_CHANNEL, run_started_at.to_rfc3339())
-                        .await
-                        .unwrap_or(());
+                match record_strategy_run(&db_manager, &cfg, run_started_at, &portfolio_data).await
+                {
+                    Ok(run_id) => {
+                        let _: () = publish_conn
+                            .publish(STRATEGY_RUN_COMPLETED_CHANNEL, run_id.to_string())
+                            .await
+                            .unwrap_or(());
+                    }
+                    Err(e) => {
+                        error!(error = ?e, "Failed to record strategy run");
+                    }
                 }
 
                 last_run_time = Some(run_started_at);
@@ -189,7 +195,9 @@ async fn main() -> eyre::Result<()> {
                 break;
             }
             Err(_) => {
-                warn!("Did not receive data collection completion signal within 10 minutes after cadence window");
+                warn!(
+                    "Did not receive data collection completion signal within 10 minutes after cadence window"
+                );
                 continue;
             }
         }
@@ -206,9 +214,11 @@ async fn record_strategy_run(
 ) -> eyre::Result<i32> {
     let total_weight = portfolio_data.weights.sum();
     let portfolio_return = portfolio_data.weights.dot(&portfolio_data.expected_returns);
-    let portfolio_variance = portfolio_data
-        .weights
-        .dot(&portfolio_data.covariance_matrix.dot(&portfolio_data.weights));
+    let portfolio_variance = portfolio_data.weights.dot(
+        &portfolio_data
+            .covariance_matrix
+            .dot(&portfolio_data.weights),
+    );
     let portfolio_volatility = portfolio_variance.sqrt().unwrap_or(Decimal::ZERO);
     let sharpe = if portfolio_volatility > Decimal::ZERO {
         portfolio_return / portfolio_volatility

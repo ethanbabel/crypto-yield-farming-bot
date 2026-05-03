@@ -141,7 +141,7 @@ The snapshot contains:
 The snapshot currently defines:
 
 $$
-\text{arbitrum\_value\_usd} = \text{market\_value\_usd} + \text{asset\_value\_usd}
+\text{arbitrum\\_value\\_usd} = \text{market\\_value\\_usd} + \text{asset\\_value\\_usd}
 $$
 
 and:
@@ -310,7 +310,7 @@ So the intended dYdX state is:
 Separately, the engine also targets a native gas reserve:
 
 $$
-V_{\text{gas-target-usd}} = \text{arbitrum\_value\_usd} \cdot g
+V_{\text{gas-target-usd}} = \text{arbitrum\\_value\\_usd} \cdot g
 $$
 
 $$
@@ -406,13 +406,13 @@ $$
 A delta is ignored only if **both** conditions are true:
 
 $$
-|\Delta V_i| < \text{min\_value\_usd}
+|\Delta V_i| < \text{min\\_value\\_usd}
 $$
 
 and
 
 $$
-|\Delta w_i| < \text{min\_weight\_delta}
+|\Delta w_i| < \text{min\\_weight\\_delta}
 $$
 
 This prevents noise-sized trades while still allowing meaningful rebalances to proceed.
@@ -424,7 +424,7 @@ Before the engine performs withdrawals and fresh deposits, it tries to directly 
 Markets are grouped by:
 
 $$
-(\text{long\_token}, \text{short\_token})
+(\text{long\\_token}, \text{short\\_token})
 $$
 
 Within each group:
@@ -551,7 +551,7 @@ If a successful action changes the balance of a non-base-stable token $T$, the e
 Then, when one of those invalidated markets is reached later in the loop, the engine recomputes that market's deposit-token choice using live balances for that market pair:
 
 $$
-\{\text{balance(long token)}, \text{balance(short token)}\}
+\\{ \text{balance(long token)}, \text{balance(short token)} \\}
 $$
 
 This gives the engine a hybrid model:
@@ -722,7 +722,7 @@ $$
 If:
 
 $$
-|\Delta Q_i^{\text{hedge}}| \cdot P_i^{\text{long}} < \text{min\_value\_usd}
+|\Delta Q_i^{\text{hedge}}| \cdot P_i^{\text{long}} < \text{min\\_value\\_usd}
 $$
 
 the hedge adjustment is skipped.
@@ -771,7 +771,7 @@ After the final stage, the engine records:
 The snapshot PnL is computed relative to the latest previous persisted snapshot:
 
 $$
-\text{pnl\_usd} = V_{\text{total now}} - V_{\text{total previous}}
+\text{pnl\\_usd} = V_{\text{total now}} - V_{\text{total previous}}
 $$
 
 This is bookkeeping-oriented portfolio accounting, not strategy attribution accounting.

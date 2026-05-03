@@ -31,7 +31,9 @@ use crate::wallet::{TokenInfo, WalletManager};
 use super::planner::{
     compute_market_deltas, compute_target_values, compute_target_weights, plan_shift_actions,
 };
-use super::types::{PlannerConfig, PortfolioSnapshot, ReserveState, TradeAction, TradeStatus};
+use super::types::{
+    ExecutionTargets, PlannerConfig, PortfolioSnapshot, ReserveState, TradeAction, TradeStatus,
+};
 
 pub struct ExecutionEngine {
     config: Arc<Config>,
@@ -42,6 +44,11 @@ pub struct ExecutionEngine {
     paraswap_client: ParaSwapClient,
     dydx_client: Arc<tokio::sync::Mutex<DydxClient>>,
     planner_config: PlannerConfig,
+}
+
+struct ActionExecutionResult {
+    status: TradeStatus,
+    tx_hash: Option<String>,
 }
 
 impl ExecutionEngine {
@@ -69,16 +76,17 @@ impl ExecutionEngine {
 
     pub async fn run_once(&self, portfolio_data: &PortfolioData) -> Result<()> {
         let strategy_run_id = self.record_strategy_run(portfolio_data).await?;
-        self.run_once_with_existing_strategy_run(portfolio_data, strategy_run_id)
+        let execution_targets = Self::execution_targets_from_portfolio_data(portfolio_data);
+        self.run_once_with_existing_strategy_run(&execution_targets, strategy_run_id)
             .await
     }
 
     pub async fn run_once_with_existing_strategy_run(
         &self,
-        portfolio_data: &PortfolioData,
+        execution_targets: &ExecutionTargets,
         strategy_run_id: i32,
     ) -> Result<()> {
-        let target_weights = compute_target_weights(portfolio_data);
+        let target_weights = compute_target_weights(execution_targets);
         let mut snapshot = self.build_snapshot().await?;
         let token_hedgeinfo_map = self.fetch_token_hedgeinfo_map().await;
         let reserve_state = self
@@ -92,6 +100,7 @@ impl ExecutionEngine {
                 strategy_run_id,
                 "No investable capital after reserves; skipping"
             );
+            self.record_snapshot(strategy_run_id, &snapshot).await?;
             return Ok(());
         }
 
@@ -133,7 +142,9 @@ impl ExecutionEngine {
 
         // Stage 2: Withdrawals
         let withdraw_actions = self.build_withdraw_actions(&snapshot, &deltas);
-        let withdrew = self.execute_actions(&withdraw_actions, strategy_run_id).await;
+        let withdrew = self
+            .execute_actions(&withdraw_actions, strategy_run_id)
+            .await;
         let gas_rebalanced = if withdrew {
             snapshot = self.build_snapshot().await?;
             self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
@@ -172,9 +183,17 @@ impl ExecutionEngine {
         } else {
             snapshot
         };
-        self.record_snapshot(&post_snapshot).await?;
+        self.record_snapshot(strategy_run_id, &post_snapshot)
+            .await?;
 
         Ok(())
+    }
+
+    fn execution_targets_from_portfolio_data(portfolio_data: &PortfolioData) -> ExecutionTargets {
+        ExecutionTargets::new(
+            portfolio_data.market_addresses.clone(),
+            portfolio_data.weights.iter().copied().collect(),
+        )
     }
 
     async fn maybe_withdraw_dydx_excess(
@@ -536,18 +555,16 @@ impl ExecutionEngine {
 
     async fn fetch_dydx_snapshot_state(
         &self,
-    ) -> (
-        HashMap<String, Decimal>,
-        Decimal,
-        Decimal,
-        Decimal,
-    ) {
+    ) -> (HashMap<String, Decimal>, Decimal, Decimal, Decimal) {
         let mut client = self.dydx_client.lock().await;
         let hedge_positions = client
             .get_dydx_subaccount_perp_positions()
             .await
             .unwrap_or_default();
-        let dydx_main_usdc = client.get_dydx_usdc_balance().await.unwrap_or(Decimal::ZERO);
+        let dydx_main_usdc = client
+            .get_dydx_usdc_balance()
+            .await
+            .unwrap_or(Decimal::ZERO);
         let summary = client.get_subaccount_summary().await;
         let (dydx_subaccount_equity, dydx_free_collateral) = match summary {
             Ok(summary) => (summary.equity, summary.free_collateral),
@@ -1031,7 +1048,10 @@ impl ExecutionEngine {
         }
 
         let selected = match base_stable {
-            Some(base_stable) => self.select_deposit_token(market, base_stable, balances).await?,
+            Some(base_stable) => {
+                self.select_deposit_token(market, base_stable, balances)
+                    .await?
+            }
             None => None,
         }
         .or_else(|| self.default_deposit_token_for_market(market));
@@ -1079,7 +1099,9 @@ impl ExecutionEngine {
             market_info.long_token_address,
             market_info.short_token_address,
         ];
-        self.wallet_manager.get_token_balances(&token_addresses).await
+        self.wallet_manager
+            .get_token_balances(&token_addresses)
+            .await
     }
 
     async fn get_live_stable_balances(&self) -> Result<HashMap<Address, Decimal>> {
@@ -1090,7 +1112,9 @@ impl ExecutionEngine {
             .filter(|token| hedge_utils::STABLE_COINS.contains(&token.symbol.as_str()))
             .map(|token| token.address)
             .collect();
-        self.wallet_manager.get_token_balances(&stable_addresses).await
+        self.wallet_manager
+            .get_token_balances(&stable_addresses)
+            .await
     }
 
     fn invalidate_markets_for_token(
@@ -1365,7 +1389,7 @@ impl ExecutionEngine {
             if hedge_notional <= Decimal::ZERO {
                 continue;
             }
-            
+
             let target_size = -(hedge_notional / long_token.last_mid_price_usd);
             let ticker = hedge_utils::get_dydx_perp_ticker(&long_token.symbol);
             let current_size = snapshot
@@ -1466,14 +1490,17 @@ impl ExecutionEngine {
     }
 
     async fn execute_and_log(&self, action: &TradeAction, strategy_run_id: i32) -> bool {
-        let status = self.execute_action(action).await;
-        if let Err(e) = self.log_trade(strategy_run_id, action, status).await {
+        let execution = self.execute_action(action).await;
+        if let Err(e) = self
+            .log_trade(strategy_run_id, action, execution.status, execution.tx_hash)
+            .await
+        {
             warn!(error = ?e, action = ?action, "Failed to log trade");
         }
-        status == TradeStatus::Executed
+        execution.status == TradeStatus::Executed
     }
 
-    async fn execute_action(&self, action: &TradeAction) -> TradeStatus {
+    async fn execute_action(&self, action: &TradeAction) -> ActionExecutionResult {
         let result = match action {
             TradeAction::GmDeposit {
                 market,
@@ -1539,10 +1566,16 @@ impl ExecutionEngine {
         };
 
         match result {
-            Ok(_) => TradeStatus::Executed,
+            Ok(tx_hash) => ActionExecutionResult {
+                status: TradeStatus::Executed,
+                tx_hash: Some(tx_hash),
+            },
             Err(e) => {
                 error!(error = ?e, action = ?action, "Execution failed");
-                TradeStatus::Failed
+                ActionExecutionResult {
+                    status: TradeStatus::Failed,
+                    tx_hash: None,
+                }
             }
         }
     }
@@ -1590,19 +1623,35 @@ impl ExecutionEngine {
         Ok(run_id)
     }
 
-    async fn record_snapshot(&self, snapshot: &PortfolioSnapshot) -> Result<()> {
+    async fn record_snapshot(
+        &self,
+        strategy_run_id: i32,
+        snapshot: &PortfolioSnapshot,
+    ) -> Result<()> {
         let prev_snapshot = self.db_manager.get_latest_portfolio_snapshot().await?;
         let pnl = match prev_snapshot {
             Some(prev) => snapshot.total_value_usd - prev.total_value_usd.unwrap_or(Decimal::ZERO),
             None => Decimal::ZERO,
         };
+        let native_price = self.wallet_manager.native_token.last_mid_price_usd;
+        let native_value_usd = if native_price > Decimal::ZERO {
+            snapshot.native_balance * native_price
+        } else {
+            Decimal::ZERO
+        };
 
         let new_snapshot = NewPortfolioSnapshotModel {
+            strategy_run_id: Some(strategy_run_id),
             timestamp: snapshot.timestamp,
             total_value_usd: snapshot.total_value_usd,
+            arbitrum_value_usd: snapshot.arbitrum_value_usd,
             market_value_usd: snapshot.market_value_usd,
             asset_value_usd: snapshot.asset_value_usd,
-            hedge_value_usd: Decimal::ZERO,
+            native_balance: snapshot.native_balance,
+            native_value_usd,
+            dydx_main_usdc: snapshot.dydx_main_usdc,
+            dydx_subaccount_equity: snapshot.dydx_subaccount_equity,
+            dydx_free_collateral: snapshot.dydx_free_collateral,
             pnl_usd: pnl,
         };
         let snapshot_id = self
@@ -1630,13 +1679,18 @@ impl ExecutionEngine {
                 continue;
             }
             let market_id = self.db_manager.market_id_map.get(market).cloned();
+            let symbol = self
+                .wallet_manager
+                .market_tokens
+                .get(market)
+                .map(|token| token.symbol.clone());
             let usd_value = snapshot.market_values_usd.get(market).cloned();
             positions.push(NewPositionSnapshotModel {
                 portfolio_snapshot_id,
                 position_type: "gm_market".to_string(),
                 market_id,
                 token_id: None,
-                symbol: None,
+                symbol,
                 size: Some(*balance),
                 usd_value,
             });
@@ -1647,13 +1701,25 @@ impl ExecutionEngine {
                 continue;
             }
             let token_id = self.db_manager.token_id_map.get(token).cloned();
+            let symbol = self
+                .wallet_manager
+                .asset_tokens
+                .get(token)
+                .map(|token| token.symbol.clone())
+                .or_else(|| {
+                    if *token == self.wallet_manager.native_token.address {
+                        Some(self.wallet_manager.native_token.symbol.clone())
+                    } else {
+                        None
+                    }
+                });
             let usd_value = snapshot.asset_values_usd.get(token).cloned();
             positions.push(NewPositionSnapshotModel {
                 portfolio_snapshot_id,
                 position_type: "token_balance".to_string(),
                 market_id: None,
                 token_id,
-                symbol: None,
+                symbol,
                 size: Some(*balance),
                 usd_value,
             });
@@ -1701,6 +1767,7 @@ impl ExecutionEngine {
         strategy_run_id: i32,
         action: &TradeAction,
         status: TradeStatus,
+        tx_hash: Option<String>,
     ) -> Result<()> {
         let (market_id, from_token_id, to_token_id, amount_in, amount_out, usd_value, details) =
             self.build_trade_details(action);
@@ -1716,7 +1783,7 @@ impl ExecutionEngine {
             amount_out,
             usd_value,
             fee_usd: None,
-            tx_hash: None,
+            tx_hash,
             status: status.as_str().to_string(),
             details,
         };

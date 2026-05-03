@@ -3,22 +3,21 @@ use std::collections::HashMap;
 use ethers::types::Address;
 use rust_decimal::Decimal;
 
-use crate::strategy::types::PortfolioData;
 use crate::wallet::WalletManager;
 
-use super::types::{PlannerConfig, PortfolioSnapshot, TradeAction};
+use super::types::{ExecutionTargets, PlannerConfig, PortfolioSnapshot, TradeAction};
 
-pub fn compute_target_weights(portfolio_data: &PortfolioData) -> HashMap<Address, Decimal> {
+pub fn compute_target_weights(targets: &ExecutionTargets) -> HashMap<Address, Decimal> {
     let mut target_weights = HashMap::new();
-    let weight_sum = portfolio_data.weights.sum();
+    let weight_sum = targets.weights.iter().copied().sum::<Decimal>();
     let weight_denominator = if weight_sum > Decimal::ZERO {
         weight_sum
     } else {
         Decimal::ONE
     };
 
-    for (i, market) in portfolio_data.market_addresses.iter().enumerate() {
-        let target_weight = portfolio_data.weights[i] / weight_denominator;
+    for (market, weight) in targets.market_addresses.iter().zip(targets.weights.iter()) {
+        let target_weight = *weight / weight_denominator;
         target_weights.insert(*market, target_weight);
     }
 

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 # Binary targets
+
+# -------------------- Production Binaries --------------------
 [[bin]]
 name = "data_collector"
 path = "src/bin/data_collector.rs"
@@ -25,7 +27,13 @@ name = "backtest"
 path = "src/bin/backtest.rs"
 
 [[bin]]
-name = "main"   # For development and testing
+name = "executor_ctl"
+path = "src/bin/executor_ctl.rs"
+
+# -------------------- Utility/Testing Binaries --------------------
+
+[[bin]]        # For development and testing
+name = "main"   
 path = "src/bin/main.rs"
 
 [[bin]]        # Utility to initialize database schema

@@ -5,6 +5,8 @@ pub mod market_states;
 pub mod strategy_runs;
 pub mod strategy_targets;
 pub mod trades;
+pub mod execution_control_state;
+pub mod execution_control_events;
 pub mod portfolio_snapshots;
 pub mod position_snapshots;
 pub mod dydx_perps;

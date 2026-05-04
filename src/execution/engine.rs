@@ -100,7 +100,7 @@ impl ExecutionEngine {
                 strategy_run_id,
                 "No investable capital after reserves; skipping"
             );
-            self.record_snapshot(strategy_run_id, &snapshot).await?;
+            self.record_snapshot(Some(strategy_run_id), &snapshot).await?;
             return Ok(());
         }
 
@@ -112,7 +112,7 @@ impl ExecutionEngine {
         }
 
         if self
-            .ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
+            .ensure_gas_reserve(&snapshot, &reserve_state, Some(strategy_run_id))
             .await?
         {
             snapshot = self.build_snapshot().await?;
@@ -130,7 +130,7 @@ impl ExecutionEngine {
 
         // Stage 1: Shifts
         let (shift_actions, _) = plan_shift_actions(&deltas, &self.wallet_manager);
-        if self.execute_actions(&shift_actions, strategy_run_id).await {
+        if self.execute_actions(&shift_actions, Some(strategy_run_id)).await {
             snapshot = self.build_snapshot().await?;
             deltas = compute_market_deltas(
                 &snapshot,
@@ -143,14 +143,14 @@ impl ExecutionEngine {
         // Stage 2: Withdrawals
         let withdraw_actions = self.build_withdraw_actions(&snapshot, &deltas);
         let withdrew = self
-            .execute_actions(&withdraw_actions, strategy_run_id)
+            .execute_actions(&withdraw_actions, Some(strategy_run_id))
             .await;
         let gas_rebalanced = if withdrew {
             snapshot = self.build_snapshot().await?;
-            self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
+            self.ensure_gas_reserve(&snapshot, &reserve_state, Some(strategy_run_id))
                 .await?
         } else {
-            self.ensure_gas_reserve(&snapshot, &reserve_state, strategy_run_id)
+            self.ensure_gas_reserve(&snapshot, &reserve_state, Some(strategy_run_id))
                 .await?
         };
         if withdrew || gas_rebalanced {
@@ -165,7 +165,7 @@ impl ExecutionEngine {
 
         // Stage 3: Deposits + cleanup swaps
         if self
-            .execute_deposit_stage(&snapshot, &deltas, &reserve_state, strategy_run_id)
+            .execute_deposit_stage(&snapshot, &deltas, &reserve_state, Some(strategy_run_id))
             .await?
         {
             snapshot = self.build_snapshot().await?;
@@ -176,17 +176,108 @@ impl ExecutionEngine {
 
         // Stage 5: Hedge adjustments
         let hedge_actions = self.build_hedge_actions(&snapshot, &target_weights).await?;
-        let hedges_changed = self.execute_actions(&hedge_actions, strategy_run_id).await;
+        let hedges_changed = self.execute_actions(&hedge_actions, Some(strategy_run_id)).await;
 
         let post_snapshot = if reserves_changed || hedges_changed {
             self.build_snapshot().await?
         } else {
             snapshot
         };
-        self.record_snapshot(strategy_run_id, &post_snapshot)
+        self.record_snapshot(Some(strategy_run_id), &post_snapshot)
             .await?;
 
         Ok(())
+    }
+
+    pub async fn run_unwind_to_stable(&self, target_stable_symbol: &str) -> Result<()> {
+        let mut snapshot = self.build_snapshot().await?;
+        let target_stable = self
+            .resolve_target_stable_token(target_stable_symbol, &snapshot.asset_balances)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "No target stable token available for {}",
+                    target_stable_symbol
+                )
+            })?;
+
+        info!(
+            target_stable_symbol = %target_stable.symbol,
+            "Starting unwind to stable"
+        );
+
+        let mut changed = false;
+
+        let withdraw_actions = self.build_full_unwind_withdraw_actions(&snapshot);
+        if self.execute_actions(&withdraw_actions, None).await {
+            changed = true;
+            snapshot = self.build_snapshot().await?;
+        }
+
+        let hedge_actions = self.build_full_unwind_hedge_actions(&snapshot);
+        if self.execute_actions(&hedge_actions, None).await {
+            changed = true;
+            snapshot = self.build_snapshot().await?;
+        }
+
+        if self
+            .cleanup_asset_tokens_to_stable(
+                &snapshot.asset_balances,
+                &HashSet::new(),
+                &target_stable,
+                None,
+                true,
+            )
+            .await
+        {
+            changed = true;
+            snapshot = self.build_snapshot().await?;
+        }
+
+        if self
+            .sell_excess_native_to_stable(&snapshot, &target_stable, None)
+            .await
+        {
+            changed = true;
+            snapshot = self.build_snapshot().await?;
+        }
+
+        self.record_snapshot(None, &snapshot).await?;
+
+        info!(
+            target_stable_symbol = %target_stable.symbol,
+            changed,
+            "Completed unwind to stable pass"
+        );
+
+        Ok(())
+    }
+
+    async fn sell_excess_native_to_stable(
+        &self,
+        snapshot: &PortfolioSnapshot,
+        target_stable: &TokenInfo,
+        strategy_run_id: Option<i32>,
+    ) -> bool {
+        let native_price = self.wallet_manager.native_token.last_mid_price_usd;
+        if native_price <= Decimal::ZERO {
+            return false;
+        }
+
+        // Keep a small ETH buffer for future transactions instead of targeting the usual
+        // portfolio-based gas reserve during a risk-off unwind.
+        let native_buffer = self.planner_config.min_value_usd / native_price;
+        let sell_amount = (snapshot.native_balance - native_buffer).max(Decimal::ZERO);
+        if sell_amount <= Decimal::ZERO {
+            return false;
+        }
+
+        let action = TradeAction::SpotSwap {
+            from_token: NATIVE_ADDRESS.parse().unwrap(),
+            to_token: target_stable.address,
+            amount: sell_amount,
+            side: "SELL".to_string(),
+        };
+        self.execute_and_log(&action, strategy_run_id).await
     }
 
     fn execution_targets_from_portfolio_data(portfolio_data: &PortfolioData) -> ExecutionTargets {
@@ -582,7 +673,7 @@ impl ExecutionEngine {
         &self,
         snapshot: &PortfolioSnapshot,
         reserve_state: &ReserveState,
-        strategy_run_id: i32,
+        strategy_run_id: Option<i32>,
     ) -> Result<bool> {
         let target_eth = reserve_state.gas_reserve_target_eth;
         if target_eth <= Decimal::ZERO {
@@ -708,12 +799,62 @@ impl ExecutionEngine {
         actions
     }
 
+    fn build_full_unwind_withdraw_actions(&self, snapshot: &PortfolioSnapshot) -> Vec<TradeAction> {
+        snapshot
+            .market_balances
+            .iter()
+            .filter_map(|(market, balance)| {
+                if *balance <= Decimal::ZERO {
+                    return None;
+                }
+                let usd_value = snapshot
+                    .market_values_usd
+                    .get(market)
+                    .cloned()
+                    .unwrap_or(Decimal::ZERO);
+                if usd_value < self.planner_config.min_value_usd {
+                    return None;
+                }
+                Some(TradeAction::GmWithdrawal {
+                    market: *market,
+                    amount: *balance,
+                })
+            })
+            .collect()
+    }
+
+    fn build_full_unwind_hedge_actions(&self, snapshot: &PortfolioSnapshot) -> Vec<TradeAction> {
+        let mut actions = Vec::new();
+
+        for (ticker, size) in snapshot.hedge_positions.iter() {
+            if size.abs() <= Decimal::ZERO {
+                continue;
+            }
+
+            let token_symbol = match self.find_token_symbol_for_perp_ticker(ticker) {
+                Some(symbol) => symbol,
+                None => {
+                    warn!(ticker = %ticker, "Unable to map perp ticker to token symbol for unwind");
+                    continue;
+                }
+            };
+
+            actions.push(TradeAction::HedgeOrder {
+                token_symbol,
+                size: size.abs(),
+                side_is_buy: !size.is_sign_positive(),
+            });
+        }
+
+        actions
+    }
+
     async fn execute_deposit_stage(
         &self,
         snapshot: &PortfolioSnapshot,
         deltas: &HashMap<Address, Decimal>,
         reserve_state: &ReserveState,
-        strategy_run_id: i32,
+        strategy_run_id: Option<i32>,
     ) -> Result<bool> {
         let mut deposit_targets: Vec<(Address, Decimal)> = deltas
             .iter()
@@ -756,11 +897,12 @@ impl ExecutionEngine {
         }
 
         let cleaned = self
-            .cleanup_idle_tokens(
+            .cleanup_asset_tokens_to_stable(
                 &snapshot.asset_balances,
                 &preferred_tokens,
                 &base_stable,
                 strategy_run_id,
+                false,
             )
             .await;
 
@@ -896,11 +1038,12 @@ impl ExecutionEngine {
         }
 
         changed = self
-            .cleanup_idle_tokens(
+            .cleanup_asset_tokens_to_stable(
                 &refreshed.asset_balances,
                 &HashSet::new(),
                 &base_stable,
                 strategy_run_id,
+                false,
             )
             .await
             || changed;
@@ -908,12 +1051,13 @@ impl ExecutionEngine {
         Ok(changed)
     }
 
-    async fn cleanup_idle_tokens(
+    async fn cleanup_asset_tokens_to_stable(
         &self,
         balances: &HashMap<Address, Decimal>,
         keep_tokens: &HashSet<Address>,
         base_stable: &TokenInfo,
-        strategy_run_id: i32,
+        strategy_run_id: Option<i32>,
+        include_other_stables: bool,
     ) -> bool {
         let mut changed = false;
         for (token_addr, balance) in balances.iter() {
@@ -923,14 +1067,15 @@ impl ExecutionEngine {
             if *token_addr == base_stable.address {
                 continue;
             }
-            if hedge_utils::STABLE_COINS.contains(
+            let is_stable = hedge_utils::STABLE_COINS.contains(
                 &self
                     .wallet_manager
                     .asset_tokens
                     .get(token_addr)
                     .map(|t| t.symbol.as_str())
                     .unwrap_or(""),
-            ) {
+            );
+            if is_stable && !include_other_stables {
                 continue;
             }
             if keep_tokens.contains(token_addr) {
@@ -1287,6 +1432,19 @@ impl ExecutionEngine {
         best.map(|(token, _)| token)
     }
 
+    fn resolve_target_stable_token(
+        &self,
+        target_symbol: &str,
+        balances: &HashMap<Address, Decimal>,
+    ) -> Option<TokenInfo> {
+        self.wallet_manager
+            .asset_tokens
+            .values()
+            .find(|token| token.symbol == target_symbol)
+            .cloned()
+            .or_else(|| self.get_preferred_stable_token(balances))
+    }
+
     fn get_stable_source_token(
         &self,
         balances: &HashMap<Address, Decimal>,
@@ -1321,6 +1479,14 @@ impl ExecutionEngine {
             }
         }
         best.map(|(token, _)| token)
+    }
+
+    fn find_token_symbol_for_perp_ticker(&self, ticker: &str) -> Option<String> {
+        self.wallet_manager
+            .asset_tokens
+            .values()
+            .find(|token| hedge_utils::get_dydx_perp_ticker(&token.symbol) == ticker)
+            .map(|token| token.symbol.clone())
     }
 
     async fn build_hedge_actions(
@@ -1477,7 +1643,7 @@ impl ExecutionEngine {
         Ok(changed)
     }
 
-    async fn execute_actions(&self, actions: &[TradeAction], strategy_run_id: i32) -> bool {
+    async fn execute_actions(&self, actions: &[TradeAction], strategy_run_id: Option<i32>) -> bool {
         if actions.is_empty() {
             return false;
         }
@@ -1489,7 +1655,7 @@ impl ExecutionEngine {
         changed
     }
 
-    async fn execute_and_log(&self, action: &TradeAction, strategy_run_id: i32) -> bool {
+    async fn execute_and_log(&self, action: &TradeAction, strategy_run_id: Option<i32>) -> bool {
         let execution = self.execute_action(action).await;
         if let Err(e) = self
             .log_trade(strategy_run_id, action, execution.status, execution.tx_hash)
@@ -1625,7 +1791,7 @@ impl ExecutionEngine {
 
     async fn record_snapshot(
         &self,
-        strategy_run_id: i32,
+        strategy_run_id: Option<i32>,
         snapshot: &PortfolioSnapshot,
     ) -> Result<()> {
         let prev_snapshot = self.db_manager.get_latest_portfolio_snapshot().await?;
@@ -1641,7 +1807,7 @@ impl ExecutionEngine {
         };
 
         let new_snapshot = NewPortfolioSnapshotModel {
-            strategy_run_id: Some(strategy_run_id),
+            strategy_run_id,
             timestamp: snapshot.timestamp,
             total_value_usd: snapshot.total_value_usd,
             arbitrum_value_usd: snapshot.arbitrum_value_usd,
@@ -1764,7 +1930,7 @@ impl ExecutionEngine {
 
     async fn log_trade(
         &self,
-        strategy_run_id: i32,
+        strategy_run_id: Option<i32>,
         action: &TradeAction,
         status: TradeStatus,
         tx_hash: Option<String>,
@@ -1775,7 +1941,7 @@ impl ExecutionEngine {
         let trade = NewTradeModel {
             timestamp: Utc::now(),
             action_type: action.action_type().to_string(),
-            strategy_run_id: Some(strategy_run_id),
+            strategy_run_id,
             market_id,
             from_token_id,
             to_token_id,

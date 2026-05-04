@@ -12,6 +12,9 @@ use tracing::{error, info, instrument, warn};
 
 use crypto_yield_farming_bot::config;
 use crypto_yield_farming_bot::db::db_manager::DbManager;
+use crypto_yield_farming_bot::db::models::execution_control_state::{
+    EXECUTION_MODE_STABLE_ONLY, ExecutionControlStateModel,
+};
 use crypto_yield_farming_bot::db::models::markets::MarketModel;
 use crypto_yield_farming_bot::db::models::strategy_runs::StrategyRunModel;
 use crypto_yield_farming_bot::db::models::strategy_targets::StrategyTargetModel;
@@ -22,8 +25,10 @@ use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::wallet::WalletManager;
 
 const STRATEGY_RUN_COMPLETED_CHANNEL: &str = "strategy_run_completed";
+const EXECUTION_CONTROL_CHANNEL: &str = "execution_control";
 const DEFAULT_HANG_TIMEOUT_SECS: u64 = 3000; // 50 minutes
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 1200; // 20 minutes
+const DEFAULT_STABLE_ONLY_TICK_SECS: u64 = 180;
 const INIT_RETRY_BASE_SECS: u64 = 5;
 const INIT_RETRY_MAX_SECS: u64 = 120;
 
@@ -46,6 +51,7 @@ async fn main() -> eyre::Result<()> {
     let redis_client = redis::Client::open("redis://redis:6379")?;
     let mut pubsub = redis_client.get_async_pubsub().await?;
     pubsub.subscribe(STRATEGY_RUN_COMPLETED_CHANNEL).await?;
+    pubsub.subscribe(EXECUTION_CONTROL_CHANNEL).await?;
     let mut messages = pubsub.on_message();
 
     let last_progress = Arc::new(AtomicU64::new(Utc::now().timestamp() as u64));
@@ -57,6 +63,10 @@ async fn main() -> eyre::Result<()> {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_RUN_TIMEOUT_SECS);
+    let stable_only_tick_secs = std::env::var("TRADING_BOT_STABLE_ONLY_TICK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STABLE_ONLY_TICK_SECS);
 
     let watchdog_progress = last_progress.clone();
     tokio::spawn(async move {
@@ -76,80 +86,82 @@ async fn main() -> eyre::Result<()> {
         }
     });
 
+    let mut stable_only_tick = time::interval(std::time::Duration::from_secs(stable_only_tick_secs));
+    stable_only_tick.tick().await;
+
     let mut last_executed_strategy_run_id = None::<i32>;
+    let mut control_state = db.get_execution_control_state().await?;
 
-    info!("Waiting for strategy_run_completed signals");
-    while let Some(msg) = messages.next().await {
-        last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
-        let payload: String = msg.get_payload().unwrap_or_default();
-        info!(payload = %payload, "Received strategy run completion signal");
-
-        let strategy_run_id = match payload.trim().parse::<i32>() {
-            Ok(run_id) => run_id,
-            Err(e) => {
-                warn!(payload = %payload, error = ?e, "Received invalid strategy run completion payload");
-                continue;
-            }
-        };
-
-        let strategy_run = match db.get_strategy_run_by_id(strategy_run_id).await? {
-            Some(run) => run,
-            None => {
-                warn!(
-                    strategy_run_id,
-                    "Received strategy run signal but no matching strategy run exists in the database"
-                );
-                continue;
-            }
-        };
-
-        if strategy_run.strategy_version != cfg.strategy_version {
-            warn!(
-                strategy_run_id = strategy_run.id,
-                strategy_version = %strategy_run.strategy_version,
-                configured_version = %cfg.strategy_version,
-                "Skipping strategy run with mismatched version"
-            );
-            continue;
-        }
-
-        if let Some(last_run_id) = last_executed_strategy_run_id {
-            if strategy_run.id <= last_run_id {
-                info!(
-                    strategy_run_id = strategy_run.id,
-                    last_executed_strategy_run_id = last_run_id,
-                    "Skipping stale or duplicate strategy run completion signal"
-                );
-                continue;
-            }
-        }
-
-        let executing_run_id = strategy_run.id;
-
-        let cycle = execute_strategy_run_cycle(
+    if control_state.mode == EXECUTION_MODE_STABLE_ONLY {
+        run_unwind_cycle_with_timeout(
             cfg.clone(),
             db.clone(),
-            strategy_run,
+            &control_state,
             last_progress.clone(),
-        );
-        match time::timeout(std::time::Duration::from_secs(run_timeout_secs), cycle).await {
-            Ok(Ok(())) => {
-                last_executed_strategy_run_id = Some(executing_run_id);
+            run_timeout_secs,
+        )
+        .await;
+    }
+
+    info!("Waiting for strategy and execution control signals");
+    loop {
+        tokio::select! {
+            _ = stable_only_tick.tick() => {
+                last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+                control_state = db.get_execution_control_state().await?;
+                if control_state.mode == EXECUTION_MODE_STABLE_ONLY {
+                    run_unwind_cycle_with_timeout(
+                        cfg.clone(),
+                        db.clone(),
+                        &control_state,
+                        last_progress.clone(),
+                        run_timeout_secs,
+                    ).await;
+                }
             }
-            Ok(Err(e)) => {
-                error!(error = ?e, strategy_run_id = executing_run_id, "Trading bot cycle failed");
-            }
-            Err(_) => {
-                error!(
-                    run_timeout_secs,
-                    strategy_run_id = executing_run_id,
-                    "Trading bot cycle timed out"
-                );
+            maybe_msg = messages.next() => {
+                let Some(msg) = maybe_msg else {
+                    warn!("Executor pubsub stream ended");
+                    break;
+                };
+
+                last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+                control_state = db.get_execution_control_state().await?;
+                let channel = msg.get_channel_name().to_string();
+
+                match channel.as_str() {
+                    STRATEGY_RUN_COMPLETED_CHANNEL => {
+                        handle_strategy_run_signal(
+                            cfg.clone(),
+                            db.clone(),
+                            &control_state,
+                            &msg,
+                            &mut last_executed_strategy_run_id,
+                            last_progress.clone(),
+                            run_timeout_secs,
+                        ).await?;
+                    }
+                    EXECUTION_CONTROL_CHANNEL => {
+                        let payload: String = msg.get_payload().unwrap_or_default();
+                        info!(payload = %payload, mode = %control_state.mode, "Received execution control signal");
+                        if control_state.mode == EXECUTION_MODE_STABLE_ONLY {
+                            run_unwind_cycle_with_timeout(
+                                cfg.clone(),
+                                db.clone(),
+                                &control_state,
+                                last_progress.clone(),
+                                run_timeout_secs,
+                            ).await;
+                        }
+                    }
+                    other => {
+                        warn!(channel = %other, "Received message on unexpected channel");
+                    }
+                }
             }
         }
     }
 
-    warn!("Strategy run pubsub stream ended");
     Ok(())
 }
 
@@ -174,6 +186,134 @@ async fn init_db_manager_with_retry(cfg: &Arc<config::Config>) -> eyre::Result<A
     }
 }
 
+async fn handle_strategy_run_signal(
+    cfg: Arc<config::Config>,
+    db: Arc<DbManager>,
+    control_state: &ExecutionControlStateModel,
+    msg: &redis::Msg,
+    last_executed_strategy_run_id: &mut Option<i32>,
+    last_progress: Arc<AtomicU64>,
+    run_timeout_secs: u64,
+) -> eyre::Result<()> {
+    let payload: String = msg.get_payload().unwrap_or_default();
+    info!(payload = %payload, "Received strategy run completion signal");
+
+    let strategy_run_id = match payload.trim().parse::<i32>() {
+        Ok(run_id) => run_id,
+        Err(e) => {
+            warn!(payload = %payload, error = ?e, "Received invalid strategy run completion payload");
+            return Ok(());
+        }
+    };
+
+    if control_state.mode == EXECUTION_MODE_STABLE_ONLY {
+        info!(
+            strategy_run_id,
+            target_stable_symbol = ?control_state.target_stable_symbol,
+            "Ignoring strategy run because executor is in stable_only mode"
+        );
+        return Ok(());
+    }
+
+    let strategy_run = match db.get_strategy_run_by_id(strategy_run_id).await? {
+        Some(run) => run,
+        None => {
+            warn!(
+                strategy_run_id,
+                "Received strategy run signal but no matching strategy run exists in the database"
+            );
+            return Ok(());
+        }
+    };
+
+    if strategy_run.strategy_version != cfg.strategy_version {
+        warn!(
+            strategy_run_id = strategy_run.id,
+            strategy_version = %strategy_run.strategy_version,
+            configured_version = %cfg.strategy_version,
+            "Skipping strategy run with mismatched version"
+        );
+        return Ok(());
+    }
+
+    if let Some(min_strategy_run_id) = control_state.min_strategy_run_id_to_execute {
+        if strategy_run.id < min_strategy_run_id {
+            info!(
+                strategy_run_id = strategy_run.id,
+                min_strategy_run_id_to_execute = min_strategy_run_id,
+                "Skipping strategy run because it predates the resume gate"
+            );
+            return Ok(());
+        }
+    }
+
+    if let Some(last_run_id) = *last_executed_strategy_run_id {
+        if strategy_run.id <= last_run_id {
+            info!(
+                strategy_run_id = strategy_run.id,
+                last_executed_strategy_run_id = last_run_id,
+                "Skipping stale or duplicate strategy run completion signal"
+            );
+            return Ok(());
+        }
+    }
+
+    let executing_run_id = strategy_run.id;
+    info!(
+        strategy_run_id = executing_run_id,
+         "Starting execution cycle for completed strategy run"
+    );
+    let cycle = execute_strategy_run_cycle(cfg, db, strategy_run, last_progress);
+    match time::timeout(std::time::Duration::from_secs(run_timeout_secs), cycle).await {
+        Ok(Ok(())) => {
+            *last_executed_strategy_run_id = Some(executing_run_id);
+        }
+        Ok(Err(e)) => {
+            error!(error = ?e, strategy_run_id = executing_run_id, "Trading bot cycle failed");
+        }
+        Err(_) => {
+            error!(
+                run_timeout_secs,
+                strategy_run_id = executing_run_id,
+                "Trading bot cycle timed out"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_unwind_cycle_with_timeout(
+    cfg: Arc<config::Config>,
+    db: Arc<DbManager>,
+    control_state: &ExecutionControlStateModel,
+    last_progress: Arc<AtomicU64>,
+    run_timeout_secs: u64,
+) {
+    let target_stable_symbol = control_state
+        .target_stable_symbol
+        .clone()
+        .unwrap_or_else(|| "USDC".to_string());
+    let cycle = execute_unwind_cycle(cfg, db, target_stable_symbol.clone(), last_progress);
+    match time::timeout(std::time::Duration::from_secs(run_timeout_secs), cycle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!(
+                error = ?e,
+                target_stable_symbol = %target_stable_symbol,
+                "Stable-only unwind cycle failed"
+            );
+        }
+        Err(_) => {
+            error!(
+                run_timeout_secs,
+                target_stable_symbol = %target_stable_symbol,
+                "Stable-only unwind cycle timed out"
+            );
+        }
+    }
+}
+
 async fn execute_strategy_run_cycle(
     cfg: Arc<config::Config>,
     db: Arc<DbManager>,
@@ -185,10 +325,7 @@ async fn execute_strategy_run_cycle(
     let mut wallet_manager = WalletManager::new(&cfg)?;
     wallet_manager.load_tokens(&db).await?;
     let wallet_manager = Arc::new(wallet_manager);
-    info!(
-        strategy_run_id = strategy_run.id,
-        "Wallet manager refreshed"
-    );
+    info!(strategy_run_id = strategy_run.id, "Wallet manager refreshed");
 
     last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
 
@@ -213,10 +350,38 @@ async fn execute_strategy_run_cycle(
     execution_engine
         .run_once_with_existing_strategy_run(&execution_targets, strategy_run.id)
         .await?;
-    info!(
-        strategy_run_id = strategy_run.id,
-        "Execution cycle completed"
-    );
+    info!(strategy_run_id = strategy_run.id, "Execution cycle completed");
+
+    last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+
+    Ok(())
+}
+
+async fn execute_unwind_cycle(
+    cfg: Arc<config::Config>,
+    db: Arc<DbManager>,
+    target_stable_symbol: String,
+    last_progress: Arc<AtomicU64>,
+) -> eyre::Result<()> {
+    last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+
+    let mut wallet_manager = WalletManager::new(&cfg)?;
+    wallet_manager.load_tokens(&db).await?;
+    let wallet_manager = Arc::new(wallet_manager);
+    info!(target_stable_symbol = %target_stable_symbol, "Wallet manager refreshed for unwind");
+
+    last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+
+    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
+    info!(target_stable_symbol = %target_stable_symbol, "dYdX client refreshed for unwind");
+
+    let execution_engine =
+        ExecutionEngine::new(cfg.clone(), db.clone(), wallet_manager.clone(), dydx_client);
+    execution_engine
+        .run_unwind_to_stable(&target_stable_symbol)
+        .await?;
+    info!(target_stable_symbol = %target_stable_symbol, "Stable-only unwind cycle completed");
 
     last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
 

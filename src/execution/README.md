@@ -7,7 +7,7 @@ The goal of the execution layer is not to recompute the strategy. Its job is to 
 - preserving a reserve for dYdX hedge margin
 - preserving a reserve for native gas
 - minimizing unnecessary swaps when GM positions can be shifted directly
-- sizing hedges from actual GMX quote-derived collateral exposure rather than a static heuristic
+- sizing hedges from actual GMX quote-derived collateral exposure
 
 The core code lives in:
 
@@ -15,9 +15,98 @@ The core code lives in:
 - `/home/ec2-user/crypto-yield-farming-bot/src/execution/planner.rs`
 - `/home/ec2-user/crypto-yield-farming-bot/src/execution/types.rs`
 
+The execution runtime and control-plane entrypoints live in:
+
+- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor.rs`
+- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor_ctl.rs`
+
+## Execution Control Plane
+
+The execution system has a durable control plane. The executor checks a database-backed execution mode before deciding whether to deploy capital or remain flat.
+
+There are two execution modes:
+
+1. `normal`
+   - The executor consumes fresh strategy runs and calls `run_once_with_existing_strategy_run(...)`.
+   - This is the standard live-trading mode.
+
+2. `stable_only`
+   - The executor refuses to enter or rebalance into strategy positions.
+   - Instead it repeatedly calls `run_unwind_to_stable(...)` until the live portfolio is reduced to the target stablecoin plus a small ETH gas buffer.
+
+The durable state is stored in:
+
+- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_state.sql`
+- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_events.sql`
+
+The singleton control-state row stores:
+
+- `mode`
+- `target_stable_symbol`
+- `min_strategy_run_id_to_execute`
+- `updated_at`
+- `updated_by`
+- `reason`
+
+The append-only audit table stores every operator-issued mode change.
+
+### Why the control state is database-backed
+
+Redis pubsub serves as a wake-up mechanism. Postgres is the source of truth.
+
+That means:
+
+- the desired execution mode survives executor restarts
+- the desired execution mode survives missed pubsub messages
+- `executor_ctl` can safely change state even if the executor is temporarily offline
+
+### `executor_ctl`
+
+`executor_ctl` is the operator-facing binary for changing execution mode.
+
+Supported commands:
+
+- `status`
+- `stay-stable`
+- `resume-normal`
+
+At a high level:
+
+- `stay-stable` writes `stable_only` state to Postgres, records an audit event, and publishes an `execution_control` wake-up signal to Redis
+- `resume-normal` writes `normal` state to Postgres, records an audit event, computes a resume gate via `min_strategy_run_id_to_execute`, and publishes the same wake-up signal
+- `status` prints the current durable control-state values
+
+### Resume gate semantics
+
+When the system returns from `stable_only` to `normal`, it does **not** immediately reuse the most recent already-produced strategy run.
+
+Instead:
+
+1. `executor_ctl resume-normal` reads the latest strategy-run id in the database
+2. it writes:
+
+$$
+\text{min\\_strategy\\_run\\_id\\_to\\_execute} = \text{latest\\_run\\_id} + 1
+$$
+
+3. the executor ignores all earlier strategy runs
+4. the executor waits for the next fresh strategy run before deploying capital again
+
+This prevents an intentional unwind from being immediately undone by a stale strategy output that was produced while the system was supposed to remain flat.
+
 ## High-Level Flow
 
-Below is the execution flow in the exact order it runs.
+Below is the execution flow in the exact order it runs once the executor has determined that it should process a normal strategy cycle.
+
+Before any normal execution cycle begins, the executor:
+
+1. loads the durable execution control state from Postgres
+2. decides whether the current mode is `normal` or `stable_only`
+3. either:
+   - proceeds with strategy execution, or
+   - runs an unwind pass instead
+
+If the current mode is `stable_only`, the normal strategy-execution flow below is skipped entirely.
 
 1. Receive strategy output
    - `ExecutionEngine::run_once(...)` receives a `PortfolioData` object from the strategy layer.
@@ -78,9 +167,50 @@ Below is the execution flow in the exact order it runs.
 17. Persist trade records
    - Every executed action is logged with action type, sizes, approximate USD value, and metadata.
 
+## Stable-Only Unwind Flow
+
+When the executor is in `stable_only` mode, it does **not** run the normal rebalance path above.
+
+Instead it runs `ExecutionEngine::run_unwind_to_stable(...)`.
+
+The unwind flow is a one-directional risk-reduction flow:
+
+1. build a fresh live portfolio snapshot
+2. resolve the target stablecoin, typically `USDC`
+3. withdraw all material GM positions
+4. close all dYdX hedge perp positions
+5. swap all Arbitrum ERC-20 inventory, including non-preferred stables, into the target stablecoin
+6. sell excess native ETH into the target stablecoin while preserving a small gas buffer
+7. persist a portfolio snapshot and trade records
+
+This flow is not intended to optimize portfolio allocation. It is intended to reduce risk and converge the live system toward a flat stablecoin posture.
+
+### Stable-only retry loop
+
+The executor binary runs a periodic retry loop while in `stable_only` mode.
+
+At startup:
+
+- if the persisted control-state mode is already `stable_only`, the executor runs an unwind pass immediately
+
+During runtime:
+
+- the executor listens for `execution_control` wake-up signals
+- the executor also runs a periodic unwind tick, every `180` seconds by default
+
+The periodic tick exists because a single unwind pass may not fully flatten the portfolio:
+
+- transactions may fail
+- balances may settle across multiple passes
+- some venues may require retry behavior
+
+Additionally, the periodic tick ensures that even if the `execution_control` Redis wake-up signal is somehow missed, any change in the durable Postgres execution state is still adhered to. 
+
+The retry loop is awaited inline, so the executor does not run multiple unwind passes concurrently.
+
 ## Core Data Model
 
-The execution engine works with three conceptually different layers of state:
+The execution engine and runtime work with four layers of state:
 
 1. Strategy target state
    - This is the desired portfolio produced by the strategy engine.
@@ -99,11 +229,78 @@ The execution engine works with three conceptually different layers of state:
      - dYdX hedge order
    - Represented by `TradeAction`.
 
+4. Execution control state
+   - This is the operator-controlled runtime mode that decides whether execution is allowed to enter positions or should remain in stablecoins.
+   - Represented durably by `execution_control_state`.
+
 ## Detailed Step-by-Step Workflow
+
+### 0. Executor Mode Resolution
+
+Before a strategy run is executed, the executor binary resolves its current control mode from Postgres.
+
+This logic lives in:
+
+- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor.rs`
+
+The executor subscribes to two Redis pubsub channels:
+
+- `strategy_run_completed`
+- `execution_control`
+
+But pubsub does not itself decide behavior. Each time a relevant signal arrives, the executor reloads `execution_control_state` and then makes a decision.
+
+#### If mode is `normal`
+
+The executor evaluates the incoming strategy run normally, subject to:
+
+- matching `strategy_version`
+- duplicate/staleness checks
+- resume-gate check via `min_strategy_run_id_to_execute`
+
+#### If mode is `stable_only`
+
+The executor ignores strategy-run execution entirely. A strategy-run signal may still act as a wake-up point for the process, but it will not cause the executor to deploy capital.
+
+This separation matters because it guarantees:
+
+- operator intent is durable
+- strategy output cannot override a manual unwind command
+- the bot can be held flat across multiple strategy iterations
+
+### 0.1 `min_strategy_run_id_to_execute`
+
+The field `min_strategy_run_id_to_execute` is only meaningful in `normal` mode after resuming from a stable-only period.
+
+If it is set, the executor requires:
+
+$$
+\text{strategy\\_run\\_id} \ge \text{min\\_strategy\\_run\\_id\\_to\\_execute}
+$$
+
+before `run_once_with_existing_strategy_run(...)` is allowed to run.
+
+This is how the executor prevents stale strategy outputs from immediately re-entering positions after a deliberate unwind.
 
 ### 1. Strategy Targets Enter Execution
 
-Execution starts with `PortfolioData`.
+Normal execution starts with strategy targets.
+
+There are two entrypoints:
+
+- `run_once(...)`, which accepts full `PortfolioData`
+- `run_once_with_existing_strategy_run(...)`, which accepts the smaller execution-oriented target composition that has already been persisted in the database
+
+The long-running executor binary uses the second path. It loads:
+
+- the exact `strategy_run_id` received from Redis
+- the exact persisted targets for that run
+
+and then executes that run specifically.
+
+This means the executor path does **not** need to reconstruct or rely on the full strategy-layer covariance structure.
+
+Execution begins from strategy targets, and the persisted live executor path uses the reduced execution target state.
 
 The planner first normalizes raw strategy weights:
 
@@ -117,7 +314,7 @@ This happens in:
 
 - `/home/ec2-user/crypto-yield-farming-bot/src/execution/planner.rs`
 
-The normalized map is then used throughout execution rather than repeatedly reading from the raw `PortfolioData`.
+The normalized map is then used throughout execution.
 
 ### 2. Live Snapshot Construction
 
@@ -138,7 +335,7 @@ The snapshot contains:
 
 #### Important implementation detail
 
-The snapshot currently defines:
+The snapshot defines:
 
 $$
 \text{arbitrum\\_value\\_usd} = \text{market\\_value\\_usd} + \text{asset\\_value\\_usd}
@@ -150,7 +347,7 @@ $$
 \text{total\\_value\\_usd} = \text{arbitrum\\_value\\_usd} + \text{dydx\\_main\\_usdc} + \text{dydx\\_subaccount\\_equity}
 $$
 
-This means native ETH is tracked separately for operational purposes, but it is not added into `arbitrum_value_usd` or `total_value_usd`. That is the current implementation and should be understood as such when interpreting reserve calculations.
+This means native ETH is tracked separately for operational purposes, but it is not added into `arbitrum_value_usd` or `total_value_usd`. Reserve calculations should be interpreted with that accounting definition in mind.
 
 #### Why snapshot-first matters
 
@@ -250,7 +447,7 @@ $$
 
 This is implemented by `hedge_notional_from_withdrawal_values(...)`.
 
-This is intentionally quote-derived rather than inventory-heuristic-driven. The live hedge should track the actual collateral exposure implied by the GM position, not a fixed fraction of notional capital.
+This is quote-derived. The live hedge tracks the actual collateral exposure implied by the GM position instead of a fixed fraction of notional capital.
 
 ##### 3.2.4 Low leverage guard
 
@@ -375,7 +572,7 @@ The order is intentional:
 
 - unwrapping WETH is cheapest operationally
 - using local stable balances is cheaper than a cross-system dYdX withdrawal
-- dYdX withdrawals are used only when needed
+- dYdX withdrawals are used when needed
 
 #### If native ETH is too high
 
@@ -558,7 +755,7 @@ This gives the engine a hybrid model:
 
 - fast initial cache construction from a fresh snapshot
 - no need to rebuild the full snapshot after every swap
-- live recomputation only for markets whose cached decision may no longer be reliable
+- live recomputation only for markets whose cached decision has been invalidated by earlier balance changes
 
 #### 9.3 Cleaning up idle non-stable tokens
 
@@ -609,7 +806,7 @@ This preserves the gas reserve set earlier in the execution cycle.
 
 #### Important implementation detail
 
-The deposit amount is clipped to the currently available balance:
+The deposit amount is clipped to the available balance:
 
 $$
 Q^{\text{deposit}} = \min(Q^{\text{available}}, Q^{\text{needed}})
@@ -732,7 +929,7 @@ Otherwise:
 - if $\Delta Q_i^{\text{hedge}} > 0$, submit a buy order
 - else, submit a sell order
 
-This sign convention is driven by the current dYdX client API, not by verbal descriptions of “long” or “short”.
+This sign convention matches the dYdX client interface used by the code, not a textual interpretation of “long” or “short”.
 
 #### Why the hedge stage comes last
 
@@ -768,7 +965,7 @@ After the final stage, the engine records:
 - native ETH balance
 - dYdX hedge positions
 
-The snapshot PnL is computed relative to the latest previous persisted snapshot:
+The snapshot PnL is computed relative to the most recent persisted snapshot:
 
 $$
 \text{pnl\\_usd} = V_{\text{total now}} - V_{\text{total previous}}
@@ -780,7 +977,7 @@ This is bookkeeping-oriented portfolio accounting, not strategy attribution acco
 
 ### Why the flow is staged instead of fully optimized globally
 
-The engine is intentionally structured as a deterministic pipeline rather than a single global optimizer. The main reasons are:
+The engine is structured as a deterministic pipeline rather than a single global optimizer. The main reasons are:
 
 1. The action space mixes very different systems
    - GMX deposits/withdrawals/shifts
@@ -802,7 +999,7 @@ If two markets share the same collateral pair, shifting is operationally superio
 
 ### Why hedge sizing is quote-derived
 
-The engine used to conceptually resemble a fixed exposure fraction approach. The current implementation instead sizes hedges from quote-derived withdrawal outputs because that is a closer proxy for actual underlying collateral exposure.
+The engine sizes hedges from quote-derived withdrawal outputs because that is a closer proxy for actual underlying collateral exposure.
 
 This is especially important for:
 
@@ -828,13 +1025,15 @@ Execution without durable trade records is not acceptable for debugging, reconci
 
 ## Practical Caveats
 
-The execution layer is pragmatic, not perfect. A few current implementation details are worth keeping in mind:
+The execution layer is pragmatic, not perfect. A few implementation details are worth keeping in mind:
 
 1. Native ETH is tracked for gas management but is not included in `total_value_usd`.
 2. Deposit-token selection is fee-estimate-based, not slippage-optimized across full trade size.
 3. Hedge sizing is quote-derived, but still a proxy for true economic risk rather than a full Greeks-based hedge.
 4. Market deltas are based on GM mid prices and current wallet balances, not order-book-aware execution simulation.
 5. The reserve model is a heuristic safety model, not an exchange-native margin engine replica.
+6. `stable_only` is a durable operator override. While it is active, the strategy engine may continue producing runs, but the executor will not deploy those targets.
+7. Returning to `normal` does not immediately re-enter positions. The system waits for the next fresh strategy run after the recorded resume point.
 
 ## File Map
 
@@ -844,3 +1043,11 @@ The execution layer is pragmatic, not perfect. A few current implementation deta
   - target normalization, target values, market deltas, GM shift planning
 - `/home/ec2-user/crypto-yield-farming-bot/src/execution/types.rs`
   - core execution structs and action enums
+- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor.rs`
+  - long-running executor runtime, watchdog, control-state handling, strategy-run gating, stable-only retry loop
+- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor_ctl.rs`
+  - operator CLI for `status`, `stay-stable`, and `resume-normal`
+- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_state.sql`
+  - singleton durable execution mode row
+- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_events.sql`
+  - append-only audit history of operator-issued execution mode changes

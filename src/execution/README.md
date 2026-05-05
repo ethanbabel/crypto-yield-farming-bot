@@ -697,7 +697,7 @@ $$
 
 Specifically:
 
-- GM deposit fee is estimated by simulating a $\$1$-equivalent GM deposit on that side
+- GM deposit fee is estimated by simulating a $\\$1$-equivalent GM deposit on that side
 - swap fee is estimated only if the wallet does not already hold enough of that token
 
 Then the engine compares the two total estimated costs.

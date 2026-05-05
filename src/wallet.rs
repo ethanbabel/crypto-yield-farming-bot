@@ -157,6 +157,17 @@ impl WalletManager {
         Ok(balance)
     }
 
+    /// Resolve token metadata by address, including the synthetic native token entry.
+    pub fn get_token_info(&self, token_address: Address) -> Result<&TokenInfo> {
+        if token_address == self.native_token.address {
+            return Ok(&self.native_token);
+        }
+
+        self.all_tokens
+            .get(&token_address)
+            .ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))
+    }
+
     /// Get ERC20 token balance as U256
     #[instrument(skip(self, token_address))]
     pub async fn get_token_balance_u256(&self, token_address: Address) -> Result<U256> {

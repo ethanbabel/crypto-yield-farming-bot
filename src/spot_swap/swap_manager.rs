@@ -160,12 +160,8 @@ impl SwapManager {
         let from_token_delta = final_from_balance - initial_from_balance;
         let to_token_delta = final_to_balance - initial_to_balance;
         let native_token_delta = final_native_balance - initial_native_balance;
-        let from_token_info = self
-            .wallet_manager
-            .all_tokens
-            .get(&quote.from_token)
-            .unwrap();
-        let to_token_info = self.wallet_manager.all_tokens.get(&quote.to_token).unwrap();
+        let from_token_info = self.wallet_manager.get_token_info(quote.from_token)?;
+        let to_token_info = self.wallet_manager.get_token_info(quote.to_token)?;
 
         info!(
             final_from_balance = %final_from_balance,
@@ -193,34 +189,24 @@ impl SwapManager {
         if swap_request.side != "BUY" && swap_request.side != "SELL" {
             return Err(eyre::eyre!("Invalid swap side: {}", swap_request.side));
         }
-        let from_token =
-            if swap_request.from_token_address == self.wallet_manager.native_token.address {
-                &self.wallet_manager.native_token
-            } else {
-                self.wallet_manager
-                    .all_tokens
-                    .get(&swap_request.from_token_address)
-                    .ok_or_else(|| {
-                        eyre::eyre!(
-                            "From token not found in wallet manager: {:?}",
-                            swap_request.from_token_address
-                        )
-                    })?
-            };
-        let to_token = if swap_request.to_token_address == self.wallet_manager.native_token.address
-        {
-            &self.wallet_manager.native_token
-        } else {
-            self.wallet_manager
-                .all_tokens
-                .get(&swap_request.to_token_address)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "To token not found in wallet manager: {:?}",
-                        swap_request.to_token_address
-                    )
-                })?
-        };
+        let from_token = self
+            .wallet_manager
+            .get_token_info(swap_request.from_token_address)
+            .map_err(|_| {
+                eyre::eyre!(
+                    "From token not found in wallet manager: {:?}",
+                    swap_request.from_token_address
+                )
+            })?;
+        let to_token = self
+            .wallet_manager
+            .get_token_info(swap_request.to_token_address)
+            .map_err(|_| {
+                eyre::eyre!(
+                    "To token not found in wallet manager: {:?}",
+                    swap_request.to_token_address
+                )
+            })?;
 
         let swap_log_string = format!(
             "SWAP REQUEST | {} -> {} | {} {} {} |",

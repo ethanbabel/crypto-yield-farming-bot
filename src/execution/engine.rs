@@ -6,7 +6,7 @@ use ethers::types::Address;
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::constants::{NATIVE_ADDRESS, WNT_ADDRESS};
@@ -87,11 +87,39 @@ impl ExecutionEngine {
         strategy_run_id: i32,
     ) -> Result<()> {
         let target_weights = compute_target_weights(execution_targets);
+        info!(
+            strategy_run_id,
+            target_market_count = target_weights.len(),
+            target_weight_sum = %target_weights.values().cloned().sum::<Decimal>(),
+            target_weights = ?self.summarize_target_weights(&target_weights),
+            "Starting execution cycle"
+        );
         let mut snapshot = self.build_snapshot().await?;
+        info!(
+            strategy_run_id,
+            snapshot = %self.snapshot_summary(&snapshot),
+            "Loaded live portfolio snapshot"
+        );
         let token_hedgeinfo_map = self.fetch_token_hedgeinfo_map().await;
+        debug!(
+            strategy_run_id,
+            hedgeable_token_count = token_hedgeinfo_map.len(),
+            "Fetched dYdX hedge metadata"
+        );
         let reserve_state = self
             .compute_reserve_state(&target_weights, &snapshot, &token_hedgeinfo_map)
             .await?;
+        info!(
+            strategy_run_id,
+            investable_capital = %reserve_state.investable_capital,
+            reserve_total = %reserve_state.reserve_total,
+            required_margin = %reserve_state.required_margin,
+            required_equity = %reserve_state.required_equity,
+            required_free_collateral = %reserve_state.required_free_collateral,
+            gas_reserve_target_usd = %reserve_state.gas_reserve_target_usd,
+            gas_reserve_target_eth = %reserve_state.gas_reserve_target_eth,
+            "Computed reserve state"
+        );
 
         if reserve_state.investable_capital <= Decimal::ZERO {
             warn!(
@@ -109,6 +137,11 @@ impl ExecutionEngine {
             .await?
         {
             snapshot = self.build_snapshot().await?;
+            info!(
+                strategy_run_id,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Refreshed snapshot after dYdX excess withdrawal"
+            );
         }
 
         if self
@@ -116,10 +149,20 @@ impl ExecutionEngine {
             .await?
         {
             snapshot = self.build_snapshot().await?;
+            info!(
+                strategy_run_id,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Refreshed snapshot after gas reserve adjustment"
+            );
         }
 
         let target_values =
             compute_target_values(&target_weights, reserve_state.investable_capital);
+        debug!(
+            strategy_run_id,
+            target_values = ?self.summarize_market_values(&target_values),
+            "Computed target market values"
+        );
 
         let mut deltas = compute_market_deltas(
             &snapshot,
@@ -127,9 +170,20 @@ impl ExecutionEngine {
             &self.wallet_manager,
             &self.planner_config,
         );
+        info!(
+            strategy_run_id,
+            deltas = ?self.summarize_market_deltas(&deltas),
+            "Computed initial market deltas"
+        );
 
         // Stage 1: Shifts
         let (shift_actions, _) = plan_shift_actions(&deltas, &self.wallet_manager);
+        info!(
+            strategy_run_id,
+            action_count = shift_actions.len(),
+            actions = ?self.describe_actions(&shift_actions),
+            "Stage 1: planned GM shifts"
+        );
         if self.execute_actions(&shift_actions, Some(strategy_run_id)).await {
             snapshot = self.build_snapshot().await?;
             deltas = compute_market_deltas(
@@ -138,10 +192,22 @@ impl ExecutionEngine {
                 &self.wallet_manager,
                 &self.planner_config,
             );
+            info!(
+                strategy_run_id,
+                snapshot = %self.snapshot_summary(&snapshot),
+                deltas = ?self.summarize_market_deltas(&deltas),
+                "Completed shift stage and recomputed deltas"
+            );
         }
 
         // Stage 2: Withdrawals
         let withdraw_actions = self.build_withdraw_actions(&snapshot, &deltas);
+        info!(
+            strategy_run_id,
+            action_count = withdraw_actions.len(),
+            actions = ?self.describe_actions(&withdraw_actions),
+            "Stage 2: planned GM withdrawals"
+        );
         let withdrew = self
             .execute_actions(&withdraw_actions, Some(strategy_run_id))
             .await;
@@ -161,21 +227,42 @@ impl ExecutionEngine {
                 &self.wallet_manager,
                 &self.planner_config,
             );
+            info!(
+                strategy_run_id,
+                withdrew,
+                gas_rebalanced,
+                snapshot = %self.snapshot_summary(&snapshot),
+                deltas = ?self.summarize_market_deltas(&deltas),
+                "Completed withdrawal stage and recomputed deltas"
+            );
         }
 
         // Stage 3: Deposits + cleanup swaps
+        info!(strategy_run_id, "Stage 3: executing deposit and asset cleanup stage");
         if self
             .execute_deposit_stage(&snapshot, &deltas, &reserve_state, Some(strategy_run_id))
             .await?
         {
             snapshot = self.build_snapshot().await?;
+            info!(
+                strategy_run_id,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Completed deposit stage and refreshed snapshot"
+            );
         }
 
         // Stage 4: dYdX reserve management
+        info!(strategy_run_id, "Stage 4: managing dYdX reserves");
         let reserves_changed = self.manage_dydx_reserves(&snapshot, &reserve_state).await?;
 
         // Stage 5: Hedge adjustments
         let hedge_actions = self.build_hedge_actions(&snapshot, &target_weights).await?;
+        info!(
+            strategy_run_id,
+            action_count = hedge_actions.len(),
+            actions = ?self.describe_actions(&hedge_actions),
+            "Stage 5: planned hedge adjustments"
+        );
         let hedges_changed = self.execute_actions(&hedge_actions, Some(strategy_run_id)).await;
 
         let post_snapshot = if reserves_changed || hedges_changed {
@@ -183,6 +270,13 @@ impl ExecutionEngine {
         } else {
             snapshot
         };
+        info!(
+            strategy_run_id,
+            reserves_changed,
+            hedges_changed,
+            snapshot = %self.snapshot_summary(&post_snapshot),
+            "Execution cycle completed; recording final snapshot"
+        );
         self.record_snapshot(Some(strategy_run_id), &post_snapshot)
             .await?;
 
@@ -202,23 +296,51 @@ impl ExecutionEngine {
 
         info!(
             target_stable_symbol = %target_stable.symbol,
+            snapshot = %self.snapshot_summary(&snapshot),
             "Starting unwind to stable"
         );
 
         let mut changed = false;
 
         let withdraw_actions = self.build_full_unwind_withdraw_actions(&snapshot);
+        info!(
+            target_stable_symbol = %target_stable.symbol,
+            action_count = withdraw_actions.len(),
+            actions = ?self.describe_actions(&withdraw_actions),
+            "Unwind stage 1: planned GM withdrawals"
+        );
         if self.execute_actions(&withdraw_actions, None).await {
             changed = true;
             snapshot = self.build_snapshot().await?;
+            info!(
+                target_stable_symbol = %target_stable.symbol,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Completed unwind withdrawal stage"
+            );
         }
 
         let hedge_actions = self.build_full_unwind_hedge_actions(&snapshot);
+        info!(
+            target_stable_symbol = %target_stable.symbol,
+            action_count = hedge_actions.len(),
+            actions = ?self.describe_actions(&hedge_actions),
+            "Unwind stage 2: planned hedge closures"
+        );
         if self.execute_actions(&hedge_actions, None).await {
             changed = true;
             snapshot = self.build_snapshot().await?;
+            info!(
+                target_stable_symbol = %target_stable.symbol,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Completed unwind hedge stage"
+            );
         }
 
+        info!(
+            target_stable_symbol = %target_stable.symbol,
+            min_value_usd = %self.planner_config.unwind_min_value_usd,
+            "Unwind stage 3: cleaning ERC-20 balances into target stable"
+        );
         if self
             .cleanup_asset_tokens_to_stable(
                 &snapshot.asset_balances,
@@ -232,14 +354,29 @@ impl ExecutionEngine {
         {
             changed = true;
             snapshot = self.build_snapshot().await?;
+            info!(
+                target_stable_symbol = %target_stable.symbol,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Completed unwind asset cleanup stage"
+            );
         }
 
+        info!(
+            target_stable_symbol = %target_stable.symbol,
+            native_buffer_usd = %self.planner_config.stable_only_native_buffer_usd,
+            "Unwind stage 4: selling excess native ETH into target stable"
+        );
         if self
             .sell_excess_native_to_stable(&snapshot, &target_stable, None)
             .await
         {
             changed = true;
             snapshot = self.build_snapshot().await?;
+            info!(
+                target_stable_symbol = %target_stable.symbol,
+                snapshot = %self.snapshot_summary(&snapshot),
+                "Completed unwind native cleanup stage"
+            );
         }
 
         self.record_snapshot(None, &snapshot).await?;
@@ -261,12 +398,21 @@ impl ExecutionEngine {
     ) -> bool {
         let native_price = self.wallet_manager.native_token.last_mid_price_usd;
         if native_price <= Decimal::ZERO {
+            debug!("Skipping native unwind because native price is unavailable");
             return false;
         }
 
         // Keep a small explicit ETH buffer for future transactions during a risk-off unwind.
         let native_buffer = self.planner_config.stable_only_native_buffer_usd / native_price;
         let sell_amount = (snapshot.native_balance - native_buffer).max(Decimal::ZERO);
+        debug!(
+            current_native_balance = %snapshot.native_balance,
+            native_price_usd = %native_price,
+            native_buffer_eth = %native_buffer,
+            stable_only_native_buffer_usd = %self.planner_config.stable_only_native_buffer_usd,
+            sell_amount = %sell_amount,
+            "Evaluated native unwind buffer"
+        );
         if sell_amount <= Decimal::ZERO {
             return false;
         }
@@ -277,6 +423,10 @@ impl ExecutionEngine {
             amount: sell_amount,
             side: "SELL".to_string(),
         };
+        info!(
+            action = %self.describe_action(&action),
+            "Selling excess native ETH into target stable"
+        );
         self.execute_and_log(&action, strategy_run_id).await
     }
 
@@ -296,6 +446,18 @@ impl ExecutionEngine {
         let excess_free = snapshot.dydx_free_collateral - reserve_state.required_free_collateral;
         let excess = excess_equity.min(excess_free);
         let shortfall = reserve_state.investable_capital - snapshot.arbitrum_value_usd;
+        debug!(
+            dydx_subaccount_equity = %snapshot.dydx_subaccount_equity,
+            dydx_free_collateral = %snapshot.dydx_free_collateral,
+            required_equity = %reserve_state.required_equity,
+            required_free_collateral = %reserve_state.required_free_collateral,
+            excess_equity = %excess_equity,
+            excess_free_collateral = %excess_free,
+            arbitrum_value_usd = %snapshot.arbitrum_value_usd,
+            investable_capital = %reserve_state.investable_capital,
+            arbitrum_shortfall_usd = %shortfall,
+            "Evaluated dYdX excess withdrawal opportunity"
+        );
         if excess <= Decimal::ZERO || shortfall <= self.planner_config.min_value_usd {
             return Ok(false);
         }
@@ -372,6 +534,20 @@ impl ExecutionEngine {
 
         let arbitrum_value_usd = market_value_usd + asset_value_usd;
         let total_value_usd = arbitrum_value_usd + dydx_main_usdc + dydx_subaccount_equity;
+        debug!(
+            market_value_usd = %market_value_usd,
+            asset_value_usd = %asset_value_usd,
+            arbitrum_value_usd = %arbitrum_value_usd,
+            dydx_main_usdc = %dydx_main_usdc,
+            dydx_subaccount_equity = %dydx_subaccount_equity,
+            dydx_free_collateral = %dydx_free_collateral,
+            native_balance = %native_balance,
+            gm_position_count = market_balances.len(),
+            asset_balance_count = asset_balances.len(),
+            hedge_position_count = hedge_positions.len(),
+            total_value_usd = %total_value_usd,
+            "Built portfolio snapshot"
+        );
 
         Ok(PortfolioSnapshot {
             timestamp: Utc::now(),
@@ -406,7 +582,7 @@ impl ExecutionEngine {
         let mut deposit_token_cache = HashMap::new();
 
         let iterations = 2;
-        for _ in 0..iterations {
+        for iteration in 0..iterations {
             let base_reserve = total_value * self.planner_config.reserve_pct;
             investable = (total_value - base_reserve).max(Decimal::ZERO);
             let reserve_req = self
@@ -423,6 +599,16 @@ impl ExecutionEngine {
             required_free_collateral = reserve_req.2;
             reserve_total = base_reserve.max(required_equity);
             investable = (total_value - reserve_total).max(Decimal::ZERO);
+            debug!(
+                iteration = iteration + 1,
+                base_reserve = %base_reserve,
+                required_margin = %required_margin,
+                required_equity = %required_equity,
+                required_free_collateral = %required_free_collateral,
+                reserve_total = %reserve_total,
+                investable_capital = %investable,
+                "Reserve iteration completed"
+            );
         }
 
         let gas_reserve_target_usd =
@@ -461,6 +647,12 @@ impl ExecutionEngine {
         let mut required_margin = Decimal::ZERO;
         let mut min_leverage = None::<Decimal>;
         let base_stable = self.get_preferred_stable_token(&snapshot.asset_balances);
+        debug!(
+            investable_capital = %investable_capital,
+            base_stable = ?base_stable.as_ref().map(|token| token.symbol.clone()),
+            target_market_count = target_weights.len(),
+            "Computing required dYdX reserve"
+        );
 
         for market in target_weights.keys() {
             let market_info = match self.wallet_manager.market_tokens.get(market) {
@@ -518,6 +710,16 @@ impl ExecutionEngine {
 
             if leverage > Decimal::ZERO {
                 required_margin += hedge_notional / leverage;
+                debug!(
+                    market = %market_info.symbol,
+                    target_weight = %target_weight,
+                    target_value_usd = %target_value,
+                    deposit_token = %deposit_token.symbol,
+                    leverage = %leverage,
+                    hedge_notional_usd = %hedge_notional,
+                    incremental_required_margin = %(hedge_notional / leverage),
+                    "Included market in dYdX reserve calculation"
+                );
             }
         }
 
@@ -684,11 +886,25 @@ impl ExecutionEngine {
         let native_price = self.wallet_manager.native_token.last_mid_price_usd;
         let threshold_usd = self.planner_config.min_value_usd;
         let mut changed = false;
+        debug!(
+            current_eth = %current_eth,
+            target_eth = %target_eth,
+            native_price_usd = %native_price,
+            threshold_usd = %threshold_usd,
+            "Evaluating gas reserve state"
+        );
 
         if current_eth < target_eth {
             let mut needed = target_eth - current_eth;
             let weth_address = WNT_ADDRESS.parse().unwrap();
             let weth_balance = self.wallet_manager.get_token_balance(weth_address).await?;
+            info!(
+                current_eth = %current_eth,
+                target_eth = %target_eth,
+                needed_eth = %needed,
+                available_weth = %weth_balance,
+                "Gas reserve below target; attempting top-up"
+            );
             if weth_balance > Decimal::ZERO {
                 let unwrap_amount = weth_balance.min(needed);
                 let action = TradeAction::SpotSwap {
@@ -697,6 +913,7 @@ impl ExecutionEngine {
                     amount: unwrap_amount,
                     side: "SELL".to_string(),
                 };
+                info!(action = %self.describe_action(&action), "Using WETH to replenish gas reserve");
                 changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                 needed = (needed - unwrap_amount).max(Decimal::ZERO);
             }
@@ -713,6 +930,13 @@ impl ExecutionEngine {
                         .await?;
                     let usd_available = source_balance * source_stable.last_mid_price_usd;
                     let usd_needed = needed * native_price;
+                    debug!(
+                        source_stable = %source_stable.symbol,
+                        source_balance = %source_balance,
+                        usd_available = %usd_available,
+                        usd_needed = %usd_needed,
+                        "Evaluated stable funding for gas reserve"
+                    );
                     if usd_available < usd_needed {
                         let excess_equity =
                             snapshot.dydx_subaccount_equity - reserve_state.required_equity;
@@ -735,7 +959,8 @@ impl ExecutionEngine {
                                 {
                                     warn!(error = ?e, "Failed to withdraw from dYdX for gas reserve");
                                 } else {
-                                    warn!(
+                                    info!(
+                                        amount = %withdraw_amount,
                                         "Triggered dYdX withdrawal for gas reserve; skipping ETH top-up this cycle"
                                     );
                                     return Ok(true);
@@ -750,12 +975,18 @@ impl ExecutionEngine {
                         amount: needed,
                         side: "BUY".to_string(),
                     };
+                    info!(action = %self.describe_action(&action), "Buying native ETH to replenish gas reserve");
                     changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                 }
             }
         } else {
             let excess = current_eth - target_eth;
             let excess_usd = excess * native_price;
+            debug!(
+                excess_eth = %excess,
+                excess_usd = %excess_usd,
+                "Gas reserve above target"
+            );
             if excess_usd > threshold_usd {
                 if let Some(base_stable) = self.get_preferred_stable_token(&snapshot.asset_balances)
                 {
@@ -765,6 +996,7 @@ impl ExecutionEngine {
                         amount: excess,
                         side: "SELL".to_string(),
                     };
+                    info!(action = %self.describe_action(&action), "Selling excess native ETH above gas reserve target");
                     changed = self.execute_and_log(&action, strategy_run_id).await || changed;
                 }
             }
@@ -796,11 +1028,15 @@ impl ExecutionEngine {
                 });
             }
         }
+        debug!(
+            actions = ?self.describe_actions(&actions),
+            "Built GM withdrawal actions"
+        );
         actions
     }
 
     fn build_full_unwind_withdraw_actions(&self, snapshot: &PortfolioSnapshot) -> Vec<TradeAction> {
-        snapshot
+        let actions: Vec<TradeAction> = snapshot
             .market_balances
             .iter()
             .filter_map(|(market, balance)| {
@@ -820,7 +1056,13 @@ impl ExecutionEngine {
                     amount: *balance,
                 })
             })
-            .collect()
+            .collect();
+        debug!(
+            actions = ?self.describe_actions(&actions),
+            min_value_usd = %self.planner_config.min_value_usd,
+            "Built full unwind GM withdrawal actions"
+        );
+        actions
     }
 
     fn build_full_unwind_hedge_actions(&self, snapshot: &PortfolioSnapshot) -> Vec<TradeAction> {
@@ -846,6 +1088,10 @@ impl ExecutionEngine {
             });
         }
 
+        debug!(
+            actions = ?self.describe_actions(&actions),
+            "Built full unwind hedge actions"
+        );
         actions
     }
 
@@ -868,6 +1114,7 @@ impl ExecutionEngine {
             .collect();
 
         if deposit_targets.is_empty() {
+            debug!("Skipping deposit stage because there are no positive market deltas");
             return Ok(false);
         }
 
@@ -878,6 +1125,12 @@ impl ExecutionEngine {
                 return Ok(false);
             }
         };
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            base_stable = %base_stable.symbol,
+            deposit_targets = ?self.summarize_market_deltas_map(&deposit_targets),
+            "Planning deposit stage"
+        );
 
         let mut preferred_tokens = HashSet::new();
         let mut deposit_token_cache = HashMap::new();
@@ -906,6 +1159,11 @@ impl ExecutionEngine {
                 self.planner_config.min_value_usd,
             )
             .await;
+        debug!(
+            cleaned_preferred_asset_tokens = cleaned,
+            preferred_tokens = ?preferred_tokens,
+            "Completed pre-deposit asset cleanup"
+        );
 
         let mut refreshed = if cleaned {
             self.build_snapshot().await?
@@ -926,6 +1184,12 @@ impl ExecutionEngine {
             if usd_needed <= Decimal::ZERO || usd_needed < self.planner_config.min_value_usd {
                 continue;
             }
+            debug!(
+                market = %market_info.symbol,
+                delta_tokens = %delta_tokens,
+                usd_needed = %usd_needed,
+                "Evaluating deposit target"
+            );
 
             let deposit_token = match self
                 .get_cached_or_recomputed_deposit_token(
@@ -944,6 +1208,13 @@ impl ExecutionEngine {
                 continue;
             }
             let amount_needed = usd_needed / funding_price;
+            debug!(
+                market = %market_info.symbol,
+                deposit_token = %deposit_token.symbol,
+                funding_price_usd = %funding_price,
+                amount_needed = %amount_needed,
+                "Selected deposit token"
+            );
 
             let mut funding_balance = self
                 .wallet_manager
@@ -951,6 +1222,14 @@ impl ExecutionEngine {
                 .await?;
             if funding_balance < amount_needed {
                 let shortfall = amount_needed - funding_balance;
+                info!(
+                    market = %market_info.symbol,
+                    deposit_token = %deposit_token.symbol,
+                    funding_balance = %funding_balance,
+                    amount_needed = %amount_needed,
+                    shortfall = %shortfall,
+                    "Deposit stage needs additional funding"
+                );
                 if deposit_token.address == WNT_ADDRESS.parse().unwrap() {
                     let native_balance = self.wallet_manager.get_native_balance().await?;
                     let wrappable_native =
@@ -963,6 +1242,7 @@ impl ExecutionEngine {
                             amount: wrap_amount,
                             side: "BUY".to_string(),
                         };
+                        info!(action = %self.describe_action(&action), "Wrapping native ETH to fund GM deposit");
                         if self.execute_and_log(&action, strategy_run_id).await {
                             changed = true;
                             self.invalidate_markets_for_token(
@@ -989,6 +1269,7 @@ impl ExecutionEngine {
                             amount: remaining,
                             side: "BUY".to_string(),
                         };
+                        info!(action = %self.describe_action(&action), "Swapping stable balance to fund GM deposit");
                         if self.execute_and_log(&action, strategy_run_id).await {
                             changed = true;
                             self.invalidate_markets_for_token(
@@ -1022,6 +1303,7 @@ impl ExecutionEngine {
                 long_amount,
                 short_amount,
             };
+            info!(action = %self.describe_action(&action), "Submitting GM deposit");
             if self.execute_and_log(&action, strategy_run_id).await {
                 changed = true;
                 if deposit_token.address != base_stable.address {
@@ -1091,7 +1373,15 @@ impl ExecutionEngine {
                 .get(token_addr)
                 .map(|t| t.last_mid_price_usd)
                 .unwrap_or(Decimal::ZERO);
-            if (*balance * token_price) < min_value_usd {
+            let token_value_usd = *balance * token_price;
+            if token_value_usd < min_value_usd {
+                debug!(
+                    token = %self.token_symbol(*token_addr),
+                    balance = %balance,
+                    usd_value = %token_value_usd,
+                    min_value_usd = %min_value_usd,
+                    "Skipping asset cleanup because balance is below threshold"
+                );
                 continue;
             }
 
@@ -1101,6 +1391,12 @@ impl ExecutionEngine {
                 amount: *balance,
                 side: "SELL".to_string(),
             };
+            info!(
+                action = %self.describe_action(&action),
+                usd_value = %token_value_usd,
+                include_other_stables,
+                "Cleaning asset balance into target stable"
+            );
             changed = self.execute_and_log(&action, strategy_run_id).await || changed;
         }
         changed
@@ -1608,6 +1904,14 @@ impl ExecutionEngine {
         let equity_shortfall = (required_equity - sub_equity).max(Decimal::ZERO);
         let free_shortfall = (required_free - sub_free).max(Decimal::ZERO);
         let shortfall = equity_shortfall.max(free_shortfall);
+        debug!(
+            subaccount_equity = %sub_equity,
+            free_collateral = %sub_free,
+            required_equity = %required_equity,
+            required_free_collateral = %required_free,
+            shortfall = %shortfall,
+            "Evaluated dYdX reserve state"
+        );
 
         if shortfall <= self.planner_config.min_value_usd {
             return Ok(false);
@@ -1630,6 +1934,7 @@ impl ExecutionEngine {
                 warn!(error = ?e, "Failed to move USDC to subaccount");
                 return Ok(false);
             }
+            info!(amount = %main_usdc, "Moved available main-account USDC to dYdX subaccount");
             changed = true;
         }
 
@@ -1648,9 +1953,15 @@ impl ExecutionEngine {
 
     async fn execute_actions(&self, actions: &[TradeAction], strategy_run_id: Option<i32>) -> bool {
         if actions.is_empty() {
+            debug!(strategy_run_id = ?strategy_run_id, "No actions to execute in this stage");
             return false;
         }
-        info!(action_count = actions.len(), "Executing actions");
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            action_count = actions.len(),
+            actions = ?self.describe_actions(actions),
+            "Executing action batch"
+        );
         let mut changed = false;
         for action in actions.iter() {
             changed = self.execute_and_log(action, strategy_run_id).await || changed;
@@ -1659,7 +1970,19 @@ impl ExecutionEngine {
     }
 
     async fn execute_and_log(&self, action: &TradeAction, strategy_run_id: Option<i32>) -> bool {
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            action = %self.describe_action(action),
+            "Executing action"
+        );
         let execution = self.execute_action(action).await;
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            action = %self.describe_action(action),
+            status = execution.status.as_str(),
+            tx_hash = ?execution.tx_hash,
+            "Action execution finished"
+        );
         if let Err(e) = self
             .log_trade(strategy_run_id, action, execution.status, execution.tx_hash)
             .await
@@ -1827,9 +2150,21 @@ impl ExecutionEngine {
             .db_manager
             .insert_portfolio_snapshot(&new_snapshot)
             .await?;
+        info!(
+            snapshot_id,
+            strategy_run_id = ?strategy_run_id,
+            total_value_usd = %snapshot.total_value_usd,
+            pnl_usd = %pnl,
+            "Recorded portfolio snapshot"
+        );
 
         let positions = self.build_position_snapshots(snapshot, snapshot_id).await?;
         if !positions.is_empty() {
+            info!(
+                snapshot_id,
+                position_count = positions.len(),
+                "Recording position snapshots"
+            );
             self.db_manager.insert_position_snapshots(positions).await?;
         }
 
@@ -1957,7 +2292,188 @@ impl ExecutionEngine {
             details,
         };
         self.db_manager.insert_trade(&trade).await?;
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            action_type = %action.action_type(),
+            status = %status.as_str(),
+            tx_hash = ?trade.tx_hash,
+            "Recorded trade log"
+        );
         Ok(())
+    }
+
+    fn snapshot_summary(&self, snapshot: &PortfolioSnapshot) -> String {
+        format!(
+            "total={} arbitrum={} gm={} assets={} native={} dydx_main_usdc={} dydx_equity={} dydx_free_collateral={} gm_positions={} asset_positions={} hedge_positions={}",
+            snapshot.total_value_usd,
+            snapshot.arbitrum_value_usd,
+            snapshot.market_value_usd,
+            snapshot.asset_value_usd,
+            snapshot.native_balance,
+            snapshot.dydx_main_usdc,
+            snapshot.dydx_subaccount_equity,
+            snapshot.dydx_free_collateral,
+            snapshot.market_balances.len(),
+            snapshot.asset_balances.len(),
+            snapshot.hedge_positions.len(),
+        )
+    }
+
+    fn summarize_target_weights(&self, target_weights: &HashMap<Address, Decimal>) -> Vec<String> {
+        let mut entries: Vec<(String, Decimal)> = target_weights
+            .iter()
+            .filter_map(|(market, weight)| {
+                if *weight <= Decimal::ZERO {
+                    return None;
+                }
+                Some((self.market_symbol(*market), *weight))
+            })
+            .collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries
+            .into_iter()
+            .take(10)
+            .map(|(symbol, weight)| format!("{}={}", symbol, weight))
+            .collect()
+    }
+
+    fn summarize_market_values(&self, values: &HashMap<Address, Decimal>) -> Vec<String> {
+        let mut entries: Vec<(String, Decimal)> = values
+            .iter()
+            .map(|(market, value)| (self.market_symbol(*market), *value))
+            .collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries
+            .into_iter()
+            .take(10)
+            .map(|(symbol, value)| format!("{}={}", symbol, value))
+            .collect()
+    }
+
+    fn summarize_market_deltas(&self, deltas: &HashMap<Address, Decimal>) -> Vec<String> {
+        let mut entries: Vec<(String, Decimal)> = deltas
+            .iter()
+            .filter_map(|(market, delta)| {
+                if delta.abs() <= Decimal::ZERO {
+                    return None;
+                }
+                let usd_delta = self
+                    .wallet_manager
+                    .market_tokens
+                    .get(market)
+                    .map(|token| *delta * token.last_mid_price_usd)
+                    .unwrap_or(Decimal::ZERO);
+                Some((self.market_symbol(*market), usd_delta))
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            b.1.abs()
+                .partial_cmp(&a.1.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        entries
+            .into_iter()
+            .take(10)
+            .map(|(symbol, value)| format!("{}={}", symbol, value))
+            .collect()
+    }
+
+    fn summarize_market_deltas_map(&self, deltas: &[(Address, Decimal)]) -> Vec<String> {
+        let mut entries: Vec<(String, Decimal)> = deltas
+            .iter()
+            .map(|(market, delta)| (self.market_symbol(*market), *delta))
+            .collect();
+        entries.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        entries
+            .into_iter()
+            .take(10)
+            .map(|(symbol, delta)| format!("{}={}", symbol, delta))
+            .collect()
+    }
+
+    fn describe_actions(&self, actions: &[TradeAction]) -> Vec<String> {
+        actions
+            .iter()
+            .take(12)
+            .map(|action| self.describe_action(action))
+            .collect()
+    }
+
+    fn describe_action(&self, action: &TradeAction) -> String {
+        match action {
+            TradeAction::GmDeposit {
+                market,
+                long_amount,
+                short_amount,
+            } => format!(
+                "gm_deposit market={} long_amount={} short_amount={}",
+                self.market_symbol(*market),
+                long_amount,
+                short_amount
+            ),
+            TradeAction::GmWithdrawal { market, amount } => format!(
+                "gm_withdrawal market={} amount={}",
+                self.market_symbol(*market),
+                amount
+            ),
+            TradeAction::GmShift {
+                from_market,
+                to_market,
+                amount,
+            } => format!(
+                "gm_shift from={} to={} amount={}",
+                self.market_symbol(*from_market),
+                self.market_symbol(*to_market),
+                amount
+            ),
+            TradeAction::SpotSwap {
+                from_token,
+                to_token,
+                amount,
+                side,
+            } => format!(
+                "spot_swap side={} from={} to={} amount={}",
+                side,
+                self.token_symbol(*from_token),
+                self.token_symbol(*to_token),
+                amount
+            ),
+            TradeAction::HedgeOrder {
+                token_symbol,
+                size,
+                side_is_buy,
+            } => format!(
+                "hedge_order token={} side={} size={}",
+                token_symbol,
+                if *side_is_buy { "buy" } else { "sell" },
+                size
+            ),
+        }
+    }
+
+    fn market_symbol(&self, market: Address) -> String {
+        self.wallet_manager
+            .market_tokens
+            .get(&market)
+            .map(|token| token.symbol.clone())
+            .unwrap_or_else(|| format!("{:?}", market))
+    }
+
+    fn token_symbol(&self, token: Address) -> String {
+        if token == NATIVE_ADDRESS.parse().unwrap() {
+            return self.wallet_manager.native_token.symbol.clone();
+        }
+        self.wallet_manager
+            .asset_tokens
+            .get(&token)
+            .map(|token| token.symbol.clone())
+            .or_else(|| {
+                self.wallet_manager
+                    .market_tokens
+                    .get(&token)
+                    .map(|token| token.symbol.clone())
+            })
+            .unwrap_or_else(|| format!("{:?}", token))
     }
 
     fn build_trade_details(

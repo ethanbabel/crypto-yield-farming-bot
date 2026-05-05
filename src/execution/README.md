@@ -11,14 +11,14 @@ The goal of the execution layer is not to recompute the strategy. Its job is to 
 
 The core code lives in:
 
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/engine.rs`
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/planner.rs`
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/types.rs`
+- `crypto-yield-farming-bot/src/execution/engine.rs`
+- `crypto-yield-farming-bot/src/execution/planner.rs`
+- `crypto-yield-farming-bot/src/execution/types.rs`
 
 The execution runtime and control-plane entrypoints live in:
 
-- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor.rs`
-- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor_ctl.rs`
+- `crypto-yield-farming-bot/src/bin/executor.rs`
+- `crypto-yield-farming-bot/src/bin/executor_ctl.rs`
 
 ## Execution Control Plane
 
@@ -36,8 +36,8 @@ There are two execution modes:
 
 The durable state is stored in:
 
-- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_state.sql`
-- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_events.sql`
+- `crypto-yield-farming-bot/src/db/schema/execution_control_state.sql`
+- `crypto-yield-farming-bot/src/db/schema/execution_control_events.sql`
 
 The singleton control-state row stores:
 
@@ -241,7 +241,7 @@ Before a strategy run is executed, the executor binary resolves its current cont
 
 This logic lives in:
 
-- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor.rs`
+- `crypto-yield-farming-bot/src/bin/executor.rs`
 
 The executor subscribes to two Redis pubsub channels:
 
@@ -312,7 +312,7 @@ If the raw sum is non-positive, the code uses $1$ as the denominator to avoid di
 
 This happens in:
 
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/planner.rs`
+- `crypto-yield-farming-bot/src/execution/planner.rs`
 
 The normalized map is then used throughout execution.
 
@@ -1037,17 +1037,17 @@ The execution layer is pragmatic, not perfect. A few implementation details are 
 
 ## File Map
 
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/engine.rs`
+- `crypto-yield-farming-bot/src/execution/engine.rs`
   - orchestration, reserve sizing, gas management, deposit/withdraw/hedge execution, logging
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/planner.rs`
+- `crypto-yield-farming-bot/src/execution/planner.rs`
   - target normalization, target values, market deltas, GM shift planning
-- `/home/ec2-user/crypto-yield-farming-bot/src/execution/types.rs`
+- `crypto-yield-farming-bot/src/execution/types.rs`
   - core execution structs and action enums
-- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor.rs`
+- `crypto-yield-farming-bot/src/bin/executor.rs`
   - long-running executor runtime, watchdog, control-state handling, strategy-run gating, stable-only retry loop
-- `/home/ec2-user/crypto-yield-farming-bot/src/bin/executor_ctl.rs`
+- `crypto-yield-farming-bot/src/bin/executor_ctl.rs`
   - operator CLI for `status`, `stay-stable`, and `resume-normal`
-- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_state.sql`
+- `crypto-yield-farming-bot/src/db/schema/execution_control_state.sql`
   - singleton durable execution mode row
-- `/home/ec2-user/crypto-yield-farming-bot/src/db/schema/execution_control_events.sql`
+- `crypto-yield-farming-bot/src/db/schema/execution_control_events.sql`
   - append-only audit history of operator-issued execution mode changes

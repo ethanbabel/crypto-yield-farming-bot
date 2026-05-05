@@ -110,6 +110,8 @@ pub struct RebalancePlan {
 pub struct PlannerConfig {
     pub min_weight_delta: Decimal,
     pub min_value_usd: Decimal,
+    pub unwind_min_value_usd: Decimal,
+    pub stable_only_native_buffer_usd: Decimal,
     pub reserve_pct: Decimal,
     pub gas_reserve_pct: Decimal,
 }
@@ -119,6 +121,8 @@ impl Default for PlannerConfig {
         Self {
             min_weight_delta: Decimal::new(1, 2),
             min_value_usd: Decimal::new(10, 0),
+            unwind_min_value_usd: Decimal::new(1, 0),
+            stable_only_native_buffer_usd: Decimal::new(10, 0),
             reserve_pct: Decimal::new(5, 2),
             gas_reserve_pct: Decimal::new(1, 2),
         }

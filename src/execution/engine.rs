@@ -226,6 +226,7 @@ impl ExecutionEngine {
                 &target_stable,
                 None,
                 true,
+                self.planner_config.unwind_min_value_usd,
             )
             .await
         {
@@ -263,9 +264,8 @@ impl ExecutionEngine {
             return false;
         }
 
-        // Keep a small ETH buffer for future transactions instead of targeting the usual
-        // portfolio-based gas reserve during a risk-off unwind.
-        let native_buffer = self.planner_config.min_value_usd / native_price;
+        // Keep a small explicit ETH buffer for future transactions during a risk-off unwind.
+        let native_buffer = self.planner_config.stable_only_native_buffer_usd / native_price;
         let sell_amount = (snapshot.native_balance - native_buffer).max(Decimal::ZERO);
         if sell_amount <= Decimal::ZERO {
             return false;
@@ -903,6 +903,7 @@ impl ExecutionEngine {
                 &base_stable,
                 strategy_run_id,
                 false,
+                self.planner_config.min_value_usd,
             )
             .await;
 
@@ -1044,6 +1045,7 @@ impl ExecutionEngine {
                 &base_stable,
                 strategy_run_id,
                 false,
+                self.planner_config.min_value_usd,
             )
             .await
             || changed;
@@ -1058,6 +1060,7 @@ impl ExecutionEngine {
         base_stable: &TokenInfo,
         strategy_run_id: Option<i32>,
         include_other_stables: bool,
+        min_value_usd: Decimal,
     ) -> bool {
         let mut changed = false;
         for (token_addr, balance) in balances.iter() {
@@ -1088,7 +1091,7 @@ impl ExecutionEngine {
                 .get(token_addr)
                 .map(|t| t.last_mid_price_usd)
                 .unwrap_or(Decimal::ZERO);
-            if (*balance * token_price) < self.planner_config.min_value_usd {
+            if (*balance * token_price) < min_value_usd {
                 continue;
             }
 

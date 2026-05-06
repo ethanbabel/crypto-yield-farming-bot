@@ -7,7 +7,9 @@ use cosmrs::{
 use dydx::{
     config::ClientConfig,
     indexer::{
+        GetFillsOpts,
         IndexerClient,
+        MarketType,
         types::{
             ClientId, Denom, Height, OrderStatus, PerpetualMarket, Subaccount, SubaccountNumber,
             Ticker,
@@ -505,6 +507,8 @@ impl DydxClient {
             SubaccountNumber::try_from(DYDX_SUBACCOUNT_NUM)
                 .map_err(|e| eyre::eyre!("Failed to create dYdX subaccount number: {}", e))?,
         );
+        let submitted_at_height = Height(good_til_block_height.0.saturating_sub(40));
+        let market_ticker = Ticker::from(hedge_utils::get_dydx_perp_ticker(&token).as_str());
         let subaccount_orders = self
             .indexer_client
             .accounts()
@@ -522,9 +526,155 @@ impl DydxClient {
                 order.client_id.0 == order_id_node.client_id
                     && order.good_til_block == Some(good_til_block_height.clone())
             })
-            .ok_or_else(|| eyre::eyre!("Order not found in subaccount orders"))?
-            .id
-            .clone();
+            .map(|order| order.id.clone());
+
+        if order_id_indexer.is_none() {
+            let fills = self
+                .indexer_client
+                .accounts()
+                .get_subaccount_fills(
+                    &subaccount,
+                    Some(GetFillsOpts {
+                        limit: Some(20),
+                        created_before_or_at_height: Some(block_to_wait_until.clone()),
+                        created_before_or_at: None,
+                        market: Some(market_ticker.clone()),
+                        market_type: Some(MarketType::Perpetual),
+                    }),
+                )
+                .await
+                .map_err(|e| {
+                    eyre::eyre!(
+                        "Failed to fetch subaccount fills after order lookup miss: {}",
+                        e
+                    )
+                })?;
+
+            let total_recent_fill_size = fills
+                .iter()
+                .filter(|fill| {
+                    fill.market == market_ticker
+                        && fill.created_at_height >= submitted_at_height
+                        && matches!(fill.side, dydx::indexer::OrderSide::Buy) == side_is_buy
+                })
+                .fold(Decimal::ZERO, |acc, fill| {
+                    acc + Decimal::from_str(&fill.size.to_plain_string()).unwrap_or(Decimal::ZERO)
+                });
+            let fill_match_threshold = size * Decimal::from_str("0.99").unwrap();
+
+            if total_recent_fill_size >= fill_match_threshold {
+                info!(
+                    market = %market_ticker,
+                    side_is_buy,
+                    expected_size = %size,
+                    matched_fill_size = %total_recent_fill_size,
+                    submitted_at_height = %submitted_at_height,
+                    "{} | Matching fills found before order appeared in subaccount orders; treating as filled",
+                    log_string
+                );
+
+                let complete_msg = if is_position_reduction {
+                    "Position Reduced Successfully"
+                } else {
+                    "Order Executed Successfully"
+                };
+                let dydx_usdc_balance_final = match node_client_clone
+                    .get_account_balance(&dydx_address_clone.clone().into(), &Denom::Usdc)
+                    .await
+                {
+                    Ok(balance) => {
+                        Decimal::from_str(&balance.amount.to_string()).unwrap_or(Decimal::ZERO)
+                            * Decimal::from_str("0.000001").unwrap()
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "{} | Failed to fetch dYdX USDC balance: {}", log_string, e
+                        );
+                        Decimal::ZERO
+                    }
+                };
+                let dydx_subaccount_usdc_balance_final = match indexer_client_clone
+                    .accounts()
+                    .get_subaccount_asset_positions(&subaccount)
+                    .await
+                {
+                    Ok(positions) => positions
+                        .iter()
+                        .find(|pos| pos.symbol.0 == "USDC")
+                        .map(|pos| {
+                            Decimal::from_str(&pos.size.to_plain_string())
+                                .unwrap_or(Decimal::ZERO)
+                        })
+                        .unwrap_or(Decimal::ZERO),
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "{} | Failed to fetch dYdX subaccount USDC balance: {}", log_string, e
+                        );
+                        Decimal::ZERO
+                    }
+                };
+                let dydx_subaccount_free_collateral_final =
+                    match indexer_client_clone.accounts().get_subaccount(&subaccount).await {
+                        Ok(summary) => {
+                            Decimal::from_str(&summary.free_collateral.to_string())
+                                .unwrap_or(Decimal::ZERO)
+                        }
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "{} | Failed to fetch dYdX subaccount summary for free collateral", log_string
+                            );
+                            Decimal::ZERO
+                        }
+                    };
+
+                let dydx_subaccount_perp_positions_final = match indexer_client_clone
+                    .accounts()
+                    .get_subaccount_perpetual_positions(&subaccount, None)
+                    .await
+                {
+                    Ok(positions) => {
+                        let mut perp_map = HashMap::new();
+
+                        for pos in positions.iter() {
+                            let ticker = pos.market.0.clone();
+                            let size_decimal = Decimal::from_str(&pos.size.to_plain_string())
+                                .unwrap_or(Decimal::ZERO);
+                            if size_decimal.is_zero()
+                                || pos.status
+                                    == dydx::indexer::types::PerpetualPositionStatus::Closed
+                                || pos.status
+                                    == dydx::indexer::types::PerpetualPositionStatus::Liquidated
+                            {
+                                continue;
+                            }
+                            perp_map.insert(ticker.clone(), size_decimal);
+                        }
+                        perp_map
+                    }
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            "{} | Failed to fetch dYdX subaccount perpetual positions: {}", log_string, e
+                        );
+                        HashMap::new()
+                    }
+                };
+                info!(
+                    dydx_usdc_balance_final = ?dydx_usdc_balance_final,
+                    dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+                    dydx_subaccount_perp_positions_final = ?dydx_subaccount_perp_positions_final,
+                    dydx_subaccount_free_collateral_final = ?dydx_subaccount_free_collateral_final,
+                    "{} | {}", log_string, complete_msg
+                );
+                return Ok(());
+            }
+        }
+
+        let order_id_indexer = order_id_indexer
+            .ok_or_else(|| eyre::eyre!("Order not found in subaccount orders or recent fills"))?;
 
         let handle = tokio::spawn(async move {
             let complete_msg = if is_position_reduction {

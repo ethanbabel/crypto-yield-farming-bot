@@ -76,7 +76,7 @@ pub struct PriceRoute {
     #[serde(rename = "contractMethod")]
     pub contract_method: String,
     #[serde(rename = "partnerFee")]
-    pub partner_fee: u32,
+    pub partner_fee: f64,
     #[serde(rename = "srcUSD")]
     pub src_usd: String,
     #[serde(rename = "destUSD")]
@@ -101,7 +101,7 @@ pub struct TxParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BestRoute {
-    pub percent: u32,
+    pub percent: f64,
     pub swaps: Vec<Swap>,
 }
 
@@ -126,7 +126,7 @@ pub struct SwapExchange {
     pub src_amount: String,
     #[serde(rename = "destAmount")]
     pub dest_amount: String,
-    pub percent: u32,
+    pub percent: f64,
     #[serde(rename = "poolAddresses")]
     pub pool_addresses: Vec<String>,
     pub data: serde_json::Value, 

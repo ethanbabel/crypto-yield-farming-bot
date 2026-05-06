@@ -13,6 +13,7 @@ pub struct PortfolioSnapshot {
     pub asset_values_usd: HashMap<Address, Decimal>,
     pub hedge_positions: HashMap<String, Decimal>,
     pub native_balance: Decimal,
+    pub native_value_usd: Decimal,
     pub dydx_main_usdc: Decimal,
     pub dydx_subaccount_equity: Decimal,
     pub dydx_free_collateral: Decimal,

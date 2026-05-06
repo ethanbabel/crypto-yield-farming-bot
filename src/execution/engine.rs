@@ -547,11 +547,13 @@ impl ExecutionEngine {
         let (hedge_positions, dydx_main_usdc, dydx_subaccount_equity, dydx_free_collateral) =
             self.fetch_dydx_snapshot_state().await;
 
-        let arbitrum_value_usd = market_value_usd + asset_value_usd;
+        let native_value_usd = native_balance * self.wallet_manager.native_token.last_mid_price_usd;
+        let arbitrum_value_usd = market_value_usd + asset_value_usd + native_value_usd;
         let total_value_usd = arbitrum_value_usd + dydx_main_usdc + dydx_subaccount_equity;
         debug!(
             market_value_usd = %market_value_usd,
             asset_value_usd = %asset_value_usd,
+            native_value_usd = %native_value_usd,
             arbitrum_value_usd = %arbitrum_value_usd,
             dydx_main_usdc = %dydx_main_usdc,
             dydx_subaccount_equity = %dydx_subaccount_equity,
@@ -572,6 +574,7 @@ impl ExecutionEngine {
             asset_values_usd,
             hedge_positions,
             native_balance,
+            native_value_usd,
             dydx_main_usdc,
             dydx_subaccount_equity,
             dydx_free_collateral,
@@ -2136,12 +2139,6 @@ impl ExecutionEngine {
             Some(prev) => snapshot.total_value_usd - prev.total_value_usd.unwrap_or(Decimal::ZERO),
             None => Decimal::ZERO,
         };
-        let native_price = self.wallet_manager.native_token.last_mid_price_usd;
-        let native_value_usd = if native_price > Decimal::ZERO {
-            snapshot.native_balance * native_price
-        } else {
-            Decimal::ZERO
-        };
 
         let new_snapshot = NewPortfolioSnapshotModel {
             strategy_run_id,
@@ -2151,7 +2148,7 @@ impl ExecutionEngine {
             market_value_usd: snapshot.market_value_usd,
             asset_value_usd: snapshot.asset_value_usd,
             native_balance: snapshot.native_balance,
-            native_value_usd,
+            native_value_usd: snapshot.native_value_usd,
             dydx_main_usdc: snapshot.dydx_main_usdc,
             dydx_subaccount_equity: snapshot.dydx_subaccount_equity,
             dydx_free_collateral: snapshot.dydx_free_collateral,
@@ -2242,12 +2239,6 @@ impl ExecutionEngine {
 
         let native_balance = snapshot.native_balance;
         if native_balance > Decimal::ZERO {
-            let native_price = self.wallet_manager.native_token.last_mid_price_usd;
-            let usd_value = if native_price > Decimal::ZERO {
-                Some(native_balance * native_price)
-            } else {
-                None
-            };
             positions.push(NewPositionSnapshotModel {
                 portfolio_snapshot_id,
                 position_type: "native_balance".to_string(),
@@ -2255,7 +2246,7 @@ impl ExecutionEngine {
                 token_id: None,
                 symbol: Some("ETH".to_string()),
                 size: Some(native_balance),
-                usd_value,
+                usd_value: Some(snapshot.native_value_usd),
             });
         }
 
@@ -2315,12 +2306,13 @@ impl ExecutionEngine {
 
     fn snapshot_summary(&self, snapshot: &PortfolioSnapshot) -> String {
         format!(
-            "total={} arbitrum={} gm={} assets={} native={} dydx_main_usdc={} dydx_equity={} dydx_free_collateral={} gm_positions={} asset_positions={} hedge_positions={}",
+            "total={} arbitrum={} gm={} assets={} native={} native_usd={} dydx_main_usdc={} dydx_equity={} dydx_free_collateral={} gm_positions={} asset_positions={} hedge_positions={}",
             snapshot.total_value_usd,
             snapshot.arbitrum_value_usd,
             snapshot.market_value_usd,
             snapshot.asset_value_usd,
             snapshot.native_balance,
+            snapshot.native_value_usd,
             snapshot.dydx_main_usdc,
             snapshot.dydx_subaccount_equity,
             snapshot.dydx_free_collateral,

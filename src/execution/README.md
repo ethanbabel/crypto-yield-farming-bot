@@ -338,7 +338,11 @@ The snapshot contains:
 The snapshot defines:
 
 $$
-\text{arbitrum\\_value\\_usd} = \text{market\\_value\\_usd} + \text{asset\\_value\\_usd}
+\text{native\\_value\\_usd} = \text{native\\_balance} \cdot P_{\text{ETH}}
+$$
+
+$$
+\text{arbitrum\\_value\\_usd} = \text{market\\_value\\_usd} + \text{asset\\_value\\_usd} + \text{native\\_value\\_usd}
 $$
 
 and:
@@ -347,7 +351,7 @@ $$
 \text{total\\_value\\_usd} = \text{arbitrum\\_value\\_usd} + \text{dydx\\_main\\_usdc} + \text{dydx\\_subaccount\\_equity}
 $$
 
-This means native ETH is tracked separately for operational purposes, but it is not added into `arbitrum_value_usd` or `total_value_usd`. Reserve calculations should be interpreted with that accounting definition in mind.
+This means native ETH is tracked separately as its own balance field for operational purposes, but its USD value is included in both `arbitrum_value_usd` and `total_value_usd`.
 
 #### Why snapshot-first matters
 
@@ -1027,7 +1031,7 @@ Execution without durable trade records is not acceptable for debugging, reconci
 
 The execution layer is pragmatic, not perfect. A few implementation details are worth keeping in mind:
 
-1. Native ETH is tracked for gas management but is not included in `total_value_usd`.
+1. Native ETH is tracked separately for gas management, but its USD value is included in `arbitrum_value_usd` and `total_value_usd`.
 2. Deposit-token selection is fee-estimate-based, not slippage-optimized across full trade size.
 3. Hedge sizing is quote-derived, but still a proxy for true economic risk rather than a full Greeks-based hedge.
 4. Market deltas are based on GM mid prices and current wallet balances, not order-book-aware execution simulation.

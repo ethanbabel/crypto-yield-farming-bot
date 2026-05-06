@@ -1063,7 +1063,7 @@ impl ExecutionEngine {
                     .get(market)
                     .cloned()
                     .unwrap_or(Decimal::ZERO);
-                if usd_value < self.planner_config.min_value_usd {
+                if usd_value < self.planner_config.unwind_min_value_usd {
                     return None;
                 }
                 Some(TradeAction::GmWithdrawal {
@@ -1074,7 +1074,7 @@ impl ExecutionEngine {
             .collect();
         debug!(
             actions = ?self.describe_actions(&actions),
-            min_value_usd = %self.planner_config.min_value_usd,
+            min_value_usd = %self.planner_config.unwind_min_value_usd,
             "Built full unwind GM withdrawal actions"
         );
         actions

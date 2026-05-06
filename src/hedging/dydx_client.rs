@@ -395,11 +395,15 @@ impl DydxClient {
             .await
             .map_err(|e| eyre::eyre!("Failed to fetch latest block height: {}", e))?;
 
-        let (order_id, order) = OrderBuilder::new(market_order_params, subaccount)
+        let mut order_builder = OrderBuilder::new(market_order_params, subaccount)
             .market(side, BigDecimal::from_str(&size.to_string())?)
             .short_term()
             .time_in_force(OrderTimeInForce::Unspecified)
-            .until(OrderGoodUntil::Block(current_block_height.ahead(40))) // Order valid for 40 blocks
+            .until(OrderGoodUntil::Block(current_block_height.ahead(40))); // Order valid for 40 blocks
+        if is_position_reduction {
+            order_builder = order_builder.reduce_only(true);
+        }
+        let (order_id, order) = order_builder
             .build(ClientId::random())
             .map_err(|e| eyre::eyre!("Failed to build dYdX order: {}", e))?;
         info!(

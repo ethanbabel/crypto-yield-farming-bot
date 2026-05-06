@@ -264,6 +264,11 @@ impl ExecutionEngine {
             "Stage 5: planned hedge adjustments"
         );
         let hedges_changed = self.execute_actions(&hedge_actions, Some(strategy_run_id)).await;
+        if !hedge_actions.is_empty() {
+            info!(strategy_run_id, "Waiting for dYdX hedge polling tasks to converge");
+            let mut client = self.dydx_client.lock().await;
+            client.wait_for_active_perp_tasks().await;
+        }
 
         let post_snapshot = if reserves_changed || hedges_changed {
             self.build_snapshot().await?
@@ -328,6 +333,16 @@ impl ExecutionEngine {
         );
         if self.execute_actions(&hedge_actions, None).await {
             changed = true;
+        }
+        if !hedge_actions.is_empty() {
+            info!(
+                target_stable_symbol = %target_stable.symbol,
+                "Waiting for dYdX hedge polling tasks to converge"
+            );
+            let mut client = self.dydx_client.lock().await;
+            client.wait_for_active_perp_tasks().await;
+        }
+        if !hedge_actions.is_empty() {
             snapshot = self.build_snapshot().await?;
             info!(
                 target_stable_symbol = %target_stable.symbol,
@@ -488,10 +503,10 @@ impl ExecutionEngine {
         let mut asset_balances = HashMap::new();
 
         for (address, balance) in all_balances.into_iter() {
-            if self.wallet_manager.market_tokens.contains_key(&address) {
+            if balance > Decimal::ZERO && self.wallet_manager.market_tokens.contains_key(&address) {
                 market_balances.insert(address, balance);
             }
-            if self.wallet_manager.asset_tokens.contains_key(&address) {
+            if balance > Decimal::ZERO && self.wallet_manager.asset_tokens.contains_key(&address) {
                 asset_balances.insert(address, balance);
             }
         }
@@ -1781,11 +1796,7 @@ impl ExecutionEngine {
     }
 
     fn find_token_symbol_for_perp_ticker(&self, ticker: &str) -> Option<String> {
-        self.wallet_manager
-            .asset_tokens
-            .values()
-            .find(|token| hedge_utils::get_dydx_perp_ticker(&token.symbol) == ticker)
-            .map(|token| token.symbol.clone())
+        hedge_utils::get_token_symbol_for_dydx_perp_ticker(ticker)
     }
 
     async fn build_hedge_actions(
@@ -1869,7 +1880,7 @@ impl ExecutionEngine {
             }
 
             actions.push(TradeAction::HedgeOrder {
-                token_symbol: long_token.symbol.clone(),
+                token_symbol: hedge_utils::get_dydx_perp_base_symbol(&long_token.symbol),
                 size: delta.abs(),
                 side_is_buy: delta > Decimal::ZERO,
             });

@@ -1103,6 +1103,7 @@ impl ExecutionEngine {
                 token_symbol,
                 size: size.abs(),
                 side_is_buy: !size.is_sign_positive(),
+                reduce_only: true,
             });
         }
 
@@ -1886,6 +1887,7 @@ impl ExecutionEngine {
                 token_symbol: hedge_utils::get_dydx_perp_base_symbol(&long_token.symbol),
                 size: delta.abs(),
                 side_is_buy: delta > Decimal::ZERO,
+                reduce_only: false,
             });
         }
 
@@ -2063,11 +2065,16 @@ impl ExecutionEngine {
                 token_symbol,
                 size,
                 side_is_buy,
+                reduce_only,
             } => {
                 let mut client = self.dydx_client.lock().await;
-                client
-                    .submit_perp_order(token_symbol, *size, *side_is_buy)
-                    .await
+                if *reduce_only {
+                    client.reduce_perp_position(token_symbol, Some(*size)).await
+                } else {
+                    client
+                        .submit_perp_order(token_symbol, *size, *side_is_buy)
+                        .await
+                }
             }
         };
 
@@ -2445,11 +2452,13 @@ impl ExecutionEngine {
                 token_symbol,
                 size,
                 side_is_buy,
+                reduce_only,
             } => format!(
-                "hedge_order token={} side={} size={}",
+                "hedge_order token={} side={} size={} reduce_only={}",
                 token_symbol,
                 if *side_is_buy { "buy" } else { "sell" },
-                size
+                size,
+                reduce_only
             ),
         }
     }
@@ -2620,10 +2629,12 @@ impl ExecutionEngine {
                 token_symbol,
                 size,
                 side_is_buy,
+                reduce_only,
             } => {
                 let details = serde_json::json!({
                     "token_symbol": token_symbol,
                     "side_is_buy": side_is_buy,
+                    "reduce_only": reduce_only,
                 })
                 .to_string();
                 (None, None, None, Some(*size), None, None, Some(details))

@@ -66,6 +66,7 @@ pub enum TradeAction {
         token_symbol: String,
         size: Decimal,
         side_is_buy: bool,
+        reduce_only: bool,
     },
 }
 

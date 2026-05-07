@@ -14,6 +14,7 @@ pub async fn init_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     pool.execute(include_str!("trades.sql")).await?;
     pool.execute(include_str!("execution_control_state.sql")).await?;
     pool.execute(include_str!("execution_control_events.sql")).await?;
+    pool.execute(include_str!("execution_transfer_state.sql")).await?;
     pool.execute(include_str!("portfolio_snapshots.sql")).await?;
     pool.execute(include_str!("dydx_perps.sql")).await?;
     pool.execute(include_str!("dydx_perp_states.sql")).await?;

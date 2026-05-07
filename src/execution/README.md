@@ -115,9 +115,17 @@ The snapshot contains:
 
 The aggregate totals are defined as:
 
-- `native_value_usd = native_balance * ETH_price`
-- `arbitrum_value_usd = market_value_usd + asset_value_usd + native_value_usd`
-- `total_value_usd = arbitrum_value_usd + dydx_main_usdc + dydx_subaccount_equity`
+$$
+V_{\text{native}} = Q_{\text{native}} \cdot P_{\text{ETH}}
+$$
+
+$$
+V_{\text{arbitrum}} = V_{\text{GM}} + V_{\text{assets}} + V_{\text{native}}
+$$
+
+$$
+V_{\text{total}} = V_{\text{arbitrum}} + U_{\text{dYdX main}} + E_{\text{dYdX subaccount}}
+$$
 
 ## Durable dYdX Transfer Tracking
 
@@ -171,8 +179,11 @@ The long-running executor binary loads the exact persisted `strategy_run_id` and
 
 The planner normalizes raw target weights before execution:
 
-- the target weights are divided by their sum
-- if the sum is non-positive, the denominator is treated as `1` to avoid division by zero
+$$
+w_i^{\text{target}} = \frac{w_i}{\max\left(\sum_j w_j, 1\right)}
+$$
+
+in the practical sense that if the raw sum is non-positive, the code uses `1` as the denominator to avoid division by zero.
 
 Execution therefore always works from a well-defined normalized weight map.
 
@@ -195,9 +206,19 @@ It first computes a deployment capital base that excludes:
 
 The Arbitrum stable buffer is:
 
-- `max(arbitrum_stable_buffer_floor_usd, arbitrum_stable_buffer_pct * arbitrum_non_native_value)`
+$$
+V_{\text{arb non-native}} = V_{\text{arbitrum}} - V_{\text{native}}
+$$
 
-where `arbitrum_non_native_value = arbitrum_value_usd - native_value_usd`.
+$$
+B_{\text{arb stable}} = \max\left(B_{\text{arb floor}},\ p_{\text{arb}} \cdot V_{\text{arb non-native}}\right)
+$$
+
+The deployment capital base is then:
+
+$$
+V_{\text{capital base}} = \max\left(V_{\text{total}} - V_{\text{native}} - B_{\text{arb stable}},\ 0\right)
+$$
 
 This buffer is intended to leave a small amount of stable liquidity on Arbitrum outside the deployable pool.
 
@@ -207,7 +228,11 @@ The planner config contains `reserve_pct`.
 
 The generic reserve is:
 
-- `base_reserve = capital_base * reserve_pct`
+$$
+R_{\text{base}} = V_{\text{capital base}} \cdot r
+$$
+
+where \(r = \text{reserve\_pct}\).
 
 This is a broad capital haircut that keeps some capital undeployed even before dYdX-specific hedge requirements are considered.
 
@@ -230,7 +255,9 @@ If the short collateral is non-stable, hedge notional is the sum of long-side an
 
 Required raw margin is then the sum of:
 
-- `hedge_notional / usable_leverage`
+$$
+M_{\text{raw}} = \sum_i \frac{N_i}{L_i}
+$$
 
 across the hedged markets.
 
@@ -243,14 +270,45 @@ The final required margin is the larger of:
 - the raw summed margin requirement
 - the guard-adjusted requirement
 
+Let:
+
+$$
+L_{\min} = \min_i L_i
+$$
+
+$$
+G_{\text{low-lev}} = \frac{0.25 \cdot V_{\text{investable}}}{L_{\min}}
+$$
+
+$$
+M_{\text{guard}} = 0.75 \cdot M_{\text{raw}} + G_{\text{low-lev}}
+$$
+
+Then:
+
+$$
+M_{\text{required}} = \max\left(M_{\text{raw}},\ M_{\text{guard}}\right)
+$$
+
 ### 2.5 Required Free Collateral and Equity
 
 Once required margin is determined, the engine computes:
 
-- `target_free_collateral_without_buffer = 50% of required_margin`
-- `free_collateral_buffer = max(dydx_free_collateral_buffer_floor_usd, dydx_free_collateral_buffer_pct * target_free_collateral_without_buffer)`
-- `required_free_collateral = target_free_collateral_without_buffer + free_collateral_buffer`
-- `required_equity = required_margin + required_free_collateral`
+$$
+F_{\text{target, no buffer}} = 0.5 \cdot M_{\text{required}}
+$$
+
+$$
+B_{\text{dYdX free}} = \max\left(B_{\text{dYdX floor}},\ p_{\text{dYdX}} \cdot F_{\text{target, no buffer}}\right)
+$$
+
+$$
+F_{\text{required}} = F_{\text{target, no buffer}} + B_{\text{dYdX free}}
+$$
+
+$$
+E_{\text{required}} = M_{\text{required}} + F_{\text{required}}
+$$
 
 The dYdX percentage buffer is intentionally based on target free collateral rather than on total subaccount equity.
 
@@ -260,15 +318,29 @@ The engine also computes an upper bound for dYdX capital so it can pull excess b
 
 It does this by adding one more free-collateral-scaled buffer on top of the required free collateral:
 
-- `upper_free_collateral = required_free_collateral + compute_dydx_free_collateral_buffer_usd(required_free_collateral)`
-- `upper_equity = required_margin + upper_free_collateral`
+$$
+F_{\text{upper}} = F_{\text{required}} + \max\left(B_{\text{dYdX floor}},\ p_{\text{dYdX}} \cdot F_{\text{required}}\right)
+$$
+
+$$
+E_{\text{upper}} = M_{\text{required}} + F_{\text{upper}}
+$$
 
 ### 2.7 Gas Reserve
 
 Separately, the engine computes a native gas target:
 
-- `gas_reserve_target_usd = arbitrum_value_usd * gas_reserve_pct`
-- `gas_reserve_target_eth = gas_reserve_target_usd / ETH_price`
+$$
+V_{\text{gas target}} = V_{\text{arbitrum}} \cdot g
+$$
+
+$$
+Q_{\text{gas target}} =
+\begin{cases}
+\frac{V_{\text{gas target}}}{P_{\text{ETH}}}, & P_{\text{ETH}} > 0 \\
+0, & \text{otherwise}
+\end{cases}
+$$
 
 This is independent from the stable buffer and from the dYdX free-collateral buffer.
 
@@ -295,6 +367,45 @@ For the current run, deployment is limited by:
 - current dYdX equity ratio
 - current dYdX free-collateral ratio
 
+The Arbitrum-side deployable capital is:
+
+$$
+V_{\text{arb deployable}} = \max\left(V_{\text{arbitrum}} - V_{\text{native}} - B_{\text{arb stable}},\ 0\right)
+$$
+
+The dYdX capacity ratios are:
+
+$$
+\rho_E = \operatorname{clamp}\left(\frac{E_{\text{current}}}{E_{\text{required}}},\ 0,\ 1\right)
+$$
+
+$$
+\rho_F = \operatorname{clamp}\left(\frac{F_{\text{current}}}{F_{\text{required}}},\ 0,\ 1\right)
+$$
+
+and the hedge-limited investable capital is:
+
+$$
+V_{\text{hedge-limited}} = V_{\text{investable, ideal}} \cdot \min(\rho_E,\rho_F)
+$$
+
+If the engine has just initiated an Arbitrum \(\rightarrow\) dYdX top-up in the current cycle, it also reserves that pending amount on the Arbitrum side:
+
+$$
+V_{\text{arb deployable, effective}} = \max\left(V_{\text{arb deployable}} - V_{\text{pending top-up}},\ 0\right)
+$$
+
+The current-run effective investable capital is then:
+
+$$
+V_{\text{investable, effective}} =
+\min\left(
+V_{\text{investable, ideal}},
+V_{\text{arb deployable, effective}},
+V_{\text{hedge-limited}}
+\right)
+$$
+
 In other words, the engine does not assume a newly initiated SkipGo transfer will arrive in time for the current iteration.
 
 If dYdX is underfunded, the engine scales the current run down and separately prepares the future run by sending the missing USDC.
@@ -307,6 +418,18 @@ If dYdX is short and no transfer is already pending:
 - it sends at most that amount through `dydx_deposit(...)`
 - it persists the resulting SkipGo tracking information
 
+The amount available for a top-up is:
+
+$$
+U_{\text{available for top-up}} = \max\left(U_{\text{Arbitrum USDC}} - B_{\text{arb stable}},\ 0\right)
+$$
+
+and the initiated top-up is:
+
+$$
+U_{\text{top-up}} = \min\left(U_{\text{shortfall}},\ U_{\text{available for top-up}}\right)
+$$
+
 If dYdX is overfunded and no transfer is already pending:
 
 - the engine computes how much capital sits above `upper_equity`
@@ -314,6 +437,12 @@ If dYdX is overfunded and no transfer is already pending:
 - if needed, it also moves withdrawable excess from the dYdX subaccount into the main account
 - it sends the resulting amount through `dydx_withdrawal(...)`
 - it persists the resulting SkipGo tracking information
+
+At a high level:
+
+$$
+U_{\text{dYdX excess}} = \max\left((U_{\text{dYdX main}} + E_{\text{dYdX subaccount}}) - E_{\text{upper}},\ 0\right)
+$$
 
 ## 4. Gas Reserve Management
 
@@ -329,17 +458,33 @@ If native ETH is above target by more than the minimum USD threshold:
 
 - the excess is sold into the preferred stablecoin
 
+When WETH funding is used to replenish gas, the engine only wraps native ETH above the protected gas target:
+
+$$
+Q_{\text{wrappable ETH}} = \max\left(Q_{\text{native}} - Q_{\text{gas target}},\ 0\right)
+$$
+
 Any dYdX withdrawal initiated for gas reserve purposes is also persisted in `execution_transfer_state`.
 
 ## 5. Target Values and Market Deltas
 
 Once capital sync and gas reserve are handled, the engine computes:
 
-- `target_market_value = normalized_weight * investable_capital`
+$$
+V_i^{\text{target}} = w_i^{\text{target}} \cdot V_{\text{investable, effective}}
+$$
 
 for each target market.
 
 It then compares current GM exposure to target GM exposure and converts the difference to GM token quantity deltas using current GM mid prices.
+
+$$
+\Delta V_i = V_i^{\text{target}} - V_i^{\text{current}}
+$$
+
+$$
+\Delta Q_i^{\text{GM}} = \frac{\Delta V_i}{P_i^{\text{GM}}}
+$$
 
 A delta is ignored only if both:
 
@@ -359,6 +504,12 @@ Within each collateral pair:
 
 The planner greedily matches seller surplus against buyer demand and emits `GmShift` actions.
 
+For a seller/buyer pair, the shifted GM amount is:
+
+$$
+Q_{\text{shift}} = \min\left(Q_{\text{seller available}},\ Q_{\text{buyer needed}}\right)
+$$
+
 This is cheaper and cleaner than doing a withdrawal plus a new deposit when the collateral pair is already the same.
 
 ## 7. GM Withdrawal Stage
@@ -369,6 +520,10 @@ For each negative delta, the engine withdraws up to the smaller of:
 
 - the requested reduction
 - the current GM balance
+
+$$
+Q_i^{\text{withdraw}} = \min\left(-\Delta Q_i^{\text{GM}},\ Q_i^{\text{current}}\right)
+$$
 
 Withdrawals happen before deposits so that capital is freed first and the deposit stage can work from a cleaner inventory.
 
@@ -427,6 +582,10 @@ For each positive market delta:
 
 The engine clips the final deposit amount to the actually available balance, so a cycle can still make partial progress even if the exact intended amount could not be sourced.
 
+$$
+Q^{\text{deposit}} = \min\left(Q^{\text{available}},\ Q^{\text{needed}}\right)
+$$
+
 ### 8.5 Final Cleanup
 
 After the deposit loop, the engine performs one more cleanup pass and liquidates remaining non-stable idle inventory back into the preferred stable token, subject to the minimum-value threshold.
@@ -448,6 +607,18 @@ So if multiple GM markets all contribute `ETH` long-side exposure, the engine:
 - sums the ideal `ETH-USD` target position across all of them
 - compares that single net target to the current `ETH-USD` position on dYdX
 - emits one net `HedgeOrder` for `ETH`
+
+Formally, for a given perp ticker \(k\):
+
+$$
+Q_k^{\text{target perp}} = \sum_{i \in k} Q_{i,\text{target perp}}
+$$
+
+$$
+\Delta Q_k^{\text{perp}} = Q_k^{\text{target perp}} - Q_k^{\text{current perp}}
+$$
+
+and the engine emits one hedge order from \(\Delta Q_k^{\text{perp}}\) if the USD size exceeds the planner threshold.
 
 This avoids submitting separate dYdX orders for each GM market when the hedge venue only cares about the final net perp position.
 

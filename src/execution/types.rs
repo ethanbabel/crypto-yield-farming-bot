@@ -114,6 +114,10 @@ pub struct PlannerConfig {
     pub min_value_usd: Decimal,
     pub unwind_min_value_usd: Decimal,
     pub stable_only_native_buffer_usd: Decimal,
+    pub arbitrum_stable_buffer_floor_usd: Decimal,
+    pub arbitrum_stable_buffer_pct: Decimal,
+    pub dydx_free_collateral_buffer_floor_usd: Decimal,
+    pub dydx_free_collateral_buffer_pct: Decimal,
     pub reserve_pct: Decimal,
     pub gas_reserve_pct: Decimal,
 }
@@ -125,6 +129,10 @@ impl Default for PlannerConfig {
             min_value_usd: Decimal::new(10, 0),
             unwind_min_value_usd: Decimal::new(1, 0),
             stable_only_native_buffer_usd: Decimal::new(10, 0),
+            arbitrum_stable_buffer_floor_usd: Decimal::new(10, 0),
+            arbitrum_stable_buffer_pct: Decimal::new(1, 2),
+            dydx_free_collateral_buffer_floor_usd: Decimal::new(10, 0),
+            dydx_free_collateral_buffer_pct: Decimal::new(10, 2),
             reserve_pct: Decimal::new(5, 2),
             gas_reserve_pct: Decimal::new(1, 2),
         }
@@ -139,6 +147,7 @@ pub struct ReserveState {
     pub required_equity: Decimal,
     pub required_free_collateral: Decimal,
     pub upper_equity: Decimal,
+    pub upper_free_collateral: Decimal,
     pub gas_reserve_target_usd: Decimal,
     pub gas_reserve_target_eth: Decimal,
 }

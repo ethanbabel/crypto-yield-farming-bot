@@ -11,6 +11,10 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::constants::{NATIVE_ADDRESS, WNT_ADDRESS};
 use crate::db::db_manager::DbManager;
+use crate::db::models::execution_transfer_state::{
+    EXECUTION_TRANSFER_DIRECTION_FROM_DYDX, EXECUTION_TRANSFER_DIRECTION_TO_DYDX,
+    NewExecutionTransferStateModel,
+};
 use crate::db::models::portfolio_snapshots::NewPortfolioSnapshotModel;
 use crate::db::models::position_snapshots::NewPositionSnapshotModel;
 use crate::db::models::strategy_runs::NewStrategyRunModel;
@@ -20,7 +24,7 @@ use crate::gm_token_txs::gm_tx_manager::GmTxManager;
 use crate::gm_token_txs::types::{
     GmAmountOutResponse, GmDepositRequest, GmShiftRequest, GmTxRequest, GmWithdrawalRequest,
 };
-use crate::hedging::dydx_client::DydxClient;
+use crate::hedging::dydx_client::{DydxClient, DydxTransferTracking, SkipGoTransferState};
 use crate::hedging::hedge_utils;
 use crate::spot_swap::paraswap_api_client::ParaSwapClient;
 use crate::spot_swap::swap_manager::SwapManager;
@@ -49,6 +53,11 @@ pub struct ExecutionEngine {
 struct ActionExecutionResult {
     status: TradeStatus,
     tx_hash: Option<String>,
+}
+
+enum PendingTransferGate {
+    Continue,
+    Pending,
 }
 
 impl ExecutionEngine {
@@ -94,6 +103,15 @@ impl ExecutionEngine {
             target_weights = ?self.summarize_target_weights(&target_weights),
             "Starting execution cycle"
         );
+        if let PendingTransferGate::Pending = self
+            .reconcile_pending_execution_transfer("normal execution cycle")
+            .await?
+        {
+            info!(
+                strategy_run_id,
+                "A dYdX transfer is still in flight; continuing execution without counting that capital"
+            );
+        }
         let mut snapshot = self.build_snapshot().await?;
         info!(
             strategy_run_id,
@@ -106,9 +124,15 @@ impl ExecutionEngine {
             hedgeable_token_count = token_hedgeinfo_map.len(),
             "Fetched dYdX hedge metadata"
         );
-        let reserve_state = self
-            .compute_reserve_state(&target_weights, &snapshot, &token_hedgeinfo_map)
+        let (capital_synced_snapshot, reserve_state) = self
+            .sync_dydx_capital(
+                &snapshot,
+                &target_weights,
+                &token_hedgeinfo_map,
+                Some(strategy_run_id),
+            )
             .await?;
+        snapshot = capital_synced_snapshot;
         info!(
             strategy_run_id,
             investable_capital = %reserve_state.investable_capital,
@@ -116,6 +140,8 @@ impl ExecutionEngine {
             required_margin = %reserve_state.required_margin,
             required_equity = %reserve_state.required_equity,
             required_free_collateral = %reserve_state.required_free_collateral,
+            upper_equity = %reserve_state.upper_equity,
+            upper_free_collateral = %reserve_state.upper_free_collateral,
             gas_reserve_target_usd = %reserve_state.gas_reserve_target_usd,
             gas_reserve_target_eth = %reserve_state.gas_reserve_target_eth,
             "Computed reserve state"
@@ -130,18 +156,6 @@ impl ExecutionEngine {
             );
             self.record_snapshot(Some(strategy_run_id), &snapshot).await?;
             return Ok(());
-        }
-
-        if self
-            .maybe_withdraw_dydx_excess(&snapshot, &reserve_state)
-            .await?
-        {
-            snapshot = self.build_snapshot().await?;
-            info!(
-                strategy_run_id,
-                snapshot = %self.snapshot_summary(&snapshot),
-                "Refreshed snapshot after dYdX excess withdrawal"
-            );
         }
 
         if self
@@ -251,17 +265,13 @@ impl ExecutionEngine {
             );
         }
 
-        // Stage 4: dYdX reserve management
-        info!(strategy_run_id, "Stage 4: managing dYdX reserves");
-        let reserves_changed = self.manage_dydx_reserves(&snapshot, &reserve_state).await?;
-
-        // Stage 5: Hedge adjustments
+        // Stage 4: Hedge adjustments
         let hedge_actions = self.build_hedge_actions(&snapshot, &target_weights).await?;
         info!(
             strategy_run_id,
             action_count = hedge_actions.len(),
             actions = ?self.describe_actions(&hedge_actions),
-            "Stage 5: planned hedge adjustments"
+            "Stage 4: planned hedge adjustments"
         );
         let hedges_changed = self.execute_actions(&hedge_actions, Some(strategy_run_id)).await;
         if !hedge_actions.is_empty() {
@@ -270,14 +280,13 @@ impl ExecutionEngine {
             client.wait_for_active_perp_tasks().await;
         }
 
-        let post_snapshot = if reserves_changed || hedges_changed {
+        let post_snapshot = if hedges_changed {
             self.build_snapshot().await?
         } else {
             snapshot
         };
         info!(
             strategy_run_id,
-            reserves_changed,
             hedges_changed,
             snapshot = %self.snapshot_summary(&post_snapshot),
             "Execution cycle completed; recording final snapshot"
@@ -452,48 +461,449 @@ impl ExecutionEngine {
         )
     }
 
-    async fn maybe_withdraw_dydx_excess(
+    async fn reconcile_pending_execution_transfer(
+        &self,
+        cycle_name: &str,
+    ) -> Result<PendingTransferGate> {
+        let pending_state = self.db_manager.get_execution_transfer_state().await?;
+        let Some(tx_hash) = pending_state.tx_hash.as_deref() else {
+            return Ok(PendingTransferGate::Continue);
+        };
+        let Some(chain_id) = pending_state.chain_id.as_deref() else {
+            self.clear_execution_transfer_state().await?;
+            return Ok(PendingTransferGate::Continue);
+        };
+
+        let transfer_status = {
+            let client = self.dydx_client.lock().await;
+            client.check_skipgo_transfer_status(tx_hash, chain_id).await
+        };
+
+        let transfer_status = match transfer_status {
+            Ok(status) => status,
+            Err(error) => {
+                warn!(
+                    cycle_name,
+                    tx_hash,
+                    chain_id,
+                    error = ?error,
+                    "Failed to check pending dYdX transfer status; treating transfer as still pending"
+                );
+                return Ok(PendingTransferGate::Pending);
+            }
+        };
+
+        match transfer_status {
+            SkipGoTransferState::Pending => {
+                info!(
+                    cycle_name,
+                    tx_hash,
+                    chain_id,
+                    direction = ?pending_state.direction,
+                    amount_usd = ?pending_state.amount_usd,
+                    initiated_at = ?pending_state.initiated_at,
+                    "dYdX transfer still pending; deferring this cycle"
+                );
+                Ok(PendingTransferGate::Pending)
+            }
+            SkipGoTransferState::Completed => {
+                info!(
+                    cycle_name,
+                    tx_hash,
+                    chain_id,
+                    direction = ?pending_state.direction,
+                    amount_usd = ?pending_state.amount_usd,
+                    "Pending dYdX transfer completed; clearing tracked transfer state"
+                );
+                self.clear_execution_transfer_state().await?;
+                Ok(PendingTransferGate::Continue)
+            }
+            SkipGoTransferState::Failed => {
+                warn!(
+                    cycle_name,
+                    tx_hash,
+                    chain_id,
+                    direction = ?pending_state.direction,
+                    amount_usd = ?pending_state.amount_usd,
+                    "Pending dYdX transfer failed; clearing tracked transfer state"
+                );
+                self.clear_execution_transfer_state().await?;
+                Ok(PendingTransferGate::Continue)
+            }
+        }
+    }
+
+    async fn sync_dydx_capital(
+        &self,
+        snapshot: &PortfolioSnapshot,
+        target_weights: &HashMap<Address, Decimal>,
+        token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
+        strategy_run_id: Option<i32>,
+    ) -> Result<(PortfolioSnapshot, ReserveState)> {
+        let mut synced_snapshot = snapshot.clone();
+        let ideal_reserve_state = self
+            .compute_reserve_state(target_weights, &synced_snapshot, token_hedgeinfo_map)
+            .await?;
+        debug!(
+            strategy_run_id = ?strategy_run_id,
+            snapshot = %self.snapshot_summary(&synced_snapshot),
+            capital_base_usd = %self.capital_base_for_deployment(&synced_snapshot),
+            current_arbitrum_deployable_usd = %self.current_arbitrum_deployable_capital(&synced_snapshot),
+            ideal_investable_capital = %ideal_reserve_state.investable_capital,
+            ideal_required_equity = %ideal_reserve_state.required_equity,
+            ideal_required_free_collateral = %ideal_reserve_state.required_free_collateral,
+            "Evaluated ideal dYdX capital requirements"
+        );
+
+        if ideal_reserve_state.investable_capital <= Decimal::ZERO {
+            return Ok((synced_snapshot, ideal_reserve_state));
+        }
+
+        if self
+            .maybe_move_dydx_main_usdc_to_subaccount(&synced_snapshot, &ideal_reserve_state)
+            .await?
+        {
+            synced_snapshot = self.build_snapshot().await?;
+            info!(
+                strategy_run_id = ?strategy_run_id,
+                snapshot = %self.snapshot_summary(&synced_snapshot),
+                "Moved dYdX main-account USDC into the subaccount before deployment"
+            );
+        }
+
+        let reserved_for_pending_top_up = self
+            .maybe_sync_dydx_cross_chain_capital(&synced_snapshot, &ideal_reserve_state)
+            .await?;
+        let effective_reserve_state = self
+            .compute_effective_reserve_state(
+                &synced_snapshot,
+                target_weights,
+                token_hedgeinfo_map,
+                &ideal_reserve_state,
+                reserved_for_pending_top_up,
+            )
+            .await?;
+
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            reserved_for_pending_top_up_usd = %reserved_for_pending_top_up,
+            effective_investable_capital = %effective_reserve_state.investable_capital,
+            effective_required_equity = %effective_reserve_state.required_equity,
+            effective_required_free_collateral = %effective_reserve_state.required_free_collateral,
+            "Synced dYdX capital state for the current execution cycle"
+        );
+
+        Ok((synced_snapshot, effective_reserve_state))
+    }
+
+    async fn maybe_move_dydx_main_usdc_to_subaccount(
         &self,
         snapshot: &PortfolioSnapshot,
         reserve_state: &ReserveState,
     ) -> Result<bool> {
-        let excess_equity = snapshot.dydx_subaccount_equity - reserve_state.required_equity;
-        let excess_free = snapshot.dydx_free_collateral - reserve_state.required_free_collateral;
-        let excess = excess_equity.min(excess_free);
-        let shortfall = reserve_state.investable_capital - snapshot.arbitrum_value_usd;
+        let equity_shortfall =
+            (reserve_state.required_equity - snapshot.dydx_subaccount_equity).max(Decimal::ZERO);
+        let free_shortfall = (reserve_state.required_free_collateral
+            - snapshot.dydx_free_collateral)
+            .max(Decimal::ZERO);
+        let amount = equity_shortfall
+            .max(free_shortfall)
+            .min(snapshot.dydx_main_usdc);
         debug!(
+            dydx_main_usdc = %snapshot.dydx_main_usdc,
             dydx_subaccount_equity = %snapshot.dydx_subaccount_equity,
             dydx_free_collateral = %snapshot.dydx_free_collateral,
             required_equity = %reserve_state.required_equity,
             required_free_collateral = %reserve_state.required_free_collateral,
-            excess_equity = %excess_equity,
-            excess_free_collateral = %excess_free,
-            arbitrum_value_usd = %snapshot.arbitrum_value_usd,
-            investable_capital = %reserve_state.investable_capital,
-            arbitrum_shortfall_usd = %shortfall,
-            "Evaluated dYdX excess withdrawal opportunity"
+            amount_to_move = %amount,
+            "Evaluated whether dYdX main-account USDC should be moved into the subaccount"
         );
-        if excess <= Decimal::ZERO || shortfall <= self.planner_config.min_value_usd {
-            return Ok(false);
-        }
-
-        let amount = excess.min(shortfall);
-        if amount <= self.planner_config.min_value_usd {
+        if amount <= Decimal::ZERO {
             return Ok(false);
         }
 
         let mut client = self.dydx_client.lock().await;
-        if let Err(e) = client.withdraw_from_subaccount(amount).await {
-            warn!(error = ?e, "Failed to move funds from subaccount for deployment");
-            return Ok(false);
+        client.deposit_to_subaccount(amount).await?;
+        Ok(true)
+    }
+
+    async fn maybe_sync_dydx_cross_chain_capital(
+        &self,
+        snapshot: &PortfolioSnapshot,
+        reserve_state: &ReserveState,
+    ) -> Result<Decimal> {
+        let pending_transfer_state = self.db_manager.get_execution_transfer_state().await?;
+        let has_pending_transfer = pending_transfer_state.tx_hash.is_some();
+        let equity_shortfall =
+            (reserve_state.required_equity - snapshot.dydx_subaccount_equity).max(Decimal::ZERO);
+        let free_shortfall = (reserve_state.required_free_collateral
+            - snapshot.dydx_free_collateral)
+            .max(Decimal::ZERO);
+        let shortfall = equity_shortfall.max(free_shortfall);
+
+        debug!(
+            dydx_main_usdc = %snapshot.dydx_main_usdc,
+            dydx_subaccount_equity = %snapshot.dydx_subaccount_equity,
+            dydx_free_collateral = %snapshot.dydx_free_collateral,
+            required_equity = %reserve_state.required_equity,
+            required_free_collateral = %reserve_state.required_free_collateral,
+            upper_equity = %reserve_state.upper_equity,
+            upper_free_collateral = %reserve_state.upper_free_collateral,
+            shortfall = %shortfall,
+            has_pending_transfer,
+            pending_direction = ?pending_transfer_state.direction,
+            "Evaluated cross-chain dYdX capital sync requirements"
+        );
+
+        if has_pending_transfer {
+            info!(
+                direction = ?pending_transfer_state.direction,
+                amount_usd = ?pending_transfer_state.amount_usd,
+                tx_hash = ?pending_transfer_state.tx_hash,
+                "A dYdX transfer is already pending; not initiating another cross-chain capital move this cycle"
+            );
+            return Ok(Decimal::ZERO);
         }
-        if let Err(e) = client.dydx_withdrawal(Some(amount), None, true, None).await {
-            warn!(error = ?e, "Failed to withdraw dYdX excess for deployment");
-            Ok(false)
+
+        if shortfall > Decimal::ZERO {
+            return self
+                .initiate_dydx_top_up(snapshot, shortfall)
+                .await;
+        }
+
+        self.initiate_dydx_withdrawal_if_needed(snapshot, reserve_state)
+            .await?;
+        Ok(Decimal::ZERO)
+    }
+
+    async fn initiate_dydx_top_up(
+        &self,
+        snapshot: &PortfolioSnapshot,
+        ideal_shortfall: Decimal,
+    ) -> Result<Decimal> {
+        let Some(usdc_token) = self.get_usdc_token() else {
+            warn!("Unable to find Arbitrum USDC token for dYdX top-up");
+            return Ok(Decimal::ZERO);
+        };
+        let live_usdc_balance = self.wallet_manager.get_token_balance(usdc_token.address).await?;
+        let buffer_usd = self.compute_arbitrum_stable_buffer_usd(snapshot);
+        let available_for_transfer = (live_usdc_balance - buffer_usd).max(Decimal::ZERO);
+        let amount = ideal_shortfall.min(available_for_transfer);
+        info!(
+            ideal_shortfall = %ideal_shortfall,
+            live_usdc_balance = %live_usdc_balance,
+            arbitrum_stable_buffer_usd = %buffer_usd,
+            available_for_transfer = %available_for_transfer,
+            amount_to_transfer = %amount,
+            "Evaluated Arbitrum to dYdX USDC top-up"
+        );
+        if amount <= self.planner_config.min_value_usd {
+            warn!(
+                ideal_shortfall = %ideal_shortfall,
+                amount_to_transfer = %amount,
+                "dYdX top-up shortfall detected, but not enough free Arbitrum USDC is available to bridge"
+            );
+            return Ok(Decimal::ZERO);
+        }
+
+        let tracking = {
+            let mut client = self.dydx_client.lock().await;
+            client.dydx_deposit(Some(amount), None, true, None).await?
+        };
+
+        if let Some(tracking) = tracking {
+            self.persist_execution_transfer_state(
+                EXECUTION_TRANSFER_DIRECTION_TO_DYDX,
+                &tracking,
+            )
+            .await?;
+            info!(
+                amount_usd = %amount,
+                tx_hash = %tracking.tx_hash,
+                chain_id = %tracking.chain_id,
+                expected_time_to_complete_secs = tracking.expected_time_to_complete_secs,
+                "Initiated Arbitrum to dYdX top-up for a future execution cycle"
+            );
         } else {
-            info!(amount = %amount, "Withdrawing dYdX excess for deployment");
-            Ok(true)
+            warn!(amount_usd = %amount, "dYdX top-up returned no tracking metadata");
         }
+
+        Ok(amount)
+    }
+
+    async fn initiate_dydx_withdrawal_if_needed(
+        &self,
+        snapshot: &PortfolioSnapshot,
+        reserve_state: &ReserveState,
+    ) -> Result<()> {
+        let total_dydx_capital = snapshot.dydx_main_usdc + snapshot.dydx_subaccount_equity;
+        let total_excess = (total_dydx_capital - reserve_state.upper_equity).max(Decimal::ZERO);
+        if total_excess <= self.planner_config.min_value_usd {
+            return Ok(());
+        }
+
+        let main_withdraw_amount = snapshot.dydx_main_usdc.min(total_excess);
+        let remaining_excess = (total_excess - main_withdraw_amount).max(Decimal::ZERO);
+        let subaccount_withdrawable = (snapshot.dydx_subaccount_equity
+            - reserve_state.required_equity)
+            .max(Decimal::ZERO)
+            .min(
+                (snapshot.dydx_free_collateral - reserve_state.required_free_collateral)
+                    .max(Decimal::ZERO),
+            );
+        let subaccount_withdraw_amount = remaining_excess.min(subaccount_withdrawable);
+        let total_withdraw_amount = main_withdraw_amount + subaccount_withdraw_amount;
+
+        debug!(
+            total_dydx_capital = %total_dydx_capital,
+            upper_equity = %reserve_state.upper_equity,
+            total_excess = %total_excess,
+            main_withdraw_amount = %main_withdraw_amount,
+            subaccount_withdraw_amount = %subaccount_withdraw_amount,
+            total_withdraw_amount = %total_withdraw_amount,
+            "Evaluated dYdX to Arbitrum withdrawal need"
+        );
+
+        if total_withdraw_amount <= self.planner_config.min_value_usd {
+            return Ok(());
+        }
+
+        let tracking = {
+            let mut client = self.dydx_client.lock().await;
+            if subaccount_withdraw_amount > Decimal::ZERO {
+                client
+                    .withdraw_from_subaccount(subaccount_withdraw_amount)
+                    .await?;
+            }
+            client
+                .dydx_withdrawal(Some(total_withdraw_amount), None, true, None)
+                .await?
+        };
+
+        if let Some(tracking) = tracking {
+            self.persist_execution_transfer_state(
+                EXECUTION_TRANSFER_DIRECTION_FROM_DYDX,
+                &tracking,
+            )
+            .await?;
+            info!(
+                amount_usd = %total_withdraw_amount,
+                tx_hash = %tracking.tx_hash,
+                chain_id = %tracking.chain_id,
+                expected_time_to_complete_secs = tracking.expected_time_to_complete_secs,
+                "Initiated dYdX to Arbitrum withdrawal for excess capital"
+            );
+        } else {
+            warn!(
+                amount_usd = %total_withdraw_amount,
+                "dYdX withdrawal returned no tracking metadata"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn compute_effective_reserve_state(
+        &self,
+        snapshot: &PortfolioSnapshot,
+        target_weights: &HashMap<Address, Decimal>,
+        token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
+        ideal_reserve_state: &ReserveState,
+        reserved_for_pending_top_up: Decimal,
+    ) -> Result<ReserveState> {
+        if ideal_reserve_state.investable_capital <= Decimal::ZERO {
+            return Ok(ideal_reserve_state.clone());
+        }
+
+        let current_arbitrum_deployable = (self.current_arbitrum_deployable_capital(snapshot)
+            - reserved_for_pending_top_up)
+            .max(Decimal::ZERO);
+        let equity_ratio = if ideal_reserve_state.required_equity > Decimal::ZERO {
+            (snapshot.dydx_subaccount_equity / ideal_reserve_state.required_equity)
+                .clamp(Decimal::ZERO, Decimal::ONE)
+        } else {
+            Decimal::ONE
+        };
+        let free_ratio = if ideal_reserve_state.required_free_collateral > Decimal::ZERO {
+            (snapshot.dydx_free_collateral / ideal_reserve_state.required_free_collateral)
+                .clamp(Decimal::ZERO, Decimal::ONE)
+        } else {
+            Decimal::ONE
+        };
+        let hedge_limited_investable =
+            ideal_reserve_state.investable_capital * equity_ratio.min(free_ratio);
+        let effective_investable_capital = ideal_reserve_state
+            .investable_capital
+            .min(current_arbitrum_deployable)
+            .min(hedge_limited_investable);
+
+        debug!(
+            ideal_investable_capital = %ideal_reserve_state.investable_capital,
+            current_arbitrum_deployable = %current_arbitrum_deployable,
+            reserved_for_pending_top_up = %reserved_for_pending_top_up,
+            equity_ratio = %equity_ratio,
+            free_collateral_ratio = %free_ratio,
+            hedge_limited_investable = %hedge_limited_investable,
+            effective_investable_capital = %effective_investable_capital,
+            "Computed effective investable capital for the current cycle"
+        );
+
+        if effective_investable_capital <= Decimal::ZERO {
+            return self
+                .compute_reserve_state_for_investable(
+                    target_weights,
+                    snapshot,
+                    Decimal::ZERO,
+                    token_hedgeinfo_map,
+                )
+                .await;
+        }
+
+        if effective_investable_capital == ideal_reserve_state.investable_capital {
+            return Ok(ideal_reserve_state.clone());
+        }
+
+        self.compute_reserve_state_for_investable(
+            target_weights,
+            snapshot,
+            effective_investable_capital,
+            token_hedgeinfo_map,
+        )
+        .await
+    }
+
+    async fn persist_execution_transfer_state(
+        &self,
+        direction: &str,
+        tracking: &DydxTransferTracking,
+    ) -> Result<()> {
+        self.db_manager
+            .upsert_execution_transfer_state(&NewExecutionTransferStateModel {
+                direction: Some(direction.to_string()),
+                tx_hash: Some(tracking.tx_hash.clone()),
+                chain_id: Some(tracking.chain_id.clone()),
+                amount_usd: Some(tracking.amount_usd),
+                expected_time_to_complete_secs: Some(
+                    tracking.expected_time_to_complete_secs as i64,
+                ),
+                initiated_at: Some(Utc::now()),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn clear_execution_transfer_state(&self) -> Result<()> {
+        self.db_manager
+            .upsert_execution_transfer_state(&NewExecutionTransferStateModel {
+                direction: None,
+                tx_hash: None,
+                chain_id: None,
+                amount_usd: None,
+                expected_time_to_complete_secs: None,
+                initiated_at: None,
+            })
+            .await?;
+        Ok(())
     }
 
     async fn build_snapshot(&self) -> Result<PortfolioSnapshot> {
@@ -585,24 +995,55 @@ impl ExecutionEngine {
         })
     }
 
+    fn capital_base_for_deployment(&self, snapshot: &PortfolioSnapshot) -> Decimal {
+        let arbitrum_stable_buffer = self.compute_arbitrum_stable_buffer_usd(snapshot);
+        (snapshot.total_value_usd - snapshot.native_value_usd - arbitrum_stable_buffer)
+            .max(Decimal::ZERO)
+    }
+
+    fn current_arbitrum_deployable_capital(&self, snapshot: &PortfolioSnapshot) -> Decimal {
+        let arbitrum_stable_buffer = self.compute_arbitrum_stable_buffer_usd(snapshot);
+        (snapshot.arbitrum_value_usd - snapshot.native_value_usd - arbitrum_stable_buffer)
+            .max(Decimal::ZERO)
+    }
+
+    fn compute_arbitrum_stable_buffer_usd(&self, snapshot: &PortfolioSnapshot) -> Decimal {
+        let arbitrum_non_native_value =
+            (snapshot.arbitrum_value_usd - snapshot.native_value_usd).max(Decimal::ZERO);
+        let pct_buffer = arbitrum_non_native_value * self.planner_config.arbitrum_stable_buffer_pct;
+        self.planner_config
+            .arbitrum_stable_buffer_floor_usd
+            .max(pct_buffer)
+    }
+
+    fn compute_dydx_free_collateral_buffer_usd(
+        &self,
+        target_free_collateral_without_buffer: Decimal,
+    ) -> Decimal {
+        let pct_buffer =
+            target_free_collateral_without_buffer * self.planner_config.dydx_free_collateral_buffer_pct;
+        self.planner_config
+            .dydx_free_collateral_buffer_floor_usd
+            .max(pct_buffer)
+    }
+
     async fn compute_reserve_state(
         &self,
         target_weights: &HashMap<Address, Decimal>,
         snapshot: &PortfolioSnapshot,
         token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
     ) -> Result<ReserveState> {
-        let total_value = snapshot.total_value_usd;
+        let capital_base = self.capital_base_for_deployment(snapshot);
         let mut investable = Decimal::ZERO;
         let mut required_margin = Decimal::ZERO;
         let mut required_equity = Decimal::ZERO;
         let mut required_free_collateral = Decimal::ZERO;
-        let mut reserve_total = Decimal::ZERO;
         let mut deposit_token_cache = HashMap::new();
 
         let iterations = 2;
         for iteration in 0..iterations {
-            let base_reserve = total_value * self.planner_config.reserve_pct;
-            investable = (total_value - base_reserve).max(Decimal::ZERO);
+            let base_reserve = capital_base * self.planner_config.reserve_pct;
+            investable = (capital_base - base_reserve).max(Decimal::ZERO);
             let reserve_req = self
                 .compute_required_dydx_reserve(
                     target_weights,
@@ -615,10 +1056,11 @@ impl ExecutionEngine {
             required_margin = reserve_req.0;
             required_equity = reserve_req.1;
             required_free_collateral = reserve_req.2;
-            reserve_total = base_reserve.max(required_equity);
-            investable = (total_value - reserve_total).max(Decimal::ZERO);
+            let reserve_total = base_reserve.max(required_equity);
+            investable = (capital_base - reserve_total).max(Decimal::ZERO);
             debug!(
                 iteration = iteration + 1,
+                capital_base = %capital_base,
                 base_reserve = %base_reserve,
                 required_margin = %required_margin,
                 required_equity = %required_equity,
@@ -629,6 +1071,53 @@ impl ExecutionEngine {
             );
         }
 
+        self.build_reserve_state(
+            capital_base,
+            snapshot,
+            investable,
+            required_margin,
+            required_equity,
+            required_free_collateral,
+        )
+    }
+
+    async fn compute_reserve_state_for_investable(
+        &self,
+        target_weights: &HashMap<Address, Decimal>,
+        snapshot: &PortfolioSnapshot,
+        investable_capital: Decimal,
+        token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
+    ) -> Result<ReserveState> {
+        let capital_base = self.capital_base_for_deployment(snapshot);
+        let mut deposit_token_cache = HashMap::new();
+        let reserve_req = self
+            .compute_required_dydx_reserve(
+                target_weights,
+                snapshot,
+                investable_capital,
+                token_hedgeinfo_map,
+                &mut deposit_token_cache,
+            )
+            .await?;
+        self.build_reserve_state(
+            capital_base,
+            snapshot,
+            investable_capital,
+            reserve_req.0,
+            reserve_req.1,
+            reserve_req.2,
+        )
+    }
+
+    fn build_reserve_state(
+        &self,
+        capital_base: Decimal,
+        snapshot: &PortfolioSnapshot,
+        investable_capital: Decimal,
+        required_margin: Decimal,
+        required_equity: Decimal,
+        required_free_collateral: Decimal,
+    ) -> Result<ReserveState> {
         let gas_reserve_target_usd =
             snapshot.arbitrum_value_usd * self.planner_config.gas_reserve_pct;
         let native_price = self.wallet_manager.native_token.last_mid_price_usd;
@@ -637,14 +1126,19 @@ impl ExecutionEngine {
         } else {
             Decimal::ZERO
         };
+        let free_collateral_buffer =
+            self.compute_dydx_free_collateral_buffer_usd(required_free_collateral);
+        let upper_free_collateral = required_free_collateral + free_collateral_buffer;
+        let upper_equity = required_margin + upper_free_collateral;
 
         Ok(ReserveState {
-            reserve_total,
-            investable_capital: investable,
+            reserve_total: (capital_base - investable_capital).max(Decimal::ZERO),
+            investable_capital,
             required_margin,
             required_equity,
             required_free_collateral,
-            upper_equity: required_equity * Decimal::from_f64(2.0).unwrap(),
+            upper_equity,
+            upper_free_collateral,
             gas_reserve_target_usd,
             gas_reserve_target_eth,
         })
@@ -754,8 +1248,13 @@ impl ExecutionEngine {
         let guard_adjusted =
             required_margin * Decimal::from_f64(0.75).unwrap() + low_leverage_guard;
         let required_margin = required_margin.max(guard_adjusted);
-        let required_equity = required_margin * Decimal::from_f64(1.5).unwrap();
-        let required_free_collateral = (required_equity - required_margin).max(Decimal::ZERO);
+        let target_free_collateral_without_buffer =
+            required_margin * Decimal::from_f64(0.5).unwrap();
+        let free_collateral_buffer = self
+            .compute_dydx_free_collateral_buffer_usd(target_free_collateral_without_buffer);
+        let required_free_collateral =
+            target_free_collateral_without_buffer + free_collateral_buffer;
+        let required_equity = required_margin + required_free_collateral;
         Ok((required_margin, required_equity, required_free_collateral))
     }
 
@@ -971,17 +1470,29 @@ impl ExecutionEngine {
                                     client.withdraw_from_subaccount(withdraw_amount).await
                                 {
                                     warn!(error = ?e, "Failed to move funds from subaccount for gas reserve");
-                                } else if let Err(e) = client
-                                    .dydx_withdrawal(Some(withdraw_amount), None, true, None)
-                                    .await
-                                {
-                                    warn!(error = ?e, "Failed to withdraw from dYdX for gas reserve");
                                 } else {
-                                    info!(
-                                        amount = %withdraw_amount,
-                                        "Triggered dYdX withdrawal for gas reserve; skipping ETH top-up this cycle"
-                                    );
-                                    return Ok(true);
+                                    match client
+                                        .dydx_withdrawal(Some(withdraw_amount), None, true, None)
+                                        .await
+                                    {
+                                        Ok(tracking) => {
+                                            if let Some(tracking) = tracking {
+                                                self.persist_execution_transfer_state(
+                                                    EXECUTION_TRANSFER_DIRECTION_FROM_DYDX,
+                                                    &tracking,
+                                                )
+                                                .await?;
+                                            }
+                                            info!(
+                                                amount = %withdraw_amount,
+                                                "Triggered dYdX withdrawal for gas reserve; skipping ETH top-up this cycle"
+                                            );
+                                            return Ok(true);
+                                        }
+                                        Err(e) => {
+                                            warn!(error = ?e, "Failed to withdraw from dYdX for gas reserve");
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1750,6 +2261,14 @@ impl ExecutionEngine {
         best.map(|(token, _)| token)
     }
 
+    fn get_usdc_token(&self) -> Option<TokenInfo> {
+        self.wallet_manager
+            .asset_tokens
+            .values()
+            .find(|token| token.symbol == "USDC")
+            .cloned()
+    }
+
     fn resolve_target_stable_token(
         &self,
         target_symbol: &str,
@@ -1904,67 +2423,6 @@ impl ExecutionEngine {
         } else {
             (long_value_usd + short_value_usd).max(Decimal::ZERO)
         }
-    }
-
-    async fn manage_dydx_reserves(
-        &self,
-        snapshot: &PortfolioSnapshot,
-        reserve_state: &ReserveState,
-    ) -> Result<bool> {
-        let mut client = self.dydx_client.lock().await;
-        let sub_equity = snapshot.dydx_subaccount_equity;
-        let sub_free = snapshot.dydx_free_collateral;
-        let required_equity = reserve_state.required_equity;
-        let required_free = reserve_state.required_free_collateral;
-
-        let equity_shortfall = (required_equity - sub_equity).max(Decimal::ZERO);
-        let free_shortfall = (required_free - sub_free).max(Decimal::ZERO);
-        let shortfall = equity_shortfall.max(free_shortfall);
-        debug!(
-            subaccount_equity = %sub_equity,
-            free_collateral = %sub_free,
-            required_equity = %required_equity,
-            required_free_collateral = %required_free,
-            shortfall = %shortfall,
-            "Evaluated dYdX reserve state"
-        );
-
-        if shortfall <= self.planner_config.min_value_usd {
-            return Ok(false);
-        }
-
-        let main_usdc = snapshot.dydx_main_usdc;
-        if main_usdc >= shortfall {
-            if let Err(e) = client.deposit_to_subaccount(shortfall).await {
-                warn!(error = ?e, "Failed to move USDC to subaccount");
-                return Ok(false);
-            } else {
-                info!(amount = %shortfall, "Moved USDC to dYdX subaccount");
-            }
-            return Ok(true);
-        }
-
-        let mut changed = false;
-        if main_usdc > Decimal::ZERO {
-            if let Err(e) = client.deposit_to_subaccount(main_usdc).await {
-                warn!(error = ?e, "Failed to move USDC to subaccount");
-                return Ok(false);
-            }
-            info!(amount = %main_usdc, "Moved available main-account USDC to dYdX subaccount");
-            changed = true;
-        }
-
-        let remaining = shortfall - main_usdc;
-        if remaining > self.planner_config.min_value_usd {
-            info!(amount = %remaining, "Funding dYdX reserve via SkipGo");
-            if let Err(e) = client.dydx_deposit(Some(remaining), None, true, None).await {
-                warn!(error = ?e, "Failed to deposit to dYdX");
-            } else {
-                changed = true;
-            }
-        }
-
-        Ok(changed)
     }
 
     async fn execute_actions(&self, actions: &[TradeAction], strategy_run_id: Option<i32>) -> bool {

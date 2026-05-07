@@ -2327,7 +2327,9 @@ impl ExecutionEngine {
         snapshot: &PortfolioSnapshot,
         target_weights: &HashMap<Address, Decimal>,
     ) -> Result<Vec<TradeAction>> {
-        let mut actions = Vec::new();
+        let mut target_positions: HashMap<String, Decimal> = HashMap::new();
+        let mut token_symbols_by_ticker: HashMap<String, String> = HashMap::new();
+        let mut price_by_ticker: HashMap<String, Decimal> = HashMap::new();
 
         for (market, gm_balance) in snapshot.market_balances.iter() {
             if *gm_balance <= Decimal::ZERO {
@@ -2391,19 +2393,35 @@ impl ExecutionEngine {
 
             let target_size = -(hedge_notional / long_token.last_mid_price_usd);
             let ticker = hedge_utils::get_dydx_perp_ticker(&long_token.symbol);
+            *target_positions.entry(ticker.clone()).or_insert(Decimal::ZERO) += target_size;
+            token_symbols_by_ticker
+                .entry(ticker.clone())
+                .or_insert_with(|| hedge_utils::get_dydx_perp_base_symbol(&long_token.symbol));
+            price_by_ticker
+                .entry(ticker)
+                .or_insert(long_token.last_mid_price_usd);
+        }
+
+        let mut actions = Vec::new();
+        for (ticker, target_size) in target_positions {
             let current_size = snapshot
                 .hedge_positions
                 .get(&ticker)
                 .cloned()
                 .unwrap_or(Decimal::ZERO);
             let delta = target_size - current_size;
+            let reference_price = price_by_ticker.get(&ticker).cloned().unwrap_or(Decimal::ZERO);
 
-            if delta.abs() * long_token.last_mid_price_usd < self.planner_config.min_value_usd {
+            if delta.abs() * reference_price < self.planner_config.min_value_usd {
                 continue;
             }
 
+            let Some(token_symbol) = token_symbols_by_ticker.get(&ticker).cloned() else {
+                continue;
+            };
+
             actions.push(TradeAction::HedgeOrder {
-                token_symbol: hedge_utils::get_dydx_perp_base_symbol(&long_token.symbol),
+                token_symbol,
                 size: delta.abs(),
                 side_is_buy: delta > Decimal::ZERO,
                 reduce_only: false,

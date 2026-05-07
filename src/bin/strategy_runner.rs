@@ -15,6 +15,7 @@ use crypto_yield_farming_bot::db::models::strategy_runs::NewStrategyRunModel;
 use crypto_yield_farming_bot::db::models::strategy_targets::NewStrategyTargetModel;
 use crypto_yield_farming_bot::hedging::dydx_client::DydxClient;
 use crypto_yield_farming_bot::logging;
+use crypto_yield_farming_bot::spot_swap::swap_manager::SwapManager;
 use crypto_yield_farming_bot::strategy::engine;
 use crypto_yield_farming_bot::strategy::types::PortfolioData;
 use crypto_yield_farming_bot::wallet::WalletManager;
@@ -150,12 +151,17 @@ async fn main() -> eyre::Result<()> {
                 let mut wallet_manager = WalletManager::new(&cfg)?;
                 wallet_manager.load_tokens(&db_manager).await?;
                 let wallet_manager = Arc::new(wallet_manager);
+                let swap_manager = Arc::new(SwapManager::new(&cfg, wallet_manager.clone()));
 
                 let dydx_client = DydxClient::new(cfg.clone(), wallet_manager).await?;
                 let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
                 let portfolio_data = match time::timeout(
                     std::time::Duration::from_secs(run_timeout_secs),
-                    engine::run_strategy_engine(db_manager.clone(), dydx_client.clone()),
+                    engine::run_strategy_engine(
+                        db_manager.clone(),
+                        dydx_client.clone(),
+                        swap_manager.clone(),
+                    ),
                 )
                 .await
                 {

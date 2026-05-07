@@ -1,9 +1,11 @@
 use tracing::{instrument, debug, info, error};
 use eyre::Result;
 use std::sync::Arc;
+use std::collections::HashMap;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use ndarray::Array1;
+use ethers::types::Address;
 
 use super::{
     fee_model, allocator, covariance,
@@ -14,12 +16,24 @@ use super::{
 };
 use crate::db::db_manager::DbManager;
 use crate::hedging::dydx_client::DydxClient;
+use crate::spot_swap::swap_manager::SwapManager;
+use crate::spot_swap::types::SwapRequest;
+
+const DIRECT_SWAP_LIQUIDITY_CHECK_USD: &str = "100";
+const MAX_DIRECT_SWAP_PRICE_DEVIATION_PCT: &str = "5";
+
+#[derive(Clone)]
+struct DirectSwapAssessment {
+    is_supported: bool,
+    detail: String,
+}
 
 /// Entry point for the strategy engine — run on each data refresh
-#[instrument(name = "strategy_engine", skip(db_manager, dydx_client))]
+#[instrument(name = "strategy_engine", skip(db_manager, dydx_client, swap_manager))]
 pub async fn run_strategy_engine(
     db_manager: Arc<DbManager>,
     dydx_client: Arc<tokio::sync::Mutex<DydxClient>>,
+    swap_manager: Arc<SwapManager>,
 ) -> Result<PortfolioData> {
     info!("Starting strategy engine...");
 
@@ -84,6 +98,89 @@ pub async fn run_strategy_engine(
     } else {
         debug!("Filtered out markets: {} available\nRemoved markets:\n{}", market_slices.len(), filtered_markets);
     }
+
+    let usdc_address = swap_manager
+        .wallet_manager()
+        .asset_tokens
+        .values()
+        .find(|token| token.symbol == "USDC")
+        .map(|token| token.address)
+        .ok_or_else(|| eyre::eyre!("USDC token not loaded in wallet manager"))?;
+    let mut direct_swap_assessments = HashMap::<Address, DirectSwapAssessment>::new();
+    let mut swap_filtered_markets = String::new();
+    let mut swap_filtered_slices = Vec::new();
+
+    for slice in market_slices {
+        let market_info = match swap_manager
+            .wallet_manager()
+            .market_tokens
+            .get(&slice.market_address)
+        {
+            Some(info) => info,
+            None => {
+                swap_filtered_markets.push_str(&format!(
+                    "{} --> missing market token metadata in wallet manager\n",
+                    slice.display_name
+                ));
+                continue;
+            }
+        };
+
+        let long_assessment = assess_direct_swap_to_usdc(
+            &swap_manager,
+            market_info.long_token_address,
+            usdc_address,
+            &mut direct_swap_assessments,
+        )
+        .await;
+        if !long_assessment.is_supported {
+            swap_filtered_markets.push_str(&format!(
+                "{} --> long token {} not directly swappable to USDC ({})\n",
+                slice.display_name,
+                swap_manager
+                    .wallet_manager()
+                    .get_token_info(market_info.long_token_address)?
+                    .symbol,
+                long_assessment.detail
+            ));
+            continue;
+        }
+
+        let short_assessment = assess_direct_swap_to_usdc(
+            &swap_manager,
+            market_info.short_token_address,
+            usdc_address,
+            &mut direct_swap_assessments,
+        )
+        .await;
+        if !short_assessment.is_supported {
+            swap_filtered_markets.push_str(&format!(
+                "{} --> short token {} not directly swappable to USDC ({})\n",
+                slice.display_name,
+                swap_manager
+                    .wallet_manager()
+                    .get_token_info(market_info.short_token_address)?
+                    .symbol,
+                short_assessment.detail
+            ));
+            continue;
+        }
+
+        swap_filtered_slices.push(slice);
+    }
+
+    if swap_filtered_slices.is_empty() {
+        error!("All markets filtered out after swapability checks:\n{}", swap_filtered_markets);
+        return Err(eyre::eyre!("All markets filtered out after swapability checks"));
+    }
+    if !swap_filtered_markets.is_empty() {
+        debug!(
+            available = swap_filtered_slices.len(),
+            "Filtered out markets after direct-to-USDC swapability checks:\n{}",
+            swap_filtered_markets
+        );
+    }
+    let market_slices = swap_filtered_slices;
 
     // Calculate covariance matrix using the same ordering as market_slices
     let covariance_matrix = match covariance::calculate_covariance_matrix(&market_slices) {
@@ -178,4 +275,98 @@ fn get_collateral_tokens_from_display_name(display_name: String) -> Result<(Stri
     let (long_token, short_token) = collateral_tokens_substr.split_once('-')
         .ok_or_else(|| eyre::eyre!("Invalid collateral token format in display name: {}", display_name))?;
     Ok((long_token[..long_token.len()-1].to_string(), short_token[1..].to_string()))
+}
+
+async fn assess_direct_swap_to_usdc(
+    swap_manager: &Arc<SwapManager>,
+    from_token_address: Address,
+    usdc_address: Address,
+    cache: &mut HashMap<Address, DirectSwapAssessment>,
+) -> DirectSwapAssessment {
+    if let Some(cached) = cache.get(&from_token_address) {
+        return cached.clone();
+    }
+
+    let assessment = match swap_manager.wallet_manager().get_token_info(from_token_address) {
+        Ok(token_info) => {
+            if token_info.address == usdc_address {
+                DirectSwapAssessment {
+                    is_supported: true,
+                    detail: "already USDC".to_string(),
+                }
+            } else if token_info.last_mid_price_usd <= Decimal::ZERO {
+                DirectSwapAssessment {
+                    is_supported: false,
+                    detail: "missing or non-positive mid price".to_string(),
+                }
+            } else {
+                let usd_notional = Decimal::from_str(DIRECT_SWAP_LIQUIDITY_CHECK_USD).unwrap();
+                let amount = usd_notional / token_info.last_mid_price_usd;
+                if amount <= Decimal::ZERO {
+                    DirectSwapAssessment {
+                        is_supported: false,
+                        detail: "non-positive quote test amount".to_string(),
+                    }
+                } else {
+                    let request = SwapRequest {
+                        from_token_address,
+                        to_token_address: usdc_address,
+                        amount,
+                        side: "SELL".to_string(),
+                    };
+                    match swap_manager.quote_swap(&request).await {
+                        Ok(quote) => {
+                            if quote.to_amount <= Decimal::ZERO {
+                                DirectSwapAssessment {
+                                    is_supported: false,
+                                    detail: "quote returned non-positive output".to_string(),
+                                }
+                            } else {
+                                let quoted_price = quote.to_amount / amount;
+                                let deviation_pct =
+                                    ((quoted_price - token_info.last_mid_price_usd).abs()
+                                        / token_info.last_mid_price_usd)
+                                        * Decimal::from_f64(100.0).unwrap();
+                                let max_deviation_pct =
+                                    Decimal::from_str(MAX_DIRECT_SWAP_PRICE_DEVIATION_PCT).unwrap();
+
+                                if deviation_pct > max_deviation_pct {
+                                    DirectSwapAssessment {
+                                        is_supported: false,
+                                        detail: format!(
+                                            "quoted price {} deviates from mid price {} by {}%",
+                                            quoted_price,
+                                            token_info.last_mid_price_usd,
+                                            deviation_pct.round_dp(2)
+                                        ),
+                                    }
+                                } else {
+                                    DirectSwapAssessment {
+                                        is_supported: true,
+                                        detail: format!(
+                                            "quoted price {} within {}% of mid price {}",
+                                            quoted_price,
+                                            deviation_pct.round_dp(2),
+                                            token_info.last_mid_price_usd
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => DirectSwapAssessment {
+                            is_supported: false,
+                            detail: format!("direct quote failed: {}", e),
+                        },
+                    }
+                }
+            }
+        }
+        Err(e) => DirectSwapAssessment {
+            is_supported: false,
+            detail: format!("token metadata unavailable: {}", e),
+        },
+    };
+
+    cache.insert(from_token_address, assessment.clone());
+    assessment
 }

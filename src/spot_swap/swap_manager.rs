@@ -55,6 +55,10 @@ impl SwapManager {
         }
     }
 
+    pub fn wallet_manager(&self) -> &Arc<WalletManager> {
+        &self.wallet_manager
+    }
+
     /// Executes a swap request using the ParaSwap API and smart contract - assumes wallet manager tokens have been loaded
     #[instrument(skip(self, swap_request), fields(on_close = true))]
     pub async fn execute_swap(&self, swap_request: &SwapRequest) -> Result<String> {
@@ -178,6 +182,16 @@ impl SwapManager {
         );
 
         Ok(format!("{:#x}", tx_hash))
+    }
+
+    /// Build a direct ParaSwap quote for a swap request without executing it.
+    #[instrument(skip(self, swap_request))]
+    pub async fn quote_swap(&self, swap_request: &SwapRequest) -> Result<QuoteResponse> {
+        let (swap_log_string, quote_request) = self.validate_swap_request(swap_request).await?;
+        debug!("{} Request validated for quote-only path", swap_log_string);
+        let quote = self.paraswap_client.get_quote(&quote_request).await?;
+        debug!(quote = ?quote, "{} Quote Received", swap_log_string);
+        Ok(quote)
     }
 
     /// Validate swap request, create log string and quote request

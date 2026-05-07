@@ -12,6 +12,7 @@ use super::connection;
 use super::models::{
     execution_control_events::{ExecutionControlEventModel, NewExecutionControlEventModel},
     execution_control_state::{ExecutionControlStateModel, NewExecutionControlStateModel},
+    execution_transfer_state::{ExecutionTransferStateModel, NewExecutionTransferStateModel},
     dydx_perp_states::{DydxPerpStateModel, NewDydxPerpStateModel, RawDydxPerpStateModel},
     dydx_perps::{DydxPerpModel, NewDydxPerpModel, RawDydxPerpModel},
     market_states::{MarketStateModel, NewMarketStateModel, RawMarketStateModel},
@@ -27,6 +28,7 @@ use super::models::{
 use super::queries::{
     execution_control_events as execution_control_events_queries,
     execution_control_state as execution_control_state_queries,
+    execution_transfer_state as execution_transfer_state_queries,
     dydx_perp_states as dydx_perp_states_queries, dydx_perps as dydx_perps_queries,
     market_states as market_states_queries, markets as markets_queries,
     portfolio_snapshots as portfolio_snapshots_queries,
@@ -1021,6 +1023,23 @@ impl DbManager {
     ) -> Result<Vec<ExecutionControlEventModel>, sqlx::Error> {
         execution_control_events_queries::get_recent_execution_control_events(&self.pool, limit)
             .await
+    }
+
+    /// Fetch the singleton execution transfer state.
+    #[instrument(skip(self))]
+    pub async fn get_execution_transfer_state(
+        &self,
+    ) -> Result<ExecutionTransferStateModel, sqlx::Error> {
+        execution_transfer_state_queries::get_execution_transfer_state(&self.pool).await
+    }
+
+    /// Upsert the singleton execution transfer state.
+    #[instrument(skip(self, state))]
+    pub async fn upsert_execution_transfer_state(
+        &self,
+        state: &NewExecutionTransferStateModel,
+    ) -> Result<ExecutionTransferStateModel, sqlx::Error> {
+        execution_transfer_state_queries::upsert_execution_transfer_state(&self.pool, state).await
     }
 
     /// Fetch latest strategy run

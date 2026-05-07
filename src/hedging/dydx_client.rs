@@ -73,6 +73,21 @@ pub struct DydxClient {
         Arc<tokio::sync::Mutex<Vec<JoinHandle<Result<PerpOrderTaskResult>>>>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DydxTransferTracking {
+    pub tx_hash: String,
+    pub chain_id: String,
+    pub amount_usd: Decimal,
+    pub expected_time_to_complete_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipGoTransferState {
+    Pending,
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PerpOrderOutcome {
     Filled,
@@ -1079,7 +1094,7 @@ impl DydxClient {
         amount_out: Option<Decimal>,
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
-    ) -> Result<()> {
+    ) -> Result<Option<DydxTransferTracking>> {
         // Get USDC + ETH balances
         let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
         let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
@@ -1141,7 +1156,7 @@ impl DydxClient {
         }
 
         // Execute SkipGo transfer
-        self.execute_skip_go_transfer(
+        let tracking = self.execute_skip_go_transfer(
             msgs.txs,
             initial_dydx_usdc_balance,
             initial_arbitrum_usdc_balance,
@@ -1154,7 +1169,10 @@ impl DydxClient {
         // Final log
         info!("{} Deposit Initiated Successfully", log_string,);
 
-        Ok(())
+        Ok(tracking.map(|mut tracking| {
+            tracking.amount_usd = amount;
+            tracking
+        }))
     }
 
     #[instrument(skip(self))]
@@ -1164,7 +1182,7 @@ impl DydxClient {
         amount_out: Option<Decimal>,
         go_fast: bool,
         slippage_tolerance_percent: Option<Decimal>,
-    ) -> Result<()> {
+    ) -> Result<Option<DydxTransferTracking>> {
         // Get USDC balances
         let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
         let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
@@ -1212,7 +1230,7 @@ impl DydxClient {
         }
 
         // Execute SkipGo transfer
-        self.execute_skip_go_transfer(
+        let tracking = self.execute_skip_go_transfer(
             msgs.txs,
             initial_dydx_usdc_balance,
             initial_arbitrum_usdc_balance,
@@ -1225,7 +1243,31 @@ impl DydxClient {
         // Final log
         info!("{} Withdrawal Initiated Successfully", log_string,);
 
-        Ok(())
+        Ok(tracking.map(|mut tracking| {
+            tracking.amount_usd = amount;
+            tracking
+        }))
+    }
+
+    pub async fn check_skipgo_transfer_status(
+        &self,
+        tx_hash: &str,
+        chain_id: &str,
+    ) -> Result<SkipGoTransferState> {
+        let request = skip_go::SkipGoGetTransactionStatusRequest {
+            tx_hash: tx_hash.to_string(),
+            chain_id: chain_id.to_string(),
+        };
+        let response = skip_go::get_transaction_status(request).await?;
+        let state = match response.state {
+            skip_go::SkipGoTransactionState::StateCompletedSuccess => {
+                SkipGoTransferState::Completed
+            }
+            skip_go::SkipGoTransactionState::StateSubmitted
+            | skip_go::SkipGoTransactionState::StatePending => SkipGoTransferState::Pending,
+            _ => SkipGoTransferState::Failed,
+        };
+        Ok(state)
     }
 
     async fn get_arbitrum_usdc_balance(&self) -> Result<Decimal> {
@@ -1506,7 +1548,8 @@ impl DydxClient {
         arbitrum_native_balance_initial: Decimal,
         log_string: String,
         expected_time_to_complete_secs: u64,
-    ) -> Result<()> {
+    ) -> Result<Option<DydxTransferTracking>> {
+        let mut last_tracking = None;
         for tx in txs {
             match tx {
                 skip_go::SkipGoTx::CosmosTx(cosmos_tx) => {
@@ -1533,7 +1576,7 @@ impl DydxClient {
 
                     // Spawn status polling
                     self.spawn_status_polling_skipgo(
-                        tx_hash,
+                        tx_hash.clone(),
                         DYDX_CHAIN_ID.to_string(),
                         expected_time_to_complete_secs,
                         dydx_usdc_balance_initial,
@@ -1542,6 +1585,12 @@ impl DydxClient {
                         log_string.clone(),
                     )
                     .await?;
+                    last_tracking = Some(DydxTransferTracking {
+                        tx_hash: tx_hash.clone(),
+                        chain_id: DYDX_CHAIN_ID.to_string(),
+                        amount_usd: Decimal::ZERO,
+                        expected_time_to_complete_secs,
+                    });
                 }
                 skip_go::SkipGoTx::EvmTx(evm_tx) => {
                     debug!("Executing EVM Tx: {:#?}", evm_tx);
@@ -1586,6 +1635,12 @@ impl DydxClient {
                         log_string.clone(),
                     )
                     .await?;
+                    last_tracking = Some(DydxTransferTracking {
+                        tx_hash: format!("{:#x}", tx_hash),
+                        chain_id: ARBITRUM_CHAIN_ID.to_string(),
+                        amount_usd: Decimal::ZERO,
+                        expected_time_to_complete_secs,
+                    });
                 }
                 skip_go::SkipGoTx::SvmTx(svm_tx) => {
                     return Err(eyre::eyre!(
@@ -1595,7 +1650,7 @@ impl DydxClient {
                 }
             }
         }
-        Ok(())
+        Ok(last_tracking)
     }
 
     async fn approve_erc20(&self, approval: skip_go::EvmRequiredErc20Approval) -> Result<()> {

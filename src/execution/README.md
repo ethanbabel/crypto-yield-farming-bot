@@ -180,10 +180,8 @@ The long-running executor binary loads the exact persisted `strategy_run_id` and
 The planner normalizes raw target weights before execution:
 
 $$
-w_i^{\text{target}} = \frac{w_i}{\max\left(\sum_j w_j, 1\right)}
+w_i^{\text{target}} = \frac{w_i}{\sum_j w_j}
 $$
-
-in the practical sense that if the raw sum is non-positive, the code uses `1` as the denominator to avoid division by zero.
 
 Execution therefore always works from a well-defined normalized weight map.
 
@@ -214,6 +212,8 @@ $$
 B_{\text{arb stable}} = \max\left(B_{\text{arb floor}},\ p_{\text{arb}} \cdot V_{\text{arb non-native}}\right)
 $$
 
+where $p_{\text{arb}}$ is a operator-specified buffer percentage parameter. 
+
 The deployment capital base is then:
 
 $$
@@ -232,7 +232,7 @@ $$
 R_{\text{base}} = V_{\text{capital base}} \cdot r
 $$
 
-where \(r = \text{reserve\_pct}\).
+where $r = \text{reserve\\_pct}$.
 
 This is a broad capital haircut that keeps some capital undeployed even before dYdX-specific hedge requirements are considered.
 
@@ -277,11 +277,13 @@ L_{\min} = \min_i L_i
 $$
 
 $$
-G_{\text{low-lev}} = \frac{0.25 \cdot V_{\text{investable}}}{L_{\min}}
+G_{\text{low-lev}} = \frac{V_{\text{investable}}}{L_{\min}}
 $$
 
+The guard is then blended in as:
+
 $$
-M_{\text{guard}} = 0.75 \cdot M_{\text{raw}} + G_{\text{low-lev}}
+M_{\text{guard}} = 0.75 \cdot M_{\text{raw}} + 0.25 \cdot G_{\text{low-lev}}
 $$
 
 Then:
@@ -310,6 +312,8 @@ $$
 E_{\text{required}} = M_{\text{required}} + F_{\text{required}}
 $$
 
+where $F$ indicates dYdX free collateral, $B$ indicates buffer ($p_{\text{dYdX}}$ being a operator-specified buffer percentage parameter), and $E$ indicating dYdX equity. 
+
 The dYdX percentage buffer is intentionally based on target free collateral rather than on total subaccount equity.
 
 ### 2.6 Upper dYdX Capital Bound
@@ -333,6 +337,8 @@ Separately, the engine computes a native gas target:
 $$
 V_{\text{gas target}} = V_{\text{arbitrum}} \cdot g
 $$
+
+where $g$ is an operator-specified parameter that determines what percentage of capital on Arbitrum should be reserved for a gas budget. Then
 
 $$
 Q_{\text{gas target}} =
@@ -376,11 +382,11 @@ $$
 The dYdX capacity ratios are:
 
 $$
-\rho_E = \operatorname{clamp}\left(\frac{E_{\text{current}}}{E_{\text{required}}},\ 0,\ 1\right)
+\rho_E = \text{clamp}\left(\frac{E_{\text{current}}}{E_{\text{required}}},\ 0,\ 1\right)
 $$
 
 $$
-\rho_F = \operatorname{clamp}\left(\frac{F_{\text{current}}}{F_{\text{required}}},\ 0,\ 1\right)
+\rho_F = \text{clamp}\left(\frac{F_{\text{current}}}{F_{\text{required}}},\ 0,\ 1\right)
 $$
 
 and the hedge-limited investable capital is:
@@ -389,7 +395,7 @@ $$
 V_{\text{hedge-limited}} = V_{\text{investable, ideal}} \cdot \min(\rho_E,\rho_F)
 $$
 
-If the engine has just initiated an Arbitrum \(\rightarrow\) dYdX top-up in the current cycle, it also reserves that pending amount on the Arbitrum side:
+If the engine has just initiated an Arbitrum $\rightarrow$ dYdX top-up in the current cycle, it also reserves that pending amount on the Arbitrum side:
 
 $$
 V_{\text{arb deployable, effective}} = \max\left(V_{\text{arb deployable}} - V_{\text{pending top-up}},\ 0\right)
@@ -608,7 +614,7 @@ So if multiple GM markets all contribute `ETH` long-side exposure, the engine:
 - compares that single net target to the current `ETH-USD` position on dYdX
 - emits one net `HedgeOrder` for `ETH`
 
-Formally, for a given perp ticker \(k\):
+Formally, for a given perp ticker $k$:
 
 $$
 Q_k^{\text{target perp}} = \sum_{i \in k} Q_{i,\text{target perp}}
@@ -618,7 +624,7 @@ $$
 \Delta Q_k^{\text{perp}} = Q_k^{\text{target perp}} - Q_k^{\text{current perp}}
 $$
 
-and the engine emits one hedge order from \(\Delta Q_k^{\text{perp}}\) if the USD size exceeds the planner threshold.
+and the engine emits one hedge order from $\Delta Q_k^{\text{perp}}$ if the USD size exceeds the planner threshold.
 
 This avoids submitting separate dYdX orders for each GM market when the hedge venue only cares about the final net perp position.
 

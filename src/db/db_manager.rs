@@ -680,6 +680,28 @@ impl DbManager {
         Ok(tokens)
     }
 
+    /// Fetch all market index tokens
+    #[instrument(skip(self))]
+    pub async fn get_all_index_tokens(
+        &self,
+    ) -> Result<Vec<(Address, String, u8, Decimal)>, sqlx::Error> {
+        let tokens: Vec<(Address, String, u8, Decimal)> =
+            token_prices_queries::get_all_index_tokens(&self.pool)
+                .await?
+                .into_iter()
+                .map(|row| {
+                    (
+                        Address::from_str(&row.0).unwrap_or_default(),
+                        row.1,
+                        row.2 as u8,
+                        row.3,
+                    )
+                })
+                .collect();
+        debug!(count = tokens.len(), "Fetched all index tokens");
+        Ok(tokens)
+    }
+
     /// Fetch all market tokens
     #[instrument(skip(self))]
     pub async fn get_all_market_tokens(

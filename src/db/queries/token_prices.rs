@@ -335,6 +335,47 @@ pub async fn get_all_asset_tokens(
     Ok(tokens)
 }
 
+/// Fetch all distinct market index tokens.
+pub async fn get_all_index_tokens(
+    pool: &PgPool,
+) -> Result<Vec<(String, String, u8, Decimal)>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        WITH index_token_ids AS (
+            SELECT DISTINCT index_token_id AS token_id
+            FROM markets
+        )
+        SELECT
+            t.address,
+            t.symbol,
+            t.decimals,
+            tp.mid_price
+        FROM index_token_ids i
+        JOIN tokens t ON t.id = i.token_id
+        JOIN LATERAL (
+            SELECT mid_price
+            FROM token_prices
+            WHERE token_id = i.token_id
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) tp ON true
+        ORDER BY i.token_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let tokens = rows
+        .into_iter()
+        .map(|row| {
+            let decimals: i32 = row.get(2);
+            (row.get(0), row.get(1), decimals as u8, row.get(3))
+        })
+        .collect();
+
+    Ok(tokens)
+}
+
 /// Fetch latest price props for a specific market
 pub async fn get_latest_price_props_for_market(
     pool: &PgPool,

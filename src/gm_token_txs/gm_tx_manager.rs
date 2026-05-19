@@ -738,14 +738,7 @@ impl GmTxManager {
             .ok_or_else(|| eyre::eyre!("Market token not found: {}", request.market))?;
         let index_token_info = self
             .wallet_manager
-            .asset_tokens
-            .get(&market_token_info.index_token_address)
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "Index token not found: {}",
-                    market_token_info.index_token_address
-                )
-            })?;
+            .get_index_token_info(market_token_info.index_token_address)?;
         let long_token_info = self
             .wallet_manager
             .asset_tokens
@@ -853,14 +846,7 @@ impl GmTxManager {
             .ok_or_else(|| eyre::eyre!("Market token not found: {}", request.market))?;
         let index_token_info = self
             .wallet_manager
-            .asset_tokens
-            .get(&market_token_info.index_token_address)
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "Index token not found: {}",
-                    market_token_info.index_token_address
-                )
-            })?;
+            .get_index_token_info(market_token_info.index_token_address)?;
         let long_token_info = self
             .wallet_manager
             .asset_tokens

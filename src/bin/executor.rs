@@ -261,7 +261,7 @@ async fn handle_strategy_run_signal(
     let executing_run_id = strategy_run.id;
     info!(
         strategy_run_id = executing_run_id,
-         "Starting execution cycle for completed strategy run"
+        "Starting execution cycle for completed strategy run"
     );
     let cycle = execute_strategy_run_cycle(cfg, db, strategy_run, last_progress);
     match time::timeout(std::time::Duration::from_secs(run_timeout_secs), cycle).await {

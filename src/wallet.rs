@@ -43,6 +43,7 @@ pub struct WalletManager {
     pub native_token: TokenInfo,
     pub all_tokens: HashMap<Address, TokenInfo>,
     pub asset_tokens: HashMap<Address, TokenInfo>,
+    pub index_tokens: HashMap<Address, TokenInfo>,
     pub market_tokens: HashMap<Address, MarketTokenInfo>,
 }
 
@@ -60,6 +61,7 @@ impl WalletManager {
             },
             all_tokens: HashMap::new(),
             asset_tokens: HashMap::new(),
+            index_tokens: HashMap::new(),
             market_tokens: HashMap::new(),
         })
     }
@@ -84,6 +86,7 @@ impl WalletManager {
     #[instrument(skip(self, db))]
     pub async fn load_tokens(&mut self, db: &DbManager) -> Result<()> {
         self.load_asset_tokens(db).await?;
+        self.load_index_tokens(db).await?;
         self.load_market_tokens(db).await?;
         Ok(())
     }
@@ -104,6 +107,25 @@ impl WalletManager {
             }
             self.all_tokens.insert(token_info.address, token_info.clone());
             self.asset_tokens.insert(token_info.address, token_info);
+        }
+        Ok(())
+    }
+
+    /// Load all market index tokens from the database.
+    ///
+    /// These are intentionally tracked separately from asset/all token maps because synthetic
+    /// market index tokens are not part of the wallet's ERC-20 balance universe.
+    #[instrument(skip(self, db))]
+    pub async fn load_index_tokens(&mut self, db: &DbManager) -> Result<()> {
+        let index_tokens = db.get_all_index_tokens().await?;
+        for token in index_tokens {
+            let token_info = TokenInfo {
+                address: token.0,
+                symbol: token.1,
+                decimals: token.2,
+                last_mid_price_usd: token.3,
+            };
+            self.index_tokens.insert(token_info.address, token_info);
         }
         Ok(())
     }
@@ -166,6 +188,13 @@ impl WalletManager {
         self.all_tokens
             .get(&token_address)
             .ok_or_else(|| eyre::eyre!("Token not found: {}", token_address))
+    }
+
+    /// Resolve market index token metadata by address.
+    pub fn get_index_token_info(&self, token_address: Address) -> Result<&TokenInfo> {
+        self.index_tokens
+            .get(&token_address)
+            .ok_or_else(|| eyre::eyre!("Index token not found: {}", token_address))
     }
 
     /// Get ERC20 token balance as U256

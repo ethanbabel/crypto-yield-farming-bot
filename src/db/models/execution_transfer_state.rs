@@ -12,6 +12,8 @@ pub struct ExecutionTransferStateModel {
     pub tx_hash: Option<String>,
     pub chain_id: Option<String>,
     pub amount_usd: Option<Decimal>,
+    pub source_balance_before: Option<Decimal>,
+    pub destination_balance_before: Option<Decimal>,
     pub expected_time_to_complete_secs: Option<i64>,
     pub initiated_at: Option<DateTime<Utc>>,
 }
@@ -22,6 +24,8 @@ pub struct NewExecutionTransferStateModel {
     pub tx_hash: Option<String>,
     pub chain_id: Option<String>,
     pub amount_usd: Option<Decimal>,
+    pub source_balance_before: Option<Decimal>,
+    pub destination_balance_before: Option<Decimal>,
     pub expected_time_to_complete_secs: Option<i64>,
     pub initiated_at: Option<DateTime<Utc>>,
 }

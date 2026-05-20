@@ -15,6 +15,8 @@ pub async fn get_execution_transfer_state(
             tx_hash,
             chain_id,
             amount_usd,
+            source_balance_before,
+            destination_balance_before,
             expected_time_to_complete_secs,
             initiated_at
         FROM execution_transfer_state
@@ -37,16 +39,20 @@ pub async fn upsert_execution_transfer_state(
             tx_hash,
             chain_id,
             amount_usd,
+            source_balance_before,
+            destination_balance_before,
             expected_time_to_complete_secs,
             initiated_at
         )
-        VALUES (TRUE, $1, $2, $3, $4, $5, $6)
+        VALUES (TRUE, $1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (singleton_id) DO UPDATE
         SET
             direction = EXCLUDED.direction,
             tx_hash = EXCLUDED.tx_hash,
             chain_id = EXCLUDED.chain_id,
             amount_usd = EXCLUDED.amount_usd,
+            source_balance_before = EXCLUDED.source_balance_before,
+            destination_balance_before = EXCLUDED.destination_balance_before,
             expected_time_to_complete_secs = EXCLUDED.expected_time_to_complete_secs,
             initiated_at = EXCLUDED.initiated_at
         RETURNING
@@ -55,6 +61,8 @@ pub async fn upsert_execution_transfer_state(
             tx_hash,
             chain_id,
             amount_usd,
+            source_balance_before,
+            destination_balance_before,
             expected_time_to_complete_secs,
             initiated_at
         "#,
@@ -63,6 +71,8 @@ pub async fn upsert_execution_transfer_state(
     .bind(&state.tx_hash)
     .bind(&state.chain_id)
     .bind(state.amount_usd)
+    .bind(state.source_balance_before)
+    .bind(state.destination_balance_before)
     .bind(state.expected_time_to_complete_secs)
     .bind(state.initiated_at)
     .fetch_one(pool)

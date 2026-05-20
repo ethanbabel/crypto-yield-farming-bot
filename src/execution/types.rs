@@ -17,6 +17,8 @@ pub struct PortfolioSnapshot {
     pub dydx_main_usdc: Decimal,
     pub dydx_subaccount_equity: Decimal,
     pub dydx_free_collateral: Decimal,
+    pub inflight_transfer_value_usd: Decimal,
+    pub inflight_transfer_direction: Option<String>,
     pub total_value_usd: Decimal,
     pub market_value_usd: Decimal,
     pub asset_value_usd: Decimal,
@@ -110,16 +112,32 @@ pub struct RebalancePlan {
 
 #[derive(Debug, Clone)]
 pub struct PlannerConfig {
+    /// Minimum absolute weight change required before a market rebalance delta is actionable.
     pub min_weight_delta: Decimal,
+    /// Minimum USD notional for normal execution actions.
     pub min_value_usd: Decimal,
+    /// Minimum USD notional for stable-only unwind actions.
     pub unwind_min_value_usd: Decimal,
+    /// Native ETH value to retain during stable-only mode for future gas spending.
     pub stable_only_native_buffer_usd: Decimal,
+    /// Hard floor of liquid stablecoin value that should remain on Arbitrum.
     pub arbitrum_stable_buffer_floor_usd: Decimal,
+    /// Percentage-based liquid stablecoin buffer on Arbitrum, applied to non-native Arbitrum capital.
     pub arbitrum_stable_buffer_pct: Decimal,
+    /// Hard floor of free collateral that should remain available on the dYdX subaccount.
     pub dydx_free_collateral_buffer_floor_usd: Decimal,
+    /// Percentage-based free-collateral buffer on dYdX, applied to the target free-collateral requirement.
     pub dydx_free_collateral_buffer_pct: Decimal,
+    /// Generic portfolio-level reserve haircut before deployment sizing.
     pub reserve_pct: Decimal,
+    /// Target native ETH gas reserve as a percentage of Arbitrum capital.
     pub gas_reserve_pct: Decimal,
+    /// Additional slippage cushion applied when buying native ETH to replenish the gas reserve.
+    pub gas_topup_slippage_buffer_pct: Decimal,
+    /// Minimum USDC balance to retain in the dYdX main account when moving funds into the subaccount.
+    pub dydx_main_account_min_usdc: Decimal,
+    /// Maximum percentage of the dYdX main-account USDC balance that can be moved into the subaccount.
+    pub dydx_main_account_max_subaccount_transfer_pct: Decimal,
 }
 
 impl Default for PlannerConfig {
@@ -135,6 +153,9 @@ impl Default for PlannerConfig {
             dydx_free_collateral_buffer_pct: Decimal::new(10, 2),
             reserve_pct: Decimal::new(5, 2),
             gas_reserve_pct: Decimal::new(1, 2),
+            gas_topup_slippage_buffer_pct: Decimal::new(2, 2),
+            dydx_main_account_min_usdc: Decimal::new(1, 0),
+            dydx_main_account_max_subaccount_transfer_pct: Decimal::new(98, 2),
         }
     }
 }

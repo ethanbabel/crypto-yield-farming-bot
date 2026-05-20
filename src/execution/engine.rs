@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::Utc;
+use ethers::providers::Middleware;
 use ethers::types::Address;
 use eyre::Result;
 use rust_decimal::Decimal;
@@ -298,6 +300,8 @@ impl ExecutionEngine {
     }
 
     pub async fn run_unwind_to_stable(&self, target_stable_symbol: &str) -> Result<()> {
+        self.refresh_pending_execution_transfer("stable-only unwind cycle")
+            .await?;
         let mut snapshot = self.build_snapshot().await?;
         let target_stable = self
             .resolve_target_stable_token(target_stable_symbol, &snapshot.asset_balances)
@@ -482,6 +486,21 @@ impl ExecutionEngine {
         let transfer_status = match transfer_status {
             Ok(status) => status,
             Err(error) => {
+                if let Some(inferred_status) = self
+                    .infer_pending_transfer_status_from_live_balances(&pending_state)
+                    .await?
+                {
+                    return self
+                        .handle_reconciled_transfer_status(
+                            cycle_name,
+                            &pending_state,
+                            tx_hash,
+                            chain_id,
+                            inferred_status,
+                            true,
+                        )
+                        .await;
+                }
                 warn!(
                     cycle_name,
                     tx_hash,
@@ -493,6 +512,26 @@ impl ExecutionEngine {
             }
         };
 
+        self.handle_reconciled_transfer_status(
+            cycle_name,
+            &pending_state,
+            tx_hash,
+            chain_id,
+            transfer_status,
+            false,
+        )
+        .await
+    }
+
+    async fn handle_reconciled_transfer_status(
+        &self,
+        cycle_name: &str,
+        pending_state: &crate::db::models::execution_transfer_state::ExecutionTransferStateModel,
+        tx_hash: &str,
+        chain_id: &str,
+        transfer_status: SkipGoTransferState,
+        inferred_from_balances: bool,
+    ) -> Result<PendingTransferGate> {
         match transfer_status {
             SkipGoTransferState::Pending => {
                 info!(
@@ -502,7 +541,7 @@ impl ExecutionEngine {
                     direction = ?pending_state.direction,
                     amount_usd = ?pending_state.amount_usd,
                     initiated_at = ?pending_state.initiated_at,
-                    "dYdX transfer still pending; deferring this cycle"
+                    "dYdX transfer still pending"
                 );
                 Ok(PendingTransferGate::Pending)
             }
@@ -513,6 +552,7 @@ impl ExecutionEngine {
                     chain_id,
                     direction = ?pending_state.direction,
                     amount_usd = ?pending_state.amount_usd,
+                    inferred_from_balances,
                     "Pending dYdX transfer completed; clearing tracked transfer state"
                 );
                 self.clear_execution_transfer_state().await?;
@@ -525,12 +565,89 @@ impl ExecutionEngine {
                     chain_id,
                     direction = ?pending_state.direction,
                     amount_usd = ?pending_state.amount_usd,
+                    inferred_from_balances,
                     "Pending dYdX transfer failed; clearing tracked transfer state"
                 );
                 self.clear_execution_transfer_state().await?;
                 Ok(PendingTransferGate::Continue)
             }
         }
+    }
+
+    async fn refresh_pending_execution_transfer(&self, cycle_name: &str) -> Result<()> {
+        let _ = self
+            .reconcile_pending_execution_transfer(cycle_name)
+            .await?;
+        Ok(())
+    }
+
+    async fn infer_pending_transfer_status_from_live_balances(
+        &self,
+        pending_state: &crate::db::models::execution_transfer_state::ExecutionTransferStateModel,
+    ) -> Result<Option<SkipGoTransferState>> {
+        let Some(direction) = pending_state.direction.as_deref() else {
+            return Ok(None);
+        };
+        let Some(amount_usd) = pending_state.amount_usd else {
+            return Ok(None);
+        };
+        let Some(source_balance_before) = pending_state.source_balance_before else {
+            return Ok(None);
+        };
+        let Some(destination_balance_before) = pending_state.destination_balance_before else {
+            return Ok(None);
+        };
+        let Some(usdc_token) = self.get_usdc_token() else {
+            return Ok(None);
+        };
+
+        let current_arbitrum_usdc = self.wallet_manager.get_token_balance(usdc_token.address).await?;
+        let (_, dydx_main_usdc, dydx_subaccount_equity, _) = self.fetch_dydx_snapshot_state().await;
+        let current_dydx_total = dydx_main_usdc + dydx_subaccount_equity;
+        let tolerance = Decimal::new(5, 2).max(amount_usd * Decimal::new(2, 2));
+
+        let inferred_status = match direction {
+            EXECUTION_TRANSFER_DIRECTION_TO_DYDX => {
+                let destination_funded =
+                    current_dydx_total + tolerance >= destination_balance_before + amount_usd;
+                let source_recovered = current_arbitrum_usdc + tolerance >= source_balance_before;
+                if destination_funded {
+                    Some(SkipGoTransferState::Completed)
+                } else if source_recovered {
+                    Some(SkipGoTransferState::Failed)
+                } else {
+                    None
+                }
+            }
+            EXECUTION_TRANSFER_DIRECTION_FROM_DYDX => {
+                let destination_funded =
+                    current_arbitrum_usdc + tolerance >= destination_balance_before + amount_usd;
+                let source_recovered = current_dydx_total + tolerance >= source_balance_before;
+                if destination_funded {
+                    Some(SkipGoTransferState::Completed)
+                } else if source_recovered {
+                    Some(SkipGoTransferState::Failed)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(status) = inferred_status {
+            info!(
+                direction,
+                amount_usd = %amount_usd,
+                source_balance_before = %source_balance_before,
+                destination_balance_before = %destination_balance_before,
+                current_arbitrum_usdc = %current_arbitrum_usdc,
+                current_dydx_total = %current_dydx_total,
+                inferred_status = ?status,
+                "Inferred pending dYdX transfer status from live balances"
+            );
+        }
+
+        Ok(inferred_status)
     }
 
     async fn sync_dydx_capital(
@@ -606,15 +723,25 @@ impl ExecutionEngine {
         let free_shortfall = (reserve_state.required_free_collateral
             - snapshot.dydx_free_collateral)
             .max(Decimal::ZERO);
-        let amount = equity_shortfall
+        let requested_amount = equity_shortfall
             .max(free_shortfall)
             .min(snapshot.dydx_main_usdc);
+        let retained_floor = self.planner_config.dydx_main_account_min_usdc.max(
+            snapshot.dydx_main_usdc
+                * (Decimal::ONE - self.planner_config.dydx_main_account_max_subaccount_transfer_pct),
+        );
+        let max_transferable =
+            (snapshot.dydx_main_usdc - retained_floor).max(Decimal::ZERO);
+        let amount = requested_amount.min(max_transferable);
         debug!(
             dydx_main_usdc = %snapshot.dydx_main_usdc,
             dydx_subaccount_equity = %snapshot.dydx_subaccount_equity,
             dydx_free_collateral = %snapshot.dydx_free_collateral,
             required_equity = %reserve_state.required_equity,
             required_free_collateral = %reserve_state.required_free_collateral,
+            requested_amount_to_move = %requested_amount,
+            retained_main_account_floor = %retained_floor,
+            max_transferable_to_subaccount = %max_transferable,
             amount_to_move = %amount,
             "Evaluated whether dYdX main-account USDC should be moved into the subaccount"
         );
@@ -708,13 +835,15 @@ impl ExecutionEngine {
 
         let tracking = {
             let mut client = self.dydx_client.lock().await;
-            client.dydx_deposit(Some(amount), None, true, None).await?
+            client.dydx_deposit(Some(amount), None, false, None).await?
         };
 
         if let Some(tracking) = tracking {
             self.persist_execution_transfer_state(
                 EXECUTION_TRANSFER_DIRECTION_TO_DYDX,
                 &tracking,
+                live_usdc_balance,
+                snapshot.dydx_main_usdc + snapshot.dydx_subaccount_equity,
             )
             .await?;
             info!(
@@ -776,14 +905,22 @@ impl ExecutionEngine {
                     .await?;
             }
             client
-                .dydx_withdrawal(Some(total_withdraw_amount), None, true, None)
+                .dydx_withdrawal(Some(total_withdraw_amount), None, false, None)
                 .await?
         };
 
         if let Some(tracking) = tracking {
+            let Some(usdc_token) = self.get_usdc_token() else {
+                warn!("Unable to find Arbitrum USDC token while persisting dYdX withdrawal state");
+                return Ok(());
+            };
+            let destination_arbitrum_usdc =
+                self.wallet_manager.get_token_balance(usdc_token.address).await?;
             self.persist_execution_transfer_state(
                 EXECUTION_TRANSFER_DIRECTION_FROM_DYDX,
                 &tracking,
+                total_dydx_capital,
+                destination_arbitrum_usdc,
             )
             .await?;
             info!(
@@ -876,6 +1013,8 @@ impl ExecutionEngine {
         &self,
         direction: &str,
         tracking: &DydxTransferTracking,
+        source_balance_before: Decimal,
+        destination_balance_before: Decimal,
     ) -> Result<()> {
         self.db_manager
             .upsert_execution_transfer_state(&NewExecutionTransferStateModel {
@@ -883,6 +1022,8 @@ impl ExecutionEngine {
                 tx_hash: Some(tracking.tx_hash.clone()),
                 chain_id: Some(tracking.chain_id.clone()),
                 amount_usd: Some(tracking.amount_usd),
+                source_balance_before: Some(source_balance_before),
+                destination_balance_before: Some(destination_balance_before),
                 expected_time_to_complete_secs: Some(
                     tracking.expected_time_to_complete_secs as i64,
                 ),
@@ -899,6 +1040,8 @@ impl ExecutionEngine {
                 tx_hash: None,
                 chain_id: None,
                 amount_usd: None,
+                source_balance_before: None,
+                destination_balance_before: None,
                 expected_time_to_complete_secs: None,
                 initiated_at: None,
             })
@@ -956,14 +1099,20 @@ impl ExecutionEngine {
 
         let (hedge_positions, dydx_main_usdc, dydx_subaccount_equity, dydx_free_collateral) =
             self.fetch_dydx_snapshot_state().await;
+        let transfer_state = self.db_manager.get_execution_transfer_state().await?;
+        let inflight_transfer_value_usd = transfer_state.amount_usd.unwrap_or(Decimal::ZERO);
+        let inflight_transfer_direction = transfer_state.direction.clone();
 
         let native_value_usd = native_balance * self.wallet_manager.native_token.last_mid_price_usd;
         let arbitrum_value_usd = market_value_usd + asset_value_usd + native_value_usd;
-        let total_value_usd = arbitrum_value_usd + dydx_main_usdc + dydx_subaccount_equity;
+        let total_value_usd =
+            arbitrum_value_usd + dydx_main_usdc + dydx_subaccount_equity + inflight_transfer_value_usd;
         debug!(
             market_value_usd = %market_value_usd,
             asset_value_usd = %asset_value_usd,
             native_value_usd = %native_value_usd,
+            inflight_transfer_value_usd = %inflight_transfer_value_usd,
+            inflight_transfer_direction = ?inflight_transfer_direction,
             arbitrum_value_usd = %arbitrum_value_usd,
             dydx_main_usdc = %dydx_main_usdc,
             dydx_subaccount_equity = %dydx_subaccount_equity,
@@ -988,6 +1137,8 @@ impl ExecutionEngine {
             dydx_main_usdc,
             dydx_subaccount_equity,
             dydx_free_collateral,
+            inflight_transfer_value_usd,
+            inflight_transfer_direction,
             total_value_usd,
             market_value_usd,
             asset_value_usd,
@@ -997,8 +1148,11 @@ impl ExecutionEngine {
 
     fn capital_base_for_deployment(&self, snapshot: &PortfolioSnapshot) -> Decimal {
         let arbitrum_stable_buffer = self.compute_arbitrum_stable_buffer_usd(snapshot);
-        (snapshot.total_value_usd - snapshot.native_value_usd - arbitrum_stable_buffer)
-            .max(Decimal::ZERO)
+        (snapshot.total_value_usd
+            - snapshot.native_value_usd
+            - snapshot.inflight_transfer_value_usd
+            - arbitrum_stable_buffer)
+        .max(Decimal::ZERO)
     }
 
     fn current_arbitrum_deployable_capital(&self, snapshot: &PortfolioSnapshot) -> Decimal {
@@ -1142,6 +1296,21 @@ impl ExecutionEngine {
             gas_reserve_target_usd,
             gas_reserve_target_eth,
         })
+    }
+
+    async fn estimate_gas_topup_cushion_eth(&self) -> Result<Decimal> {
+        let gas_price_wei = self
+            .wallet_manager
+            .signer
+            .provider()
+            .get_gas_price()
+            .await?;
+        let gas_price_eth =
+            Decimal::from_str(&gas_price_wei.to_string())? / Decimal::from(10_u64.pow(18));
+        // Somewhat arbitrary cushion for the gas cost of a top-up tx, but given
+        // we also include a conservative slippage buffer this should be sufficient
+        let estimated_gas_units = Decimal::from(220_000u64); 
+        Ok(estimated_gas_units * gas_price_eth)
     }
 
     async fn compute_required_dydx_reserve(
@@ -1412,12 +1581,24 @@ impl ExecutionEngine {
         );
 
         if current_eth < target_eth {
-            let mut needed = target_eth - current_eth;
+            let gas_cushion = match self.estimate_gas_topup_cushion_eth().await {
+                Ok(cushion) => cushion,
+                Err(error) => {
+                    warn!(error = ?error, "Failed to estimate gas-topup transaction fee cushion");
+                    Decimal::ZERO
+                }
+            };
+            let slippage_multiplier =
+                Decimal::ONE + self.planner_config.gas_topup_slippage_buffer_pct;
+            let mut needed = ((target_eth - current_eth).max(Decimal::ZERO) + gas_cushion)
+                * slippage_multiplier;
             let weth_address = WNT_ADDRESS.parse().unwrap();
             let weth_balance = self.wallet_manager.get_token_balance(weth_address).await?;
             info!(
                 current_eth = %current_eth,
                 target_eth = %target_eth,
+                gas_cushion_eth = %gas_cushion,
+                slippage_multiplier = %slippage_multiplier,
                 needed_eth = %needed,
                 available_weth = %weth_balance,
                 "Gas reserve below target; attempting top-up"
@@ -1472,14 +1653,25 @@ impl ExecutionEngine {
                                     warn!(error = ?e, "Failed to move funds from subaccount for gas reserve");
                                 } else {
                                     match client
-                                        .dydx_withdrawal(Some(withdraw_amount), None, true, None)
+                                        .dydx_withdrawal(Some(withdraw_amount), None, false, None)
                                         .await
                                     {
                                         Ok(tracking) => {
                                             if let Some(tracking) = tracking {
+                                                let Some(usdc_token) = self.get_usdc_token() else {
+                                                    warn!("Unable to find Arbitrum USDC token while persisting gas-reserve transfer state");
+                                                    return Ok(false);
+                                                };
+                                                let destination_stable_balance = self
+                                                    .wallet_manager
+                                                    .get_token_balance(usdc_token.address)
+                                                    .await?;
                                                 self.persist_execution_transfer_state(
                                                     EXECUTION_TRANSFER_DIRECTION_FROM_DYDX,
                                                     &tracking,
+                                                    snapshot.dydx_main_usdc
+                                                        + snapshot.dydx_subaccount_equity,
+                                                    destination_stable_balance,
                                                 )
                                                 .await?;
                                             }
@@ -2688,6 +2880,7 @@ impl ExecutionEngine {
                 symbol,
                 size: Some(*balance),
                 usd_value,
+                transfer_direction: None,
             });
         }
 
@@ -2717,6 +2910,7 @@ impl ExecutionEngine {
                 symbol,
                 size: Some(*balance),
                 usd_value,
+                transfer_direction: None,
             });
         }
 
@@ -2730,6 +2924,23 @@ impl ExecutionEngine {
                 symbol: Some("ETH".to_string()),
                 size: Some(native_balance),
                 usd_value: Some(snapshot.native_value_usd),
+                transfer_direction: None,
+            });
+        }
+
+        if snapshot.inflight_transfer_value_usd > Decimal::ZERO {
+            let inflight_token_id = self
+                .get_usdc_token()
+                .and_then(|token| self.db_manager.token_id_map.get(&token.address).cloned());
+            positions.push(NewPositionSnapshotModel {
+                portfolio_snapshot_id,
+                position_type: "inflight_transfer".to_string(),
+                market_id: None,
+                token_id: inflight_token_id,
+                symbol: Some("USDC".to_string()),
+                size: Some(snapshot.inflight_transfer_value_usd),
+                usd_value: Some(snapshot.inflight_transfer_value_usd),
+                transfer_direction: snapshot.inflight_transfer_direction.clone(),
             });
         }
 
@@ -2745,6 +2956,7 @@ impl ExecutionEngine {
                 symbol: Some(ticker.clone()),
                 size: Some(*size),
                 usd_value: None,
+                transfer_direction: None,
             });
         }
 
@@ -2789,7 +3001,7 @@ impl ExecutionEngine {
 
     fn snapshot_summary(&self, snapshot: &PortfolioSnapshot) -> String {
         format!(
-            "total={} arbitrum={} gm={} assets={} native={} native_usd={} dydx_main_usdc={} dydx_equity={} dydx_free_collateral={} gm_positions={} asset_positions={} hedge_positions={}",
+            "total={} arbitrum={} gm={} assets={} native={} native_usd={} dydx_main_usdc={} dydx_equity={} dydx_free_collateral={} inflight_transfer_usd={} inflight_transfer_direction={:?} gm_positions={} asset_positions={} hedge_positions={}",
             snapshot.total_value_usd,
             snapshot.arbitrum_value_usd,
             snapshot.market_value_usd,
@@ -2799,6 +3011,8 @@ impl ExecutionEngine {
             snapshot.dydx_main_usdc,
             snapshot.dydx_subaccount_equity,
             snapshot.dydx_free_collateral,
+            snapshot.inflight_transfer_value_usd,
+            snapshot.inflight_transfer_direction,
             snapshot.market_balances.len(),
             snapshot.asset_balances.len(),
             snapshot.hedge_positions.len(),

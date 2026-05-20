@@ -971,6 +971,24 @@ impl DydxClient {
 
         let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
+        let balance_change_tolerance = Decimal::new(1, 2).max(amount * Decimal::new(2, 2));
+        let expected_subaccount_balance =
+            dydx_subaccount_usdc_balance_initial + amount - balance_change_tolerance;
+        let expected_main_balance =
+            (dydx_usdc_balance_initial - amount).max(Decimal::ZERO) + balance_change_tolerance;
+
+        if dydx_subaccount_usdc_balance_final < expected_subaccount_balance
+            || dydx_usdc_balance_final > expected_main_balance
+        {
+            return Err(eyre::eyre!(
+                "dYdX subaccount deposit did not settle as expected: main {} -> {}, subaccount {} -> {}, requested amount {}",
+                dydx_usdc_balance_initial,
+                dydx_usdc_balance_final,
+                dydx_subaccount_usdc_balance_initial,
+                dydx_subaccount_usdc_balance_final,
+                amount
+            ));
+        }
 
         info!(
             tx_hash = ?tx_hash,
@@ -1041,6 +1059,24 @@ impl DydxClient {
 
         let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
         let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
+        let balance_change_tolerance = Decimal::new(1, 2).max(amount * Decimal::new(2, 2));
+        let expected_main_balance =
+            dydx_usdc_balance_initial + amount - balance_change_tolerance;
+        let expected_subaccount_balance =
+            (dydx_subaccount_usdc_balance_initial - amount).max(Decimal::ZERO) + balance_change_tolerance;
+
+        if dydx_usdc_balance_final < expected_main_balance
+            || dydx_subaccount_usdc_balance_final > expected_subaccount_balance
+        {
+            return Err(eyre::eyre!(
+                "dYdX subaccount withdrawal did not settle as expected: main {} -> {}, subaccount {} -> {}, requested amount {}",
+                dydx_usdc_balance_initial,
+                dydx_usdc_balance_final,
+                dydx_subaccount_usdc_balance_initial,
+                dydx_subaccount_usdc_balance_final,
+                amount
+            ));
+        }
 
         info!(
             tx_hash = ?tx_hash,

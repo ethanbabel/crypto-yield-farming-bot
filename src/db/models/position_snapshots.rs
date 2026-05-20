@@ -12,6 +12,7 @@ pub struct PositionSnapshotModel {
     pub symbol: Option<String>,
     pub size: Option<Decimal>,
     pub usd_value: Option<Decimal>,
+    pub transfer_direction: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -23,4 +24,5 @@ pub struct NewPositionSnapshotModel {
     pub symbol: Option<String>,
     pub size: Option<Decimal>,
     pub usd_value: Option<Decimal>,
+    pub transfer_direction: Option<String>,
 }

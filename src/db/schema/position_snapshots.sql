@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS position_snapshots (
     token_id INTEGER REFERENCES tokens(id),
     symbol TEXT,
     size NUMERIC,
-    usd_value NUMERIC
+    usd_value NUMERIC,
+    transfer_direction TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_position_snapshots_snapshot

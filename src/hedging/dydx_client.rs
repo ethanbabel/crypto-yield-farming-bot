@@ -61,6 +61,13 @@ abigen!(
     ]"#
 );
 
+fn is_tradable_perpetual_market(market: &PerpetualMarket) -> bool {
+    matches!(
+        market.status,
+        dydx::indexer::types::PerpetualMarketStatus::Active
+    )
+}
+
 pub struct DydxClient {
     config: Arc<config::Config>,
     wallet_manager: Arc<WalletManager>,
@@ -291,9 +298,14 @@ impl DydxClient {
 
         for (token_symbol, market_option) in token_perp_map {
             if let Some(market) = market_option {
-                let funding_rate = Decimal::from_str(&market.next_funding_rate.to_plain_string())?;
-                let max_leverage = self.calculate_max_leverage(market).await?;
-                token_hedgeinfo_map.insert(token_symbol, Some((funding_rate, max_leverage)));
+                if is_tradable_perpetual_market(&market) {
+                    let funding_rate =
+                        Decimal::from_str(&market.next_funding_rate.to_plain_string())?;
+                    let max_leverage = self.calculate_max_leverage(market).await?;
+                    token_hedgeinfo_map.insert(token_symbol, Some((funding_rate, max_leverage)));
+                } else {
+                    token_hedgeinfo_map.insert(token_symbol, None);
+                }
             } else {
                 token_hedgeinfo_map.insert(token_symbol, None);
             }
@@ -394,6 +406,13 @@ impl DydxClient {
             Some(market) => market,
             None => return Err(eyre::eyre!("No perpetual market found for token {}", token)),
         };
+        if !is_tradable_perpetual_market(&market) {
+            return Err(eyre::eyre!(
+                "Perpetual market for token {} is not tradable: {:?}",
+                token,
+                market.status
+            ));
+        }
         let market_order_params = market.order_params();
         let subaccount = Subaccount::new(
             self.dydx_address.clone().into(),

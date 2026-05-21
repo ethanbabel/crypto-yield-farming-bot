@@ -25,6 +25,7 @@ use crypto_yield_farming_bot::logging;
 use crypto_yield_farming_bot::wallet::WalletManager;
 
 const STRATEGY_RUN_COMPLETED_CHANNEL: &str = "strategy_run_completed";
+const DATA_COLLECTION_COMPLETED_CHANNEL: &str = "data_collection_completed";
 const EXECUTION_CONTROL_CHANNEL: &str = "execution_control";
 const DEFAULT_HANG_TIMEOUT_SECS: u64 = 3000; // 50 minutes
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 1200; // 20 minutes
@@ -51,6 +52,7 @@ async fn main() -> eyre::Result<()> {
     let redis_client = redis::Client::open("redis://redis:6379")?;
     let mut pubsub = redis_client.get_async_pubsub().await?;
     pubsub.subscribe(STRATEGY_RUN_COMPLETED_CHANNEL).await?;
+    pubsub.subscribe(DATA_COLLECTION_COMPLETED_CHANNEL).await?;
     pubsub.subscribe(EXECUTION_CONTROL_CHANNEL).await?;
     let mut messages = pubsub.on_message();
 
@@ -140,6 +142,16 @@ async fn main() -> eyre::Result<()> {
                             last_progress.clone(),
                             run_timeout_secs,
                         ).await?;
+                    }
+                    DATA_COLLECTION_COMPLETED_CHANNEL => {
+                        let payload: String = msg.get_payload().unwrap_or_default();
+                        info!(payload = %payload, "Received data collection completion signal");
+                        run_observation_cycle_with_timeout(
+                            cfg.clone(),
+                            db.clone(),
+                            last_progress.clone(),
+                            run_timeout_secs,
+                        ).await;
                     }
                     EXECUTION_CONTROL_CHANNEL => {
                         let payload: String = msg.get_payload().unwrap_or_default();
@@ -314,6 +326,24 @@ async fn run_unwind_cycle_with_timeout(
     }
 }
 
+async fn run_observation_cycle_with_timeout(
+    cfg: Arc<config::Config>,
+    db: Arc<DbManager>,
+    last_progress: Arc<AtomicU64>,
+    run_timeout_secs: u64,
+) {
+    let cycle = execute_observation_cycle(cfg, db, last_progress);
+    match time::timeout(std::time::Duration::from_secs(run_timeout_secs), cycle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!(error = ?e, "Observation snapshot cycle failed");
+        }
+        Err(_) => {
+            error!(run_timeout_secs, "Observation snapshot cycle timed out");
+        }
+    }
+}
+
 async fn execute_strategy_run_cycle(
     cfg: Arc<config::Config>,
     db: Arc<DbManager>,
@@ -347,10 +377,56 @@ async fn execute_strategy_run_cycle(
 
     last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
 
-    execution_engine
+    if let Err(e) = execution_engine
         .run_once_with_existing_strategy_run(&execution_targets, strategy_run.id)
-        .await?;
+        .await
+    {
+        if let Err(snapshot_err) = execution_engine
+            .record_current_snapshot(
+                Some(strategy_run.id),
+                "Execution cycle failed; recording best-effort failure snapshot",
+            )
+            .await
+        {
+            error!(
+                strategy_run_id = strategy_run.id,
+                error = ?snapshot_err,
+                "Failed to record best-effort failure snapshot"
+            );
+        }
+        return Err(e);
+    }
     info!(strategy_run_id = strategy_run.id, "Execution cycle completed");
+
+    last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+
+    Ok(())
+}
+
+async fn execute_observation_cycle(
+    cfg: Arc<config::Config>,
+    db: Arc<DbManager>,
+    last_progress: Arc<AtomicU64>,
+) -> eyre::Result<()> {
+    last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+
+    let mut wallet_manager = WalletManager::new(&cfg)?;
+    wallet_manager.load_tokens(&db).await?;
+    let wallet_manager = Arc::new(wallet_manager);
+    info!("Wallet manager refreshed for observation snapshot");
+
+    last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+
+    let dydx_client = DydxClient::new(cfg.clone(), wallet_manager.clone()).await?;
+    let dydx_client = Arc::new(tokio::sync::Mutex::new(dydx_client));
+    info!("dYdX client refreshed for observation snapshot");
+
+    let execution_engine =
+        ExecutionEngine::new(cfg.clone(), db.clone(), wallet_manager.clone(), dydx_client);
+    execution_engine
+        .record_current_snapshot(None, "data collection completion signal")
+        .await?;
+    info!("Observation snapshot cycle completed");
 
     last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
 

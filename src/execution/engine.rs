@@ -57,6 +57,11 @@ struct ActionExecutionResult {
     tx_hash: Option<String>,
 }
 
+struct DepositStageOutcome {
+    changed: bool,
+    deposited_markets: HashSet<Address>,
+}
+
 enum PendingTransferGate {
     Continue,
     Pending,
@@ -97,7 +102,7 @@ impl ExecutionEngine {
         execution_targets: &ExecutionTargets,
         strategy_run_id: i32,
     ) -> Result<()> {
-        let target_weights = compute_target_weights(execution_targets);
+        let mut target_weights = compute_target_weights(execution_targets);
         info!(
             strategy_run_id,
             target_market_count = target_weights.len(),
@@ -126,6 +131,19 @@ impl ExecutionEngine {
             hedgeable_token_count = token_hedgeinfo_map.len(),
             "Fetched dYdX hedge metadata"
         );
+        target_weights = self.filter_target_weights_for_active_hedges(
+            target_weights,
+            &token_hedgeinfo_map,
+            strategy_run_id,
+        );
+        if target_weights.is_empty() {
+            warn!(
+                strategy_run_id,
+                "No deployable target markets remain after filtering for active dYdX hedges"
+            );
+            self.record_snapshot(Some(strategy_run_id), &snapshot).await?;
+            return Ok(());
+        }
         let (capital_synced_snapshot, reserve_state) = self
             .sync_dydx_capital(
                 &snapshot,
@@ -255,10 +273,10 @@ impl ExecutionEngine {
 
         // Stage 3: Deposits + cleanup swaps
         info!(strategy_run_id, "Stage 3: executing deposit and asset cleanup stage");
-        if self
+        let deposit_outcome = self
             .execute_deposit_stage(&snapshot, &deltas, &reserve_state, Some(strategy_run_id))
-            .await?
-        {
+            .await?;
+        if deposit_outcome.changed {
             snapshot = self.build_snapshot().await?;
             info!(
                 strategy_run_id,
@@ -275,7 +293,13 @@ impl ExecutionEngine {
             actions = ?self.describe_actions(&hedge_actions),
             "Stage 4: planned hedge adjustments"
         );
-        let hedges_changed = self.execute_actions(&hedge_actions, Some(strategy_run_id)).await;
+        let hedges_changed = self
+            .execute_hedge_actions(
+                &hedge_actions,
+                Some(strategy_run_id),
+                &deposit_outcome.deposited_markets,
+            )
+            .await?;
         if !hedge_actions.is_empty() {
             info!(strategy_run_id, "Waiting for dYdX hedge polling tasks to converge");
             let mut client = self.dydx_client.lock().await;
@@ -488,6 +512,71 @@ impl ExecutionEngine {
             portfolio_data.market_addresses.clone(),
             portfolio_data.weights.iter().copied().collect(),
         )
+    }
+
+    fn filter_target_weights_for_active_hedges(
+        &self,
+        target_weights: HashMap<Address, Decimal>,
+        token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
+        strategy_run_id: i32,
+    ) -> HashMap<Address, Decimal> {
+        let mut filtered = HashMap::new();
+        let mut removed = Vec::new();
+
+        for (market, weight) in target_weights {
+            if weight <= Decimal::ZERO {
+                continue;
+            }
+
+            let Some(market_info) = self.wallet_manager.market_tokens.get(&market) else {
+                removed.push(format!(
+                    "{} missing market metadata",
+                    self.market_symbol(market)
+                ));
+                continue;
+            };
+            let Some(long_token) = self
+                .wallet_manager
+                .asset_tokens
+                .get(&market_info.long_token_address)
+            else {
+                removed.push(format!(
+                    "{} missing long-token metadata",
+                    self.market_symbol(market)
+                ));
+                continue;
+            };
+
+            if hedge_utils::STABLE_COINS.contains(&long_token.symbol.as_str())
+                || matches!(token_hedgeinfo_map.get(&long_token.symbol), Some(Some(_)))
+            {
+                filtered.insert(market, weight);
+            } else {
+                removed.push(format!(
+                    "{} long token {} has no active dYdX hedge market",
+                    self.market_symbol(market),
+                    long_token.symbol
+                ));
+            }
+        }
+
+        if !removed.is_empty() {
+            info!(
+                strategy_run_id,
+                removed_market_count = removed.len(),
+                removed_markets = ?removed,
+                "Filtered target markets that do not currently have active dYdX hedge markets"
+            );
+        }
+
+        let total_weight: Decimal = filtered.values().cloned().sum();
+        if total_weight > Decimal::ZERO {
+            for weight in filtered.values_mut() {
+                *weight /= total_weight;
+            }
+        }
+
+        filtered
     }
 
     async fn reconcile_pending_execution_transfer(
@@ -1861,7 +1950,7 @@ impl ExecutionEngine {
         deltas: &HashMap<Address, Decimal>,
         reserve_state: &ReserveState,
         strategy_run_id: Option<i32>,
-    ) -> Result<bool> {
+    ) -> Result<DepositStageOutcome> {
         let mut deposit_targets: Vec<(Address, Decimal)> = deltas
             .iter()
             .filter_map(|(market, delta)| {
@@ -1875,14 +1964,20 @@ impl ExecutionEngine {
 
         if deposit_targets.is_empty() {
             debug!("Skipping deposit stage because there are no positive market deltas");
-            return Ok(false);
+            return Ok(DepositStageOutcome {
+                changed: false,
+                deposited_markets: HashSet::new(),
+            });
         }
 
         let base_stable = match self.get_preferred_stable_token(&snapshot.asset_balances) {
             Some(token) => token,
             None => {
                 warn!("No stable token available for deposits");
-                return Ok(false);
+                return Ok(DepositStageOutcome {
+                    changed: false,
+                    deposited_markets: HashSet::new(),
+                });
             }
         };
         info!(
@@ -1895,6 +1990,7 @@ impl ExecutionEngine {
         let mut preferred_tokens = HashSet::new();
         let mut deposit_token_cache = HashMap::new();
         let mut invalidated_markets = HashSet::new();
+        let mut deposited_markets = HashSet::new();
         for (market, _) in deposit_targets.iter() {
             if let Some(token) = self
                 .select_deposit_token_with_fallback_cached(
@@ -2066,6 +2162,7 @@ impl ExecutionEngine {
             info!(action = %self.describe_action(&action), "Submitting GM deposit");
             if self.execute_and_log(&action, strategy_run_id).await {
                 changed = true;
+                deposited_markets.insert(market);
                 if deposit_token.address != base_stable.address {
                     self.invalidate_markets_for_token(
                         &mut invalidated_markets,
@@ -2092,7 +2189,10 @@ impl ExecutionEngine {
             .await
             || changed;
 
-        Ok(changed)
+        Ok(DepositStageOutcome {
+            changed,
+            deposited_markets,
+        })
     }
 
     async fn cleanup_asset_tokens_to_stable(
@@ -2691,6 +2791,56 @@ impl ExecutionEngine {
         changed
     }
 
+    async fn execute_hedge_actions(
+        &self,
+        actions: &[TradeAction],
+        strategy_run_id: Option<i32>,
+        deposited_markets: &HashSet<Address>,
+    ) -> Result<bool> {
+        if actions.is_empty() {
+            debug!(strategy_run_id = ?strategy_run_id, "No hedge actions to execute in this stage");
+            return Ok(false);
+        }
+
+        let mut changed = false;
+        let mut failed_new_hedge_tokens = HashSet::new();
+        for action in actions.iter() {
+            let executed = self.execute_and_log(action, strategy_run_id).await;
+            changed = executed || changed;
+            if !executed {
+                if let TradeAction::HedgeOrder {
+                    token_symbol,
+                    reduce_only,
+                    ..
+                } = action
+                {
+                    if !reduce_only {
+                        failed_new_hedge_tokens.insert(token_symbol.clone());
+                    }
+                }
+            }
+        }
+
+        if !failed_new_hedge_tokens.is_empty() && !deposited_markets.is_empty() {
+            warn!(
+                strategy_run_id = ?strategy_run_id,
+                failed_new_hedge_tokens = ?failed_new_hedge_tokens,
+                deposited_market_count = deposited_markets.len(),
+                "New hedge orders failed; rolling back newly opened GM markets for the affected hedge tokens"
+            );
+            changed = self
+                .rollback_markets_for_failed_hedges(
+                    deposited_markets,
+                    &failed_new_hedge_tokens,
+                    strategy_run_id,
+                )
+                .await?
+                || changed;
+        }
+
+        Ok(changed)
+    }
+
     async fn execute_and_log(&self, action: &TradeAction, strategy_run_id: Option<i32>) -> bool {
         info!(
             strategy_run_id = ?strategy_run_id,
@@ -2797,6 +2947,101 @@ impl ExecutionEngine {
                 }
             }
         }
+    }
+
+    async fn rollback_markets_for_failed_hedges(
+        &self,
+        deposited_markets: &HashSet<Address>,
+        failed_new_hedge_tokens: &HashSet<String>,
+        strategy_run_id: Option<i32>,
+    ) -> Result<bool> {
+        let snapshot = self.build_snapshot().await?;
+        let mut withdrawal_actions = Vec::new();
+        let mut affected_token_addresses = HashSet::new();
+
+        for market in deposited_markets.iter() {
+            let Some(market_info) = self.wallet_manager.market_tokens.get(market) else {
+                continue;
+            };
+            let Some(long_token) = self
+                .wallet_manager
+                .asset_tokens
+                .get(&market_info.long_token_address)
+            else {
+                continue;
+            };
+            let hedge_token_symbol =
+                hedge_utils::get_dydx_perp_base_symbol(&long_token.symbol);
+            if !failed_new_hedge_tokens.contains(&hedge_token_symbol) {
+                continue;
+            }
+
+            let balance = snapshot
+                .market_balances
+                .get(market)
+                .cloned()
+                .unwrap_or(Decimal::ZERO);
+            if balance <= Decimal::ZERO {
+                continue;
+            }
+
+            withdrawal_actions.push(TradeAction::GmWithdrawal {
+                market: *market,
+                amount: balance,
+            });
+            affected_token_addresses.insert(market_info.long_token_address);
+            affected_token_addresses.insert(market_info.short_token_address);
+        }
+
+        if withdrawal_actions.is_empty() {
+            return Ok(false);
+        }
+
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            action_count = withdrawal_actions.len(),
+            actions = ?self.describe_actions(&withdrawal_actions),
+            "Rolling back newly opened GM markets after hedge failure"
+        );
+
+        let withdrew = self.execute_actions(&withdrawal_actions, strategy_run_id).await;
+        if !withdrew {
+            return Ok(false);
+        }
+
+        let refreshed = self.build_snapshot().await?;
+        let Some(base_stable) = self.get_preferred_stable_token(&refreshed.asset_balances) else {
+            warn!(
+                strategy_run_id = ?strategy_run_id,
+                "Unable to find a base stable token while cleaning up rollback assets"
+            );
+            return Ok(true);
+        };
+
+        let rollback_balances: HashMap<Address, Decimal> = refreshed
+            .asset_balances
+            .iter()
+            .filter_map(|(token, balance)| {
+                if affected_token_addresses.contains(token) {
+                    Some((*token, *balance))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let cleaned = self
+            .cleanup_asset_tokens_to_stable(
+                &rollback_balances,
+                &HashSet::new(),
+                &base_stable,
+                strategy_run_id,
+                false,
+                self.planner_config.min_value_usd,
+            )
+            .await;
+
+        Ok(withdrew || cleaned)
     }
 
     async fn record_strategy_run(&self, portfolio_data: &PortfolioData) -> Result<i32> {

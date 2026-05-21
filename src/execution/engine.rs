@@ -418,6 +418,31 @@ impl ExecutionEngine {
         Ok(())
     }
 
+    pub async fn record_current_snapshot(
+        &self,
+        strategy_run_id: Option<i32>,
+        reason: &str,
+    ) -> Result<()> {
+        self.refresh_pending_execution_transfer(reason).await?;
+        self.record_current_snapshot_without_refresh(strategy_run_id, reason)
+            .await
+    }
+
+    async fn record_current_snapshot_without_refresh(
+        &self,
+        strategy_run_id: Option<i32>,
+        reason: &str,
+    ) -> Result<()> {
+        let snapshot = self.build_snapshot().await?;
+        info!(
+            strategy_run_id = ?strategy_run_id,
+            snapshot = %self.snapshot_summary(&snapshot),
+            reason,
+            "Recording current snapshot without executing trades"
+        );
+        self.record_snapshot(strategy_run_id, &snapshot).await
+    }
+
     async fn sell_excess_native_to_stable(
         &self,
         snapshot: &PortfolioSnapshot,
@@ -556,6 +581,11 @@ impl ExecutionEngine {
                     "Pending dYdX transfer completed; clearing tracked transfer state"
                 );
                 self.clear_execution_transfer_state().await?;
+                self.record_current_snapshot_without_refresh(
+                    None,
+                    "Pending dYdX transfer completed; recording reconciliation snapshot",
+                )
+                .await?;
                 Ok(PendingTransferGate::Continue)
             }
             SkipGoTransferState::Failed => {
@@ -569,6 +599,11 @@ impl ExecutionEngine {
                     "Pending dYdX transfer failed; clearing tracked transfer state"
                 );
                 self.clear_execution_transfer_state().await?;
+                self.record_current_snapshot_without_refresh(
+                    None,
+                    "Pending dYdX transfer failed; recording reconciliation snapshot",
+                )
+                .await?;
                 Ok(PendingTransferGate::Continue)
             }
         }
@@ -688,9 +723,19 @@ impl ExecutionEngine {
             );
         }
 
-        let reserved_for_pending_top_up = self
+        let mut reserved_for_pending_top_up = self
             .maybe_sync_dydx_cross_chain_capital(&synced_snapshot, &ideal_reserve_state)
             .await?;
+        if reserved_for_pending_top_up > Decimal::ZERO {
+            synced_snapshot = self.build_snapshot().await?;
+            info!(
+                strategy_run_id = ?strategy_run_id,
+                reserved_for_pending_top_up_usd = %reserved_for_pending_top_up,
+                snapshot = %self.snapshot_summary(&synced_snapshot),
+                "Refreshed snapshot after initiating a dYdX top-up transfer"
+            );
+            reserved_for_pending_top_up = Decimal::ZERO;
+        }
         let effective_reserve_state = self
             .compute_effective_reserve_state(
                 &synced_snapshot,

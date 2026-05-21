@@ -99,6 +99,76 @@ pub async fn run_strategy_engine(
         debug!("Filtered out markets: {} available\nRemoved markets:\n{}", market_slices.len(), filtered_markets);
     }
 
+    let token_hedgeinfo_map = {
+        let client = dydx_client.lock().await;
+        client.get_token_hedgeinfo_map().await?
+    };
+
+    let mut hedge_filtered_markets = String::new();
+    let mut hedge_filtered_slices = Vec::new();
+    for slice in market_slices {
+        let market_info = match swap_manager
+            .wallet_manager()
+            .market_tokens
+            .get(&slice.market_address)
+        {
+            Some(info) => info,
+            None => {
+                hedge_filtered_markets.push_str(&format!(
+                    "{} --> missing market token metadata in wallet manager\n",
+                    slice.display_name
+                ));
+                continue;
+            }
+        };
+
+        let long_token = match swap_manager
+            .wallet_manager()
+            .asset_tokens
+            .get(&market_info.long_token_address)
+        {
+            Some(token) => token,
+            None => {
+                hedge_filtered_markets.push_str(&format!(
+                    "{} --> missing long token metadata in wallet manager\n",
+                    slice.display_name
+                ));
+                continue;
+            }
+        };
+
+        if !crate::hedging::hedge_utils::STABLE_COINS.contains(&long_token.symbol.as_str())
+            && !matches!(token_hedgeinfo_map.get(&long_token.symbol), Some(Some(_)))
+        {
+            hedge_filtered_markets.push_str(&format!(
+                "{} --> long token {} does not have an active dYdX hedge market\n",
+                slice.display_name,
+                long_token.symbol
+            ));
+            continue;
+        }
+
+        hedge_filtered_slices.push(slice);
+    }
+
+    if hedge_filtered_slices.is_empty() {
+        error!(
+            "All markets filtered out after dYdX hedgeability checks:\n{}",
+            hedge_filtered_markets
+        );
+        return Err(eyre::eyre!(
+            "All markets filtered out after dYdX hedgeability checks"
+        ));
+    }
+    if !hedge_filtered_markets.is_empty() {
+        debug!(
+            available = hedge_filtered_slices.len(),
+            "Filtered out markets after dYdX hedgeability checks:\n{}",
+            hedge_filtered_markets
+        );
+    }
+    let market_slices = hedge_filtered_slices;
+
     let usdc_address = swap_manager
         .wallet_manager()
         .asset_tokens
@@ -196,11 +266,6 @@ pub async fn run_strategy_engine(
     let mut market_addresses = Vec::with_capacity(n_markets);
     let mut display_names = Vec::with_capacity(n_markets);
     let mut expected_returns = Array1::zeros(n_markets);
-
-    let token_hedgeinfo_map = {
-        let client = dydx_client.lock().await;
-        client.get_token_hedgeinfo_map().await?
-    };
 
     // Run models on each market sequentially to respect rate limits
     for (i, slice) in market_slices.iter().enumerate() {

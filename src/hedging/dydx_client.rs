@@ -940,7 +940,7 @@ impl DydxClient {
         );
 
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
-        let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
+        let dydx_subaccount_summary_initial = self.get_subaccount_summary().await?;
 
         let tx_hash = self
             .node_client
@@ -959,7 +959,9 @@ impl DydxClient {
             tx_hash = ?tx_hash,
             amount = ?amount,
             dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
-            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_usdc_balance_initial,
+            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_summary_initial.usdc_balance,
+            dydx_subaccount_equity_initial = ?dydx_subaccount_summary_initial.equity,
+            dydx_subaccount_free_collateral_initial = ?dydx_subaccount_summary_initial.free_collateral,
             "Deposit to dYdX subaccount submitted successfully"
         );
 
@@ -969,32 +971,22 @@ impl DydxClient {
             .await
             .map_err(|e| eyre::eyre!("Failed to query dYdX deposit transaction result: {}", e))?;
 
-        let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
-        let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
-        let balance_change_tolerance = Decimal::new(1, 2).max(amount * Decimal::new(2, 2));
-        let expected_subaccount_balance =
-            dydx_subaccount_usdc_balance_initial + amount - balance_change_tolerance;
-        let expected_main_balance =
-            (dydx_usdc_balance_initial - amount).max(Decimal::ZERO) + balance_change_tolerance;
-
-        if dydx_subaccount_usdc_balance_final < expected_subaccount_balance
-            || dydx_usdc_balance_final > expected_main_balance
-        {
-            return Err(eyre::eyre!(
-                "dYdX subaccount deposit did not settle as expected: main {} -> {}, subaccount {} -> {}, requested amount {}",
+        let (dydx_usdc_balance_final, dydx_subaccount_summary_final) = self
+            .wait_for_subaccount_transfer_convergence(
+                amount,
                 dydx_usdc_balance_initial,
-                dydx_usdc_balance_final,
-                dydx_subaccount_usdc_balance_initial,
-                dydx_subaccount_usdc_balance_final,
-                amount
-            ));
-        }
+                dydx_subaccount_summary_initial.clone(),
+                true,
+            )
+            .await?;
 
         info!(
             tx_hash = ?tx_hash,
             amount = ?amount,
             dydx_usdc_balance_final = ?dydx_usdc_balance_final,
-            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_summary_final.usdc_balance,
+            dydx_subaccount_equity_final = ?dydx_subaccount_summary_final.equity,
+            dydx_subaccount_free_collateral_final = ?dydx_subaccount_summary_final.free_collateral,
             "Deposit to dYdX subaccount confirmed successfully"
         );
 
@@ -1026,7 +1018,7 @@ impl DydxClient {
         );
 
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
-        let dydx_subaccount_usdc_balance_initial = self.get_dydx_subaccount_usdc_balance().await?;
+        let dydx_subaccount_summary_initial = self.get_subaccount_summary().await?;
 
         let tx_hash = self
             .node_client
@@ -1045,7 +1037,9 @@ impl DydxClient {
             tx_hash = ?tx_hash,
             amount = ?amount,
             dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
-            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_usdc_balance_initial,
+            dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_summary_initial.usdc_balance,
+            dydx_subaccount_equity_initial = ?dydx_subaccount_summary_initial.equity,
+            dydx_subaccount_free_collateral_initial = ?dydx_subaccount_summary_initial.free_collateral,
             "Withdrawal from dYdX subaccount submitted successfully"
         );
 
@@ -1057,36 +1051,94 @@ impl DydxClient {
                 eyre::eyre!("Failed to query dYdX withdrawal transaction result: {}", e)
             })?;
 
-        let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
-        let dydx_subaccount_usdc_balance_final = self.get_dydx_subaccount_usdc_balance().await?;
-        let balance_change_tolerance = Decimal::new(1, 2).max(amount * Decimal::new(2, 2));
-        let expected_main_balance =
-            dydx_usdc_balance_initial + amount - balance_change_tolerance;
-        let expected_subaccount_balance =
-            (dydx_subaccount_usdc_balance_initial - amount).max(Decimal::ZERO) + balance_change_tolerance;
-
-        if dydx_usdc_balance_final < expected_main_balance
-            || dydx_subaccount_usdc_balance_final > expected_subaccount_balance
-        {
-            return Err(eyre::eyre!(
-                "dYdX subaccount withdrawal did not settle as expected: main {} -> {}, subaccount {} -> {}, requested amount {}",
+        let (dydx_usdc_balance_final, dydx_subaccount_summary_final) = self
+            .wait_for_subaccount_transfer_convergence(
+                amount,
                 dydx_usdc_balance_initial,
-                dydx_usdc_balance_final,
-                dydx_subaccount_usdc_balance_initial,
-                dydx_subaccount_usdc_balance_final,
-                amount
-            ));
-        }
+                dydx_subaccount_summary_initial.clone(),
+                false,
+            )
+            .await?;
 
         info!(
             tx_hash = ?tx_hash,
             amount = ?amount,
             dydx_usdc_balance_final = ?dydx_usdc_balance_final,
-            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_usdc_balance_final,
+            dydx_subaccount_usdc_balance_final = ?dydx_subaccount_summary_final.usdc_balance,
+            dydx_subaccount_equity_final = ?dydx_subaccount_summary_final.equity,
+            dydx_subaccount_free_collateral_final = ?dydx_subaccount_summary_final.free_collateral,
             "Withdrawal from dYdX subaccount confirmed successfully"
         );
 
         Ok(())
+    }
+
+    async fn wait_for_subaccount_transfer_convergence(
+        &mut self,
+        amount: Decimal,
+        dydx_usdc_balance_initial: Decimal,
+        dydx_subaccount_summary_initial: DydxSubaccountSummary,
+        is_deposit: bool,
+    ) -> Result<(Decimal, DydxSubaccountSummary)> {
+        let balance_change_tolerance = Decimal::new(1, 2).max(amount * Decimal::new(2, 2));
+        let convergence_deadline = Instant::now() + Duration::from_secs(6);
+        let poll_interval = Duration::from_millis(500);
+        let transfer_kind = if is_deposit { "deposit" } else { "withdrawal" };
+
+        loop {
+            let dydx_usdc_balance_final = self.get_dydx_usdc_balance().await?;
+            let dydx_subaccount_summary_final = self.get_subaccount_summary().await?;
+            let expected_main_balance = if is_deposit {
+                (dydx_usdc_balance_initial - amount).max(Decimal::ZERO) + balance_change_tolerance
+            } else {
+                dydx_usdc_balance_initial + amount - balance_change_tolerance
+            };
+            let expected_subaccount_balance = if is_deposit {
+                dydx_subaccount_summary_initial.usdc_balance + amount - balance_change_tolerance
+            } else {
+                (dydx_subaccount_summary_initial.usdc_balance - amount).max(Decimal::ZERO)
+                    + balance_change_tolerance
+            };
+            let expected_subaccount_equity = if is_deposit {
+                dydx_subaccount_summary_initial.equity + amount - balance_change_tolerance
+            } else {
+                (dydx_subaccount_summary_initial.equity - amount).max(Decimal::ZERO)
+                    + balance_change_tolerance
+            };
+
+            let main_balance_converged = if is_deposit {
+                dydx_usdc_balance_final <= expected_main_balance
+            } else {
+                dydx_usdc_balance_final >= expected_main_balance
+            };
+            let subaccount_balance_converged = if is_deposit {
+                dydx_subaccount_summary_final.usdc_balance >= expected_subaccount_balance
+                    || dydx_subaccount_summary_final.equity >= expected_subaccount_equity
+            } else {
+                dydx_subaccount_summary_final.usdc_balance <= expected_subaccount_balance
+                    || dydx_subaccount_summary_final.equity <= expected_subaccount_equity
+            };
+
+            if main_balance_converged && subaccount_balance_converged {
+                return Ok((dydx_usdc_balance_final, dydx_subaccount_summary_final));
+            }
+
+            if Instant::now() >= convergence_deadline {
+                return Err(eyre::eyre!(
+                    "dYdX subaccount {} did not settle as expected after convergence wait: main {} -> {}, subaccount_usdc {} -> {}, subaccount_equity {} -> {}, requested amount {}",
+                    transfer_kind,
+                    dydx_usdc_balance_initial,
+                    dydx_usdc_balance_final,
+                    dydx_subaccount_summary_initial.usdc_balance,
+                    dydx_subaccount_summary_final.usdc_balance,
+                    dydx_subaccount_summary_initial.equity,
+                    dydx_subaccount_summary_final.equity,
+                    amount
+                ));
+            }
+
+            sleep(poll_interval).await;
+        }
     }
 
     pub async fn set_subaccount_usdc_balance(

@@ -723,18 +723,16 @@ impl ExecutionEngine {
             );
         }
 
-        let mut reserved_for_pending_top_up = self
+        let initiated_top_up = self
             .maybe_sync_dydx_cross_chain_capital(&synced_snapshot, &ideal_reserve_state)
             .await?;
-        if reserved_for_pending_top_up > Decimal::ZERO {
+        if initiated_top_up {
             synced_snapshot = self.build_snapshot().await?;
             info!(
                 strategy_run_id = ?strategy_run_id,
-                reserved_for_pending_top_up_usd = %reserved_for_pending_top_up,
                 snapshot = %self.snapshot_summary(&synced_snapshot),
                 "Refreshed snapshot after initiating a dYdX top-up transfer"
             );
-            reserved_for_pending_top_up = Decimal::ZERO;
         }
         let effective_reserve_state = self
             .compute_effective_reserve_state(
@@ -742,13 +740,12 @@ impl ExecutionEngine {
                 target_weights,
                 token_hedgeinfo_map,
                 &ideal_reserve_state,
-                reserved_for_pending_top_up,
             )
             .await?;
 
         info!(
             strategy_run_id = ?strategy_run_id,
-            reserved_for_pending_top_up_usd = %reserved_for_pending_top_up,
+            initiated_top_up,
             effective_investable_capital = %effective_reserve_state.investable_capital,
             effective_required_equity = %effective_reserve_state.required_equity,
             effective_required_free_collateral = %effective_reserve_state.required_free_collateral,
@@ -803,7 +800,7 @@ impl ExecutionEngine {
         &self,
         snapshot: &PortfolioSnapshot,
         reserve_state: &ReserveState,
-    ) -> Result<Decimal> {
+    ) -> Result<bool> {
         let pending_transfer_state = self.db_manager.get_execution_transfer_state().await?;
         let has_pending_transfer = pending_transfer_state.tx_hash.is_some();
         let equity_shortfall =
@@ -834,28 +831,26 @@ impl ExecutionEngine {
                 tx_hash = ?pending_transfer_state.tx_hash,
                 "A dYdX transfer is already pending; not initiating another cross-chain capital move this cycle"
             );
-            return Ok(Decimal::ZERO);
+            return Ok(false);
         }
 
         if shortfall > Decimal::ZERO {
-            return self
-                .initiate_dydx_top_up(snapshot, shortfall)
-                .await;
+            return self.initiate_dydx_top_up(snapshot, shortfall).await;
         }
 
         self.initiate_dydx_withdrawal_if_needed(snapshot, reserve_state)
             .await?;
-        Ok(Decimal::ZERO)
+        Ok(false)
     }
 
     async fn initiate_dydx_top_up(
         &self,
         snapshot: &PortfolioSnapshot,
         ideal_shortfall: Decimal,
-    ) -> Result<Decimal> {
+    ) -> Result<bool> {
         let Some(usdc_token) = self.get_usdc_token() else {
             warn!("Unable to find Arbitrum USDC token for dYdX top-up");
-            return Ok(Decimal::ZERO);
+            return Ok(false);
         };
         let live_usdc_balance = self.wallet_manager.get_token_balance(usdc_token.address).await?;
         let buffer_usd = self.compute_arbitrum_stable_buffer_usd(snapshot);
@@ -875,7 +870,7 @@ impl ExecutionEngine {
                 amount_to_transfer = %amount,
                 "dYdX top-up shortfall detected, but not enough free Arbitrum USDC is available to bridge"
             );
-            return Ok(Decimal::ZERO);
+            return Ok(false);
         }
 
         let tracking = {
@@ -898,11 +893,12 @@ impl ExecutionEngine {
                 expected_time_to_complete_secs = tracking.expected_time_to_complete_secs,
                 "Initiated Arbitrum to dYdX top-up for a future execution cycle"
             );
+            return Ok(true);
         } else {
             warn!(amount_usd = %amount, "dYdX top-up returned no tracking metadata");
         }
 
-        Ok(amount)
+        Ok(false)
     }
 
     async fn initiate_dydx_withdrawal_if_needed(
@@ -991,15 +987,13 @@ impl ExecutionEngine {
         target_weights: &HashMap<Address, Decimal>,
         token_hedgeinfo_map: &HashMap<String, Option<(Decimal, Decimal)>>,
         ideal_reserve_state: &ReserveState,
-        reserved_for_pending_top_up: Decimal,
     ) -> Result<ReserveState> {
         if ideal_reserve_state.investable_capital <= Decimal::ZERO {
             return Ok(ideal_reserve_state.clone());
         }
 
-        let current_arbitrum_deployable = (self.current_arbitrum_deployable_capital(snapshot)
-            - reserved_for_pending_top_up)
-            .max(Decimal::ZERO);
+        let current_arbitrum_deployable =
+            self.current_arbitrum_deployable_capital(snapshot).max(Decimal::ZERO);
         let equity_ratio = if ideal_reserve_state.required_equity > Decimal::ZERO {
             (snapshot.dydx_subaccount_equity / ideal_reserve_state.required_equity)
                 .clamp(Decimal::ZERO, Decimal::ONE)
@@ -1022,7 +1016,6 @@ impl ExecutionEngine {
         debug!(
             ideal_investable_capital = %ideal_reserve_state.investable_capital,
             current_arbitrum_deployable = %current_arbitrum_deployable,
-            reserved_for_pending_top_up = %reserved_for_pending_top_up,
             equity_ratio = %equity_ratio,
             free_collateral_ratio = %free_ratio,
             hedge_limited_investable = %hedge_limited_investable,

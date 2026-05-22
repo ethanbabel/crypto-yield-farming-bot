@@ -111,6 +111,7 @@ The snapshot contains:
 - dYdX main-account USDC
 - dYdX subaccount equity
 - dYdX free collateral
+- in-flight cross-chain transfer USD value and direction
 - aggregate USD totals
 
 The aggregate totals are defined as:
@@ -124,7 +125,11 @@ V_{\text{arbitrum}} = V_{\text{GM}} + V_{\text{assets}} + V_{\text{native}}
 $$
 
 $$
-V_{\text{total}} = V_{\text{arbitrum}} + U_{\text{dYdX main}} + E_{\text{dYdX subaccount}}
+V_{\text{inflight}} = U_{\text{inflight transfer}}
+$$
+
+$$
+V_{\text{total}} = V_{\text{arbitrum}} + U_{\text{dYdX main}} + E_{\text{dYdX subaccount}} + V_{\text{inflight}}
 $$
 
 ## Durable dYdX Transfer Tracking
@@ -139,6 +144,8 @@ The executor therefore persists any in-flight cross-chain transfer in `execution
 - amount
 - expected completion time
 - initiation timestamp
+- source balance before transfer
+- destination balance before transfer
 
 On each normal execution wake-up, the engine checks the stored transfer status through `DydxClient::check_skipgo_transfer_status(...)`.
 
@@ -154,6 +161,8 @@ If a transfer exists and is:
 
 `stable_only` unwind does not block on pending SkipGo transfers. A pending top-up or withdrawal may settle during stable-only mode, and that is acceptable because it only changes where idle stablecoin capital sits.
 
+If SkipGo status checks fail, the engine can also infer transfer completion or failure from live source/destination balances, clear the durable transfer state, and immediately record a reconciliation snapshot.
+
 ## High-Level Normal Execution Flow
 
 When the executor is in `normal` mode and receives an eligible strategy run, the cycle is:
@@ -161,15 +170,17 @@ When the executor is in `normal` mode and receives an eligible strategy run, the
 1. refresh pending dYdX transfer status
 2. build a live snapshot
 3. load dYdX hedge metadata
-4. run dYdX capital sync preflight
-5. ensure gas reserve
-6. compute target market values and deltas
-7. execute GM shifts
-8. execute GM withdrawals
-9. execute deposit stage
-10. execute dYdX hedge adjustments
-11. wait for dYdX hedge polling tasks to converge
-12. record final portfolio and position snapshots
+4. filter target markets down to those whose long token currently has an active dYdX hedge market, then renormalize weights
+5. run dYdX capital sync preflight
+6. ensure gas reserve
+7. compute target market values and deltas
+8. execute GM shifts
+9. execute GM withdrawals
+10. execute deposit stage
+11. execute dYdX hedge adjustments
+12. if any newly opened hedge fails, roll back the newly opened GM markets for the affected hedge token and clean the residual assets back to stable
+13. wait for dYdX hedge polling tasks to converge
+14. record final portfolio and position snapshots
 
 Each stage is described below.
 
@@ -184,6 +195,19 @@ w_i^{\text{target}} = \frac{w_i}{\sum_j w_j}
 $$
 
 Execution therefore always works from a well-defined normalized weight map.
+
+Before deployment, the engine also applies a live hedgeability filter. A target market survives only if:
+
+- its long token is itself stable, or
+- its long token currently maps to an active dYdX perp market
+
+If some target markets are removed by this filter, the surviving weights are renormalized again:
+
+$$
+\tilde{w}_i^{\text{target}} = \frac{w_i^{\text{surviving}}}{\sum_{j \in \text{surviving}} w_j^{\text{surviving}}}
+$$
+
+This ensures the execution engine never intentionally deploys into a market whose hedge venue is already known to be unavailable.
 
 ## 2. Capital Base and Reserve Sizing
 
@@ -217,7 +241,7 @@ where $p_{\text{arb}}$ is a operator-specified buffer percentage parameter.
 The deployment capital base is then:
 
 $$
-V_{\text{capital base}} = \max\left(V_{\text{total}} - V_{\text{native}} - B_{\text{arb stable}},\ 0\right)
+V_{\text{capital base}} = \max\left(V_{\text{total}} - V_{\text{native}} - V_{\text{inflight}} - B_{\text{arb stable}},\ 0\right)
 $$
 
 This buffer is intended to leave a small amount of stable liquidity on Arbitrum outside the deployable pool.
@@ -395,24 +419,18 @@ $$
 V_{\text{hedge-limited}} = V_{\text{investable, ideal}} \cdot \min(\rho_E,\rho_F)
 $$
 
-If the engine has just initiated an Arbitrum $\rightarrow$ dYdX top-up in the current cycle, it also reserves that pending amount on the Arbitrum side:
-
-$$
-V_{\text{arb deployable, effective}} = \max\left(V_{\text{arb deployable}} - V_{\text{pending top-up}},\ 0\right)
-$$
-
 The current-run effective investable capital is then:
 
 $$
 V_{\text{investable, effective}} =
 \min\left(
 V_{\text{investable, ideal}},
-V_{\text{arb deployable, effective}},
+V_{\text{arb deployable}},
 V_{\text{hedge-limited}}
 \right)
 $$
 
-In other words, the engine does not assume a newly initiated SkipGo transfer will arrive in time for the current iteration.
+In other words, the engine does not assume a newly initiated SkipGo transfer will arrive in time for the current iteration. The refreshed live snapshot already removes in-flight Arbitrum capital from `V_{\text{arbitrum}}` while adding it back to total NAV through `V_{\text{inflight}}`, so no second manual subtraction is applied in the Arbitrum deployable-capital path.
 
 If dYdX is underfunded, the engine scales the current run down and separately prepares the future run by sending the missing USDC.
 
@@ -435,6 +453,8 @@ and the initiated top-up is:
 $$
 U_{\text{top-up}} = \min\left(U_{\text{shortfall}},\ U_{\text{available for top-up}}\right)
 $$
+
+After a new top-up is initiated, the engine immediately rebuilds the snapshot and from that point onward relies on the snapshot’s in-flight transfer fields rather than on a separate temporary reservation variable.
 
 If dYdX is overfunded and no transfer is already pending:
 
@@ -592,6 +612,8 @@ $$
 Q^{\text{deposit}} = \min\left(Q^{\text{available}},\ Q^{\text{needed}}\right)
 $$
 
+The deposit stage also records exactly which GM markets were newly opened during the current cycle. That information is later used by the hedge stage’s rollback logic.
+
 ### 8.5 Final Cleanup
 
 After the deposit loop, the engine performs one more cleanup pass and liquidates remaining non-stable idle inventory back into the preferred stable token, subject to the minimum-value threshold.
@@ -628,6 +650,12 @@ and the engine emits one hedge order from $\Delta Q_k^{\text{perp}}$ if the USD 
 
 This avoids submitting separate dYdX orders for each GM market when the hedge venue only cares about the final net perp position.
 
+Only active dYdX perp markets are considered hedgeable:
+
+- strategy filtering removes markets whose long token lacks an active dYdX perp
+- execution filtering repeats that check against live hedge metadata before reserve sizing and deployment
+- `DydxClient::submit_perp_order(...)` also performs a final active-market check before broadcasting a new order
+
 ### Reduce-Only vs Normal Hedge Orders
 
 Normal rebalance hedges are emitted with `reduce_only = false`.
@@ -635,6 +663,19 @@ Normal rebalance hedges are emitted with `reduce_only = false`.
 Stable-only hedge closures are emitted with `reduce_only = true` and are executed through the dYdX reduction path.
 
 After hedge orders are submitted, the engine waits for active dYdX perp polling tasks to converge before recording the final normal-mode snapshot.
+
+### 9.1 Hedge Failure Rollback
+
+If a new non-reduce-only hedge order fails after stage 3 has already opened GM exposure, the engine does not leave that new exposure live indefinitely.
+
+Instead it:
+
+1. identifies the failed hedge token(s)
+2. finds the GM markets that were newly opened in the current cycle and whose long token maps to those failed hedge token(s)
+3. immediately withdraws those GM positions
+4. sells the resulting residual long/short collateral balances back into the preferred stable token
+
+This rollback is scoped only to the newly opened markets for the failed hedge token, not to the entire portfolio.
 
 ## 10. Stable-Only Unwind Flow
 
@@ -682,6 +723,12 @@ After each execution or unwind pass, the engine persists:
 - per-position snapshots
 - trade/action logs
 
+The executor also records passive observation snapshots outside of active trading:
+
+- on `data_collection_completed` signals
+- after pending dYdX transfer reconciliation transitions from pending to completed or failed
+- on best-effort failure capture when a normal execution cycle aborts before the usual final snapshot
+
 Portfolio snapshots include:
 
 - `strategy_run_id` for normal execution cycles
@@ -689,6 +736,7 @@ Portfolio snapshots include:
 - dYdX main-account USDC
 - dYdX subaccount equity
 - dYdX free collateral
+- in-flight transfer USD value and direction
 - total portfolio value
 
 Trade logs are action-oriented execution records. They include:

@@ -34,6 +34,20 @@ pub fn compute_target_values(
         .collect()
 }
 
+pub fn compute_target_values_with_current_markets(
+    snapshot: &PortfolioSnapshot,
+    target_weights: &HashMap<Address, Decimal>,
+    investable_capital_usd: Decimal,
+) -> HashMap<Address, Decimal> {
+    let mut target_values = compute_target_values(target_weights, investable_capital_usd);
+
+    for market in snapshot.market_values_usd.keys() {
+        target_values.entry(*market).or_insert(Decimal::ZERO);
+    }
+
+    target_values
+}
+
 pub fn compute_market_deltas(
     snapshot: &PortfolioSnapshot,
     target_values: &HashMap<Address, Decimal>,

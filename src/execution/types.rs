@@ -134,10 +134,10 @@ pub struct PlannerConfig {
     pub gas_reserve_pct: Decimal,
     /// Additional slippage cushion applied when buying native ETH to replenish the gas reserve.
     pub gas_topup_slippage_buffer_pct: Decimal,
-    /// Minimum USDC balance to retain in the dYdX main account when moving funds into the subaccount.
+    /// Minimum USDC balance to retain in the dYdX main account when moving funds out of it.
     pub dydx_main_account_min_usdc: Decimal,
-    /// Maximum percentage of the dYdX main-account USDC balance that can be moved into the subaccount.
-    pub dydx_main_account_max_subaccount_transfer_pct: Decimal,
+    /// Maximum percentage of the dYdX main-account USDC balance that can be moved out of it in one transfer.
+    pub dydx_main_account_max_transfer_pct: Decimal,
 }
 
 impl Default for PlannerConfig {
@@ -155,7 +155,7 @@ impl Default for PlannerConfig {
             gas_reserve_pct: Decimal::new(1, 2),
             gas_topup_slippage_buffer_pct: Decimal::new(2, 2),
             dydx_main_account_min_usdc: Decimal::new(1, 0),
-            dydx_main_account_max_subaccount_transfer_pct: Decimal::new(98, 2),
+            dydx_main_account_max_transfer_pct: Decimal::new(98, 2),
         }
     }
 }

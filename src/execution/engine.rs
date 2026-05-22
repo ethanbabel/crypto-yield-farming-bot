@@ -36,7 +36,8 @@ use crate::strategy::types::PortfolioData;
 use crate::wallet::{TokenInfo, WalletManager};
 
 use super::planner::{
-    compute_market_deltas, compute_target_values, compute_target_weights, plan_shift_actions,
+    compute_market_deltas, compute_target_values_with_current_markets, compute_target_weights,
+    plan_shift_actions,
 };
 use super::types::{
     ExecutionTargets, PlannerConfig, PortfolioSnapshot, ReserveState, TradeAction, TradeStatus,
@@ -207,8 +208,11 @@ impl ExecutionEngine {
                 );
             }
 
-            let target_values =
-                compute_target_values(&target_weights, reserve_state.investable_capital);
+            let target_values = compute_target_values_with_current_markets(
+                &snapshot,
+                &target_weights,
+                reserve_state.investable_capital,
+            );
             debug!(
                 strategy_run_id,
                 target_values = ?self.summarize_market_values(&target_values),

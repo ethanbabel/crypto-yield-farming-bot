@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use chrono::Utc;
 use dotenvy::dotenv;
@@ -33,11 +32,6 @@ const DEFAULT_RUN_TIMEOUT_SECS: u64 = 1200; // 20 minutes
 const DEFAULT_STABLE_ONLY_TICK_SECS: u64 = 180;
 const INIT_RETRY_BASE_SECS: u64 = 5;
 const INIT_RETRY_MAX_SECS: u64 = 120;
-
-fn format_elapsed(start: Instant) -> String {
-    let elapsed = start.elapsed();
-    format!("{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis())
-}
 
 #[instrument(name = "executor_main")]
 #[tokio::main]
@@ -356,7 +350,6 @@ async fn execute_strategy_run_cycle(
     strategy_run: StrategyRunModel,
     last_progress: Arc<AtomicU64>,
 ) -> eyre::Result<()> {
-    let cycle_start = Instant::now();
     last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
 
     let mut wallet_manager = WalletManager::new(&cfg)?;
@@ -401,19 +394,8 @@ async fn execute_strategy_run_cycle(
                 "Failed to record best-effort failure snapshot"
             );
         }
-        error!(
-            strategy_run_id = strategy_run.id,
-            elapsed = %format_elapsed(cycle_start),
-            error = ?e,
-            "Execution cycle failed"
-        );
         return Err(e);
     }
-    info!(
-        strategy_run_id = strategy_run.id,
-        elapsed = %format_elapsed(cycle_start),
-        "Execution cycle completed"
-    );
 
     last_progress.store(Utc::now().timestamp() as u64, Ordering::Relaxed);
 

@@ -20,6 +20,7 @@ use dydx::{
     },
 };
 use dydx_proto::dydxprotocol::subaccounts::Subaccount as SubaccountInfo;
+use dydx_proto::cosmos_sdk_proto::cosmos::bank::v1beta1::QuerySpendableBalanceByDenomRequest;
 use ethers::prelude::*;
 use ethers::types::{
     Bytes, TransactionReceipt, TransactionRequest, TxHash, transaction::eip2718::TypedTransaction,
@@ -959,7 +960,16 @@ impl DydxClient {
         );
 
         let dydx_usdc_balance_initial = self.get_dydx_usdc_balance().await?;
+        let dydx_spendable_usdc_balance_initial = self.get_dydx_spendable_usdc_balance().await?;
         let dydx_subaccount_summary_initial = self.get_subaccount_summary().await?;
+
+        if amount > dydx_spendable_usdc_balance_initial {
+            return Err(eyre::eyre!(
+                "Insufficient spendable dYdX USDC balance for deposit to subaccount: have {}, need {}",
+                dydx_spendable_usdc_balance_initial,
+                amount
+            ));
+        }
 
         let tx_hash = self
             .node_client
@@ -978,6 +988,7 @@ impl DydxClient {
             tx_hash = ?tx_hash,
             amount = ?amount,
             dydx_usdc_balance_initial = ?dydx_usdc_balance_initial,
+            dydx_spendable_usdc_balance_initial = ?dydx_spendable_usdc_balance_initial,
             dydx_subaccount_usdc_balance_initial = ?dydx_subaccount_summary_initial.usdc_balance,
             dydx_subaccount_equity_initial = ?dydx_subaccount_summary_initial.equity,
             dydx_subaccount_free_collateral_initial = ?dydx_subaccount_summary_initial.free_collateral,
@@ -1293,15 +1304,20 @@ impl DydxClient {
         // Get USDC balances
         let initial_arbitrum_usdc_balance = self.get_arbitrum_usdc_balance().await?;
         let initial_dydx_usdc_balance = self.get_dydx_usdc_balance().await?;
+        let initial_dydx_spendable_usdc_balance = self.get_dydx_spendable_usdc_balance().await?;
         let initial_arbitrum_native_balance = self.wallet_manager.get_native_balance().await?;
 
         // Sanity check request
-        let log_string =
-            self.get_withdrawal_log_string(initial_dydx_usdc_balance, amount_in, amount_out)?;
+        let log_string = self.get_withdrawal_log_string(
+            initial_dydx_spendable_usdc_balance,
+            amount_in,
+            amount_out,
+        )?;
 
         info!(
             initial_arbitrum_usdc_balance = ?initial_arbitrum_usdc_balance,
             initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
+            initial_dydx_spendable_usdc_balance = ?initial_dydx_spendable_usdc_balance,
             "{} Withdrawal Initiated",
             log_string
         );
@@ -1320,15 +1336,16 @@ impl DydxClient {
             .await?;
 
         // Validate requested transfer amount and estimated fees against balances
-        if amount > initial_dydx_usdc_balance {
+        if amount > initial_dydx_spendable_usdc_balance {
             return Err(eyre::eyre!(
-                "Insufficient dYdX USDC balance for withdrawal: have {}, need {}",
-                initial_dydx_usdc_balance,
+                "Insufficient spendable dYdX USDC balance for withdrawal: have {}, need {}",
+                initial_dydx_spendable_usdc_balance,
                 amount
             ));
         } else {
             info!(
                 initial_dydx_usdc_balance = ?initial_dydx_usdc_balance,
+                initial_dydx_spendable_usdc_balance = ?initial_dydx_spendable_usdc_balance,
                 withdrawal_amount_including_fees = ?amount,
                 expected_time_to_complete_secs = ?estimated_time_secs,
                 "{} Withdrawal Validated",
@@ -1391,6 +1408,25 @@ impl DydxClient {
             .get_account_balance(&self.dydx_address.clone().into(), &Denom::Usdc)
             .await
             .map_err(|e| eyre::eyre!("Failed to fetch dYdX USDC balance: {}", e))?;
+        let balance_u256 = U256::from_dec_str(&balance.amount)?;
+        let balance_decimal = u256_to_decimal(balance_u256, USDC_DECIMALS)?;
+        Ok(balance_decimal)
+    }
+
+    pub async fn get_dydx_spendable_usdc_balance(&mut self) -> Result<Decimal> {
+        let req = QuerySpendableBalanceByDenomRequest {
+            address: self.dydx_address.clone(),
+            denom: Denom::Usdc.to_string(),
+        };
+        let balance = self
+            .node_client
+            .bank
+            .spendable_balance_by_denom(req)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to fetch spendable dYdX USDC balance: {}", e))?
+            .into_inner()
+            .balance
+            .ok_or_else(|| eyre::eyre!("Spendable balance query response does not contain balance"))?;
         let balance_u256 = U256::from_dec_str(&balance.amount)?;
         let balance_decimal = u256_to_decimal(balance_u256, USDC_DECIMALS)?;
         Ok(balance_decimal)

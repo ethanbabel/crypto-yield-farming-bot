@@ -130,14 +130,18 @@ pub struct PlannerConfig {
     pub dydx_free_collateral_buffer_pct: Decimal,
     /// Generic portfolio-level reserve haircut before deployment sizing.
     pub reserve_pct: Decimal,
-    /// Target native ETH gas reserve as a percentage of Arbitrum capital.
-    pub gas_reserve_pct: Decimal,
+    /// Minimum native ETH gas reserve as a percentage of Arbitrum capital before a top-up is triggered.
+    pub gas_reserve_min_pct: Decimal,
+    /// Target native ETH gas reserve as a percentage of Arbitrum capital when a top-up is triggered.
+    pub gas_reserve_target_pct: Decimal,
     /// Additional slippage cushion applied when buying native ETH to replenish the gas reserve.
     pub gas_topup_slippage_buffer_pct: Decimal,
     /// Minimum USDC balance to retain in the dYdX main account when moving funds out of it.
     pub dydx_main_account_min_usdc: Decimal,
     /// Maximum percentage of the dYdX main-account USDC balance that can be moved out of it in one transfer.
     pub dydx_main_account_max_transfer_pct: Decimal,
+    /// Extra buffer applied when moving dYdX main-account USDC into the subaccount so transfer fees do not leave a residual shortfall.
+    pub dydx_main_to_subaccount_shortfall_buffer_pct: Decimal,
 }
 
 impl Default for PlannerConfig {
@@ -152,10 +156,12 @@ impl Default for PlannerConfig {
             dydx_free_collateral_buffer_floor_usd: Decimal::new(10, 0),
             dydx_free_collateral_buffer_pct: Decimal::new(10, 2),
             reserve_pct: Decimal::new(5, 2),
-            gas_reserve_pct: Decimal::new(1, 2),
+            gas_reserve_min_pct: Decimal::new(1, 2),
+            gas_reserve_target_pct: Decimal::new(2, 2),
             gas_topup_slippage_buffer_pct: Decimal::new(2, 2),
             dydx_main_account_min_usdc: Decimal::new(1, 0),
             dydx_main_account_max_transfer_pct: Decimal::new(98, 2),
+            dydx_main_to_subaccount_shortfall_buffer_pct: Decimal::new(1, 2),
         }
     }
 }
@@ -169,6 +175,8 @@ pub struct ReserveState {
     pub required_free_collateral: Decimal,
     pub upper_equity: Decimal,
     pub upper_free_collateral: Decimal,
+    pub gas_reserve_min_usd: Decimal,
+    pub gas_reserve_min_eth: Decimal,
     pub gas_reserve_target_usd: Decimal,
     pub gas_reserve_target_eth: Decimal,
 }

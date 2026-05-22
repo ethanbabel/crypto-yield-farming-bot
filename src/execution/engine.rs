@@ -857,13 +857,9 @@ impl ExecutionEngine {
         let requested_amount = equity_shortfall
             .max(free_shortfall)
             .min(snapshot.dydx_main_usdc);
-        let retained_floor = self.planner_config.dydx_main_account_min_usdc.max(
-            snapshot.dydx_main_usdc
-                * (Decimal::ONE - self.planner_config.dydx_main_account_max_subaccount_transfer_pct),
-        );
-        let max_transferable =
-            (snapshot.dydx_main_usdc - retained_floor).max(Decimal::ZERO);
-        let amount = requested_amount.min(max_transferable);
+        let retained_floor = self.compute_dydx_main_account_retained_floor(snapshot.dydx_main_usdc);
+        let max_transferable = self.compute_dydx_main_account_max_transferable(snapshot.dydx_main_usdc);
+        let mut amount = requested_amount.min(max_transferable);
         debug!(
             dydx_main_usdc = %snapshot.dydx_main_usdc,
             dydx_subaccount_equity = %snapshot.dydx_subaccount_equity,
@@ -881,6 +877,15 @@ impl ExecutionEngine {
         }
 
         let mut client = self.dydx_client.lock().await;
+        let spendable_main_usdc = client.get_dydx_spendable_usdc_balance().await?;
+        amount = amount.min(spendable_main_usdc);
+        if amount <= Decimal::ZERO {
+            info!(
+                spendable_main_usdc = %spendable_main_usdc,
+                "Skipped moving dYdX main-account USDC into the subaccount because none of the retained amount is currently spendable"
+            );
+            return Ok(false);
+        }
         client.deposit_to_subaccount(amount).await?;
         Ok(true)
     }
@@ -1011,7 +1016,7 @@ impl ExecutionEngine {
                     .max(Decimal::ZERO),
             );
         let subaccount_withdraw_amount = remaining_excess.min(subaccount_withdrawable);
-        let total_withdraw_amount = main_withdraw_amount + subaccount_withdraw_amount;
+        let desired_total_withdraw_amount = main_withdraw_amount + subaccount_withdraw_amount;
 
         debug!(
             total_dydx_capital = %total_dydx_capital,
@@ -1019,24 +1024,52 @@ impl ExecutionEngine {
             total_excess = %total_excess,
             main_withdraw_amount = %main_withdraw_amount,
             subaccount_withdraw_amount = %subaccount_withdraw_amount,
-            total_withdraw_amount = %total_withdraw_amount,
+            total_withdraw_amount = %desired_total_withdraw_amount,
             "Evaluated dYdX to Arbitrum withdrawal need"
         );
 
-        if total_withdraw_amount <= self.planner_config.min_value_usd {
+        if desired_total_withdraw_amount <= self.planner_config.min_value_usd {
             return Ok(());
         }
 
-        let tracking = {
+        let (tracking, final_withdraw_amount) = {
             let mut client = self.dydx_client.lock().await;
             if subaccount_withdraw_amount > Decimal::ZERO {
                 client
                     .withdraw_from_subaccount(subaccount_withdraw_amount)
                     .await?;
             }
-            client
-                .dydx_withdrawal(Some(total_withdraw_amount), None, false, None)
-                .await?
+            let live_main_usdc = client.get_dydx_usdc_balance().await?;
+            let live_spendable_main_usdc = client.get_dydx_spendable_usdc_balance().await?;
+            let retained_floor = self.compute_dydx_main_account_retained_floor(live_main_usdc);
+            let max_transferable = self.compute_dydx_main_account_max_transferable(live_main_usdc);
+            let total_withdraw_amount = desired_total_withdraw_amount
+                .min(max_transferable)
+                .min(live_spendable_main_usdc);
+            debug!(
+                desired_total_withdraw_amount = %desired_total_withdraw_amount,
+                live_main_usdc = %live_main_usdc,
+                live_spendable_main_usdc = %live_spendable_main_usdc,
+                retained_main_account_floor = %retained_floor,
+                max_transferable_from_main = %max_transferable,
+                clamped_total_withdraw_amount = %total_withdraw_amount,
+                "Clamped dYdX to Arbitrum withdrawal amount after reconciling the live dYdX main-account balance"
+            );
+            if total_withdraw_amount <= self.planner_config.min_value_usd {
+                info!(
+                    desired_total_withdraw_amount = %desired_total_withdraw_amount,
+                    live_main_usdc = %live_main_usdc,
+                    live_spendable_main_usdc = %live_spendable_main_usdc,
+                    "Skipped dYdX to Arbitrum withdrawal because the safely transferable main-account USDC fell below the minimum trade threshold after the subaccount sweep"
+                );
+                return Ok(());
+            }
+            (
+                client
+                    .dydx_withdrawal(Some(total_withdraw_amount), None, false, None)
+                    .await?,
+                total_withdraw_amount,
+            )
         };
 
         if let Some(tracking) = tracking {
@@ -1054,7 +1087,7 @@ impl ExecutionEngine {
             )
             .await?;
             info!(
-                amount_usd = %total_withdraw_amount,
+                amount_usd = %tracking.amount_usd,
                 tx_hash = %tracking.tx_hash,
                 chain_id = %tracking.chain_id,
                 expected_time_to_complete_secs = tracking.expected_time_to_complete_secs,
@@ -1062,12 +1095,24 @@ impl ExecutionEngine {
             );
         } else {
             warn!(
-                amount_usd = %total_withdraw_amount,
+                amount_usd = %final_withdraw_amount,
                 "dYdX withdrawal returned no tracking metadata"
             );
         }
 
         Ok(())
+    }
+
+    fn compute_dydx_main_account_retained_floor(&self, dydx_main_usdc: Decimal) -> Decimal {
+        self.planner_config.dydx_main_account_min_usdc.max(
+            dydx_main_usdc
+                * (Decimal::ONE - self.planner_config.dydx_main_account_max_transfer_pct),
+        )
+    }
+
+    fn compute_dydx_main_account_max_transferable(&self, dydx_main_usdc: Decimal) -> Decimal {
+        (dydx_main_usdc - self.compute_dydx_main_account_retained_floor(dydx_main_usdc))
+            .max(Decimal::ZERO)
     }
 
     async fn compute_effective_reserve_state(
